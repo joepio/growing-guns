@@ -619,9 +619,19 @@ func _apply_damage(amount: int, from_id: int) -> void:
 	if frozen or health <= 0:
 		return
 	health = max(0, health - amount)
+	if from_id != player_id:
+		_notify_damage_source(from_id)
 	if health <= 0:
 		died.emit(from_id)
 		_report_death.rpc_id(1, from_id)
+
+func _notify_damage_source(from_id: int) -> void:
+	var attacker := get_parent().get_node_or_null(str(from_id))
+	if not attacker:
+		return
+	var g := get_tree().current_scene
+	if g and g.has_method("show_damage_direction"):
+		g.show_damage_direction(attacker.global_position)
 
 @rpc("any_peer", "call_local", "reliable")
 func _report_death(killer_id: int) -> void:

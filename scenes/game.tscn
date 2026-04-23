@@ -3,6 +3,7 @@
 [ext_resource type="Script" uid="uid://r582d7dl3f3f" path="res://scripts/game.gd" id="1_game"]
 [ext_resource type="PackedScene" uid="uid://b0arena01" path="res://scenes/arena.tscn" id="2_arena"]
 [ext_resource type="Script" uid="uid://dwdfqr76hp64y" path="res://scripts/hit_marker.gd" id="3_hit"]
+[ext_resource type="Script" path="res://scripts/damage_indicator.gd" id="4_dmg"]
 
 [sub_resource type="StyleBoxFlat" id="Style_HP"]
 bg_color = Color(0, 0, 0, 0.55)
@@ -25,6 +26,15 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.7405052, 4.5380306, 16.3836
 [node name="Players" type="Node3D" parent="." unique_id=189683936]
 
 [node name="HUD" type="CanvasLayer" parent="." unique_id=1999100657]
+
+[node name="DamageIndicator" type="Control" parent="HUD"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("4_dmg")
 
 [node name="Crosshair" type="Label" parent="HUD" unique_id=1006712146]
 anchors_preset = 8
