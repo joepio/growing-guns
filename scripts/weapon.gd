@@ -24,47 +24,47 @@ const SPECIAL_INVISIBLE := "invisible"
 const SPECIAL_ZOOM := "zoom"
 
 # --- Multiplicative modifiers (cards multiply) ---
-var damage_mult: float = 1.0
-var fire_rate_mult: float = 1.0        # >1 = faster
-var reload_mult: float = 1.0           # >1 = faster
-var headshot_mult: float = 1.0         # stacks on top of BASE_HEADSHOT_MULT
+@export var damage_mult: float = 1.0
+@export var fire_rate_mult: float = 1.0        # >1 = faster
+@export var reload_mult: float = 1.0           # >1 = faster
+@export var headshot_mult: float = 1.0         # stacks on top of BASE_HEADSHOT_MULT
 
 # --- Additive modifiers ---
-var mag_size_bonus: int = 0
-var extra_projectiles: int = 0         # bullets per trigger beyond the first
-var pierce_count: int = 0              # extra players a ray can pass through
-var ricochet_count: int = 0            # wall bounces
+@export var mag_size_bonus: int = 0
+@export var extra_projectiles: int = 0         # bullets per trigger beyond the first
+@export var pierce_count: int = 0              # extra players a ray can pass through
+@export var ricochet_count: int = 0            # wall bounces
 
 # --- Behaviour knobs ---
-var spread: float = BASE_SPREAD        # radians; random yaw+pitch offset per shot
-var full_auto: bool = false            # whether holding LMB auto-fires
-var lifesteal: float = 0.0             # fraction of damage dealt returned as heal
-var explosive_radius: float = 0.0      # per-bullet splash radius (m)
-var explosive_damage: float = 0.0      # max damage at epicenter
-var move_speed_mult: float = 1.0       # scales walk/air movement
+@export var spread: float = BASE_SPREAD        # radians; random yaw+pitch offset per shot
+@export var full_auto: bool = false            # whether holding LMB auto-fires
+@export var lifesteal: float = 0.0             # fraction of damage dealt returned as heal
+@export var explosive_radius: float = 0.0      # per-bullet splash radius (m)
+@export var explosive_damage: float = 0.0      # max damage at epicenter
+@export var move_speed_mult: float = 1.0       # scales walk/air movement
 const BASE_KNOCKBACK := 3.0            # every shot gives a light nudge
-var knockback: float = BASE_KNOCKBACK   # impulse applied on bullet hit
-var special_cooldown_mult: float = 1.0 # <1 = special recharges faster
-var melee_damage_mult: float = 1.0     # scales melee damage
-var melee_scale: float = 1.0           # scales melee animation and range
-var homing: float = 0.0                # degrees-per-second steering toward closest forward target
+@export var knockback: float = BASE_KNOCKBACK   # impulse applied on bullet hit
+@export var special_cooldown_mult: float = 1.0 # <1 = special recharges faster
+@export var melee_damage_mult: float = 1.0     # scales melee damage
+@export var melee_scale: float = 1.0           # scales melee animation and range
+@export var homing: float = 0.0                # degrees-per-second steering toward closest forward target
 
 # --- Visuals ---
-var bullet_color: Color = BASE_BULLET_COLOR
-var bullet_speed_mult: float = 1.0       # scales projectile travel speed
-var bullet_scale: float = 1.0          # scales tracer brightness + muzzle flash
+@export var bullet_color: Color = BASE_BULLET_COLOR
+@export var bullet_speed_mult: float = 1.0       # scales projectile travel speed
+@export var bullet_scale: float = 1.0          # scales tracer brightness + muzzle flash
 
 # --- Player-body modifiers (cards can grow head/torso for tradeoff builds) ---
-var head_scale: float = 1.0            # visual + head hitbox
-var body_scale: float = 1.0            # visual + torso/legs hitbox
-var max_hp_bonus: int = 0              # flat HP added on top of Player.MAX_HEALTH
-var extra_jumps: int = 0               # additional air-jumps beyond the default double-jump
+@export var head_scale: float = 1.0            # visual + head hitbox
+@export var body_scale: float = 1.0            # visual + torso/legs hitbox
+@export var max_hp_bonus: int = 0              # flat HP added on top of Player.MAX_HEALTH
+@export var extra_jumps: int = 0               # additional air-jumps beyond the default double-jump
 
 # --- Special / RMB slot ---
-var special: String = SPECIAL_GRENADE
+@export var special: String = SPECIAL_GRENADE
 
 # --- Tracking ---
-var applied_cards: Array[String] = []
+@export var applied_cards: Array[String] = []
 
 # --- Derived getters --- (never read the raw fields in gameplay code)
 func get_damage() -> float:
