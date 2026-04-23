@@ -5,6 +5,7 @@ extends RefCounted
 #   id    : stable identifier (used by apply_card RPC)
 #   name  : display name
 #   desc  : one-line description
+#   rarity: common | rare
 #   color : tint used in the menu + lerped into bullet_color when applicable
 #   apply : Callable(Weapon) -> void. Mutates the weapon in place. Must be
 #           deterministic (no randomness) so every peer arrives at the same
@@ -21,6 +22,30 @@ static func all() -> Array:
 				w.damage_mult *= 1.5
 				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.2, 0.1), 0.35)
 				w.bullet_scale *= 1.1,
+		},
+		{
+			"id": "healthy",
+			"name": "HEALTHY",
+			"desc": "+35 max HP",
+			"color": Color(0.45, 1.0, 0.55),
+			"apply": func(w: Weapon) -> void:
+				w.max_hp_bonus += 35,
+		},
+		{
+			"id": "steady_hands",
+			"name": "STEADY HANDS",
+			"desc": "+35% accuracy",
+			"color": Color(0.65, 0.9, 1.0),
+			"apply": func(w: Weapon) -> void:
+				w.spread *= 0.65,
+		},
+		{
+			"id": "sneakers",
+			"name": "SNEAKERS",
+			"desc": "+15% movement speed",
+			"color": Color(0.65, 1.0, 0.85),
+			"apply": func(w: Weapon) -> void:
+				w.move_speed_mult *= 1.15,
 		},
 		{
 			"id": "rapid_fire",
@@ -64,8 +89,8 @@ static func all() -> Array:
 				w.ricochet_count += 2,
 		},
 		{
-			"id": "multishot",
-			"name": "MULTI-SHOT",
+			"id": "shotgun",
+			"name": "SHOTGUN",
 			"desc": "+2 extra projectiles, adds spread",
 			"color": Color(1.0, 0.5, 0.75),
 			"apply": func(w: Weapon) -> void:
@@ -134,6 +159,7 @@ static func all() -> Array:
 			"id": "uzi",
 			"name": "UZI",
 			"desc": "Full-auto, ×3 fire rate, +20 ammo, more spread",
+			"rarity": "rare",
 			"color": Color(1.0, 0.65, 0.25),
 			"apply": func(w: Weapon) -> void:
 				w.full_auto = true
@@ -141,6 +167,16 @@ static func all() -> Array:
 				w.mag_size_bonus += 20
 				w.spread += deg_to_rad(2.5)
 				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.55, 0.15), 0.5),
+		},
+		{
+			"id": "knockback",
+			"name": "KNOCKBACK",
+			"desc": "Bullet hits shove enemies away",
+			"color": Color(0.8, 0.95, 1.0),
+			"apply": func(w: Weapon) -> void:
+				w.knockback += 10.0
+				w.bullet_scale *= 1.08
+				w.bullet_color = w.bullet_color.lerp(Color(0.72, 0.95, 1.0), 0.4),
 		},
 		{
 			"id": "big_head",
@@ -186,6 +222,14 @@ static func all() -> Array:
 			"apply": func(w: Weapon) -> void:
 				w.special = Weapon.SPECIAL_SHIELD,
 		},
+		{
+			"id": "invisible",
+			"name": "INVISIBLE",
+			"desc": "RMB: vanish for 4s (10s cooldown)",
+			"color": Color(0.55, 1.0, 0.9),
+			"apply": func(w: Weapon) -> void:
+				w.special = Weapon.SPECIAL_INVISIBLE,
+		},
 	]
 
 static func by_id(id: String) -> Dictionary:
@@ -196,9 +240,26 @@ static func by_id(id: String) -> Dictionary:
 
 # Pick `count` unique random card ids. If count > pool size, returns the full pool.
 static func random_ids(count: int) -> Array[String]:
-	var pool := all()
-	pool.shuffle()
 	var out: Array[String] = []
-	for i in min(count, pool.size()):
-		out.append(pool[i].id)
+	var pool: Array = all()
+	while out.size() < count and not pool.is_empty():
+		var total_weight := 0.0
+		for card in pool:
+			total_weight += _rarity_weight(str(card.get("rarity", "common")))
+		var pick := randf() * total_weight
+		var chosen_index := 0
+		for i in pool.size():
+			pick -= _rarity_weight(str(pool[i].get("rarity", "common")))
+			if pick <= 0.0:
+				chosen_index = i
+				break
+		out.append(str(pool[chosen_index].id))
+		pool.remove_at(chosen_index)
 	return out
+
+static func _rarity_weight(rarity: String) -> float:
+	match rarity:
+		"rare":
+			return 0.35
+		_:
+			return 1.0

@@ -7,8 +7,11 @@ const MAX_DAMAGE := 100
 const MIN_DAMAGE := 10
 const SHAKE_RADIUS := 22.0
 const SHAKE_STRENGTH := 0.16     # max camera-shake amplitude (m) at the epicenter
+const VFX_TRANSIENT_LIGHTS := false
+const MINE_TRIGGER_RADIUS := 1.25
 
 @export var shooter_id: int = 1
+@export var is_mine: bool = false
 
 var _age := 0.0
 var _exploded := false
@@ -24,7 +27,11 @@ func _physics_process(delta: float) -> void:
 	if _exploded:
 		return
 	_age += delta
-	if _age >= FUSE and multiplayer.is_server():
+	if not multiplayer.is_server():
+		return
+	if is_mine:
+		_maybe_trigger_mine()
+	elif _age >= FUSE:
 		_explode()
 
 func _on_body_entered(_body: Node) -> void:
@@ -33,7 +40,21 @@ func _on_body_entered(_body: Node) -> void:
 		return
 	if _age < ARM_DELAY:
 		return
+	if is_mine:
+		return
 	_explode()
+
+func _maybe_trigger_mine() -> void:
+	if _age < ARM_DELAY:
+		return
+	for p in get_tree().get_nodes_in_group("players"):
+		if not is_instance_valid(p):
+			continue
+		if p.get("ghost_mode") == true:
+			continue
+		if global_position.distance_to(p.global_position) <= MINE_TRIGGER_RADIUS:
+			_explode()
+			return
 
 # Called when a bullet hits the grenade (server-side raycast on the rifle).
 func detonate() -> void:
@@ -113,16 +134,16 @@ func _do_vfx() -> void:
 	wtw.tween_property(wave_mat, "emission_energy_multiplier", 0.0, 0.32)
 	wtw.chain().tween_callback(wave.queue_free)
 
-	# --- Brief intense point light
-	var light := OmniLight3D.new()
-	light.light_color = Color(1.0, 0.65, 0.25)
-	light.light_energy = 22.0
-	light.omni_range = 16.0
-	light.position = pos
-	scene.add_child(light)
-	var ltw := light.create_tween()
-	ltw.tween_property(light, "light_energy", 0.0, 0.25).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
-	ltw.tween_callback(light.queue_free)
+	if VFX_TRANSIENT_LIGHTS:
+		var light := OmniLight3D.new()
+		light.light_color = Color(1.0, 0.65, 0.25)
+		light.light_energy = 22.0
+		light.omni_range = 16.0
+		light.position = pos
+		scene.add_child(light)
+		var ltw := light.create_tween()
+		ltw.tween_property(light, "light_energy", 0.0, 0.25).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+		ltw.tween_callback(light.queue_free)
 
 	# --- Local camera shake with distance falloff
 	var lp: Node = scene.get("local_player")

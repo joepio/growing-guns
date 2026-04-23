@@ -37,7 +37,7 @@ func join_game(address: String, player_name: String) -> bool:
 	return true
 
 func auto_connect(player_name: String) -> bool:
-	for arg in OS.get_cmdline_user_args():
+	for arg in _launch_args():
 		if arg == "--host":
 			print("[auto_connect] forced HOST via --host")
 			return host_game(player_name)
@@ -75,6 +75,16 @@ func auto_connect(player_name: String) -> bool:
 	multiplayer.server_disconnected.connect(_on_server_disconnected)
 	print("[auto_connect] trying to JOIN as '%s'" % player_name)
 	return true
+
+func _launch_args() -> Array[String]:
+	var out: Array[String] = []
+	for arg in OS.get_cmdline_user_args():
+		out.append(arg)
+	for arg in OS.get_cmdline_args():
+		if arg not in out:
+			out.append(arg)
+	print("[auto_connect] launch args: %s" % str(out))
+	return out
 
 func leave_game() -> void:
 	if multiplayer.multiplayer_peer:

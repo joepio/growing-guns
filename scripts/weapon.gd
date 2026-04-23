@@ -20,6 +20,7 @@ const BASE_BULLET_COLOR := Color(1.0, 0.9, 0.3)
 const SPECIAL_GRENADE := "grenade"
 const SPECIAL_TELEPORT := "teleport"
 const SPECIAL_SHIELD := "shield"
+const SPECIAL_INVISIBLE := "invisible"
 
 # --- Multiplicative modifiers (cards multiply) ---
 var damage_mult: float = 1.0
@@ -39,6 +40,8 @@ var full_auto: bool = false            # whether holding LMB auto-fires
 var lifesteal: float = 0.0             # fraction of damage dealt returned as heal
 var explosive_radius: float = 0.0      # per-bullet splash radius (m)
 var explosive_damage: float = 0.0      # max damage at epicenter
+var move_speed_mult: float = 1.0       # scales walk/air movement
+var knockback: float = 0.0             # impulse applied on bullet hit
 
 # --- Visuals ---
 var bullet_color: Color = BASE_BULLET_COLOR
@@ -89,6 +92,8 @@ func reset() -> void:
 	lifesteal = 0.0
 	explosive_radius = 0.0
 	explosive_damage = 0.0
+	move_speed_mult = 1.0
+	knockback = 0.0
 	bullet_color = BASE_BULLET_COLOR
 	bullet_scale = 1.0
 	head_scale = 1.0
