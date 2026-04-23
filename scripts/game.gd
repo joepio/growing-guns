@@ -12,8 +12,7 @@ const SPAWN_CAPSULE_HEIGHT := 1.8
 @onready var players_root: Node3D = $Players
 @onready var health_label: Label = $HUD/HealthPanel/HealthLabel
 @onready var scoreboard: Label = $HUD/Scoreboard
-@onready var hitmarker: Label = $HUD/Hitmarker
-@onready var hitmarker_timer: Timer = $HUD/HitmarkerTimer
+@onready var hitmarker: Control = $HUD/Hitmarker
 @onready var rifle_bar: ProgressBar = $HUD/AbilityBar/Rifle/Bar
 @onready var grenade_bar: ProgressBar = $HUD/AbilityBar/Grenade/Bar
 @onready var melee_bar: ProgressBar = $HUD/AbilityBar/Melee/Bar
@@ -33,12 +32,18 @@ var pending_picker_id: int = 0
 var local_player: Node3D
 
 func _ready() -> void:
-	if not multiplayer.multiplayer_peer:
-		get_tree().change_scene_to_file("res://scenes/main.tscn")
-		return
+	# No menu — bootstrap networking on the fly. First launcher hosts, later
+	# launches fall back to client. Note: Godot 4 installs a default
+	# OfflineMultiplayerPeer so a plain null check isn't enough — we have to
+	# check for a real ENet peer.
+	if multiplayer.multiplayer_peer == null \
+			or multiplayer.multiplayer_peer is OfflineMultiplayerPeer:
+		var auto_name := "Player_%d" % (randi() % 1000)
+		if not NetworkManager.auto_connect(auto_name):
+			push_error("Could not start or join a game.")
+			return
 
 	NetworkManager.player_list_changed.connect(_update_scoreboard)
-	hitmarker_timer.timeout.connect(func() -> void: hitmarker.visible = false)
 	banner_timer.timeout.connect(func() -> void: round_banner.visible = false)
 	pick_overlay.visible = false
 	round_banner.visible = false
@@ -71,6 +76,11 @@ func _process(_delta: float) -> void:
 	if local_player and is_instance_valid(local_player):
 		health_label.text = "HP  %d" % local_player.health
 		_refresh_cooldowns()
+
+func _unhandled_input(event: InputEvent) -> void:
+	if event.is_action_pressed("ui_cancel"):
+		NetworkManager.leave_game()
+		get_tree().change_scene_to_file("res://scenes/main.tscn")
 
 func _refresh_cooldowns() -> void:
 	var w: Weapon = local_player.weapon
@@ -152,8 +162,9 @@ func _do_spawn(id: int, pname: String, pos: Vector3) -> void:
 	p.name = str(id)
 	p.player_id = id
 	p.player_name = pname
-	p.global_position = pos
 	players_root.add_child(p, true)
+	# global_position must be set after add_child — it requires being in-tree.
+	p.global_position = pos
 	if id == multiplayer.get_unique_id():
 		local_player = p
 
@@ -201,6 +212,10 @@ func report_kill(killer_id: int, victim_id: int) -> void:
 			if int(pid) != victim_id:
 				killer_id = int(pid)
 				break
+	if killer_id != 0 and killer_id != victim_id:
+		var killer_node := players_root.get_node_or_null(str(killer_id))
+		if killer_node:
+			killer_node.confirm_kill.rpc_id(killer_id)
 	_end_round(killer_id, victim_id)
 
 func _end_round(winner_id: int, loser_id: int) -> void:
@@ -342,11 +357,8 @@ func _broadcast_scores(scores: Dictionary) -> void:
 	round_wins = scores
 	_update_scoreboard()
 
-func show_hitmarker(is_headshot: bool) -> void:
-	hitmarker.text = "X!" if is_headshot else "X"
-	hitmarker.modulate = Color(1, 0.3, 0.3) if not is_headshot else Color(1, 0.9, 0.2)
-	hitmarker.visible = true
-	hitmarker_timer.start()
+func show_hitmarker(kind: String) -> void:
+	hitmarker.flash(kind)
 
 func _update_scoreboard() -> void:
 	var lines: Array[String] = ["— ROUNDS —"]

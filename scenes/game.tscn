@@ -1,7 +1,8 @@
-[gd_scene load_steps=4 format=3 uid="uid://b0game001"]
+[gd_scene format=3 uid="uid://b0game001"]
 
-[ext_resource type="Script" path="res://scripts/game.gd" id="1_game"]
+[ext_resource type="Script" uid="uid://r582d7dl3f3f" path="res://scripts/game.gd" id="1_game"]
 [ext_resource type="PackedScene" uid="uid://b0arena01" path="res://scenes/arena.tscn" id="2_arena"]
+[ext_resource type="Script" uid="uid://dwdfqr76hp64y" path="res://scripts/hit_marker.gd" id="3_hit"]
 
 [sub_resource type="StyleBoxFlat" id="Style_HP"]
 bg_color = Color(0, 0, 0, 0.55)
@@ -15,16 +16,17 @@ corner_radius_top_right = 4
 corner_radius_bottom_right = 4
 corner_radius_bottom_left = 4
 
-[node name="Game" type="Node3D"]
+[node name="Game" type="Node3D" unique_id=1481980306]
 script = ExtResource("1_game")
 
-[node name="Arena" parent="." instance=ExtResource("2_arena")]
+[node name="Arena" parent="." unique_id=501553898 instance=ExtResource("2_arena")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.7405052, 4.5380306, 16.383654)
 
-[node name="Players" type="Node3D" parent="."]
+[node name="Players" type="Node3D" parent="." unique_id=189683936]
 
-[node name="HUD" type="CanvasLayer" parent="."]
+[node name="HUD" type="CanvasLayer" parent="." unique_id=1999100657]
 
-[node name="Crosshair" type="Label" parent="HUD"]
+[node name="Crosshair" type="Label" parent="HUD" unique_id=1006712146]
 anchors_preset = 8
 anchor_left = 0.5
 anchor_top = 0.5
@@ -36,40 +38,31 @@ offset_right = 10.0
 offset_bottom = 14.0
 grow_horizontal = 2
 grow_vertical = 2
-text = "+"
-horizontal_alignment = 1
-vertical_alignment = 1
 theme_override_colors/font_color = Color(1, 0.9, 0.2, 1)
 theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
 theme_override_constants/outline_size = 4
 theme_override_font_sizes/font_size = 28
+text = "+"
+horizontal_alignment = 1
+vertical_alignment = 1
 
-[node name="Hitmarker" type="Label" parent="HUD"]
-visible = false
+[node name="Hitmarker" type="Control" parent="HUD" unique_id=1794456534]
+layout_mode = 3
 anchors_preset = 8
 anchor_left = 0.5
 anchor_top = 0.5
 anchor_right = 0.5
 anchor_bottom = 0.5
-offset_left = -16.0
-offset_top = -18.0
-offset_right = 16.0
-offset_bottom = 18.0
+offset_left = -24.0
+offset_top = -24.0
+offset_right = 24.0
+offset_bottom = 24.0
 grow_horizontal = 2
 grow_vertical = 2
-text = "X"
-horizontal_alignment = 1
-vertical_alignment = 1
-theme_override_colors/font_color = Color(1, 0.3, 0.3, 1)
-theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
-theme_override_constants/outline_size = 4
-theme_override_font_sizes/font_size = 32
+mouse_filter = 2
+script = ExtResource("3_hit")
 
-[node name="HitmarkerTimer" type="Timer" parent="HUD"]
-wait_time = 0.15
-one_shot = true
-
-[node name="HealthPanel" type="PanelContainer" parent="HUD"]
+[node name="HealthPanel" type="PanelContainer" parent="HUD" unique_id=399602524]
 anchors_preset = 2
 anchor_top = 1.0
 anchor_bottom = 1.0
@@ -80,15 +73,15 @@ offset_bottom = -20.0
 grow_vertical = 0
 theme_override_styles/panel = SubResource("Style_HP")
 
-[node name="HealthLabel" type="Label" parent="HUD/HealthPanel"]
+[node name="HealthLabel" type="Label" parent="HUD/HealthPanel" unique_id=443572165]
 layout_mode = 2
+theme_override_colors/font_color = Color(1, 0.3, 0.3, 1)
+theme_override_font_sizes/font_size = 28
 text = "HP  100"
 horizontal_alignment = 1
 vertical_alignment = 1
-theme_override_colors/font_color = Color(1, 0.3, 0.3, 1)
-theme_override_font_sizes/font_size = 28
 
-[node name="AbilityBar" type="HBoxContainer" parent="HUD"]
+[node name="AbilityBar" type="HBoxContainer" parent="HUD" unique_id=1241397031]
 anchors_preset = 7
 anchor_left = 0.5
 anchor_top = 1.0
@@ -102,91 +95,87 @@ grow_horizontal = 2
 grow_vertical = 0
 theme_override_constants/separation = 14
 
-[node name="Rifle" type="VBoxContainer" parent="HUD/AbilityBar"]
+[node name="Rifle" type="VBoxContainer" parent="HUD/AbilityBar" unique_id=252804237]
 layout_mode = 2
 size_flags_horizontal = 3
 
-[node name="Label" type="Label" parent="HUD/AbilityBar/Rifle"]
+[node name="Label" type="Label" parent="HUD/AbilityBar/Rifle" unique_id=2026853645]
 layout_mode = 2
-text = "LMB  RIFLE"
-horizontal_alignment = 1
 theme_override_colors/font_color = Color(1, 0.9, 0.5, 1)
 theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
 theme_override_constants/outline_size = 3
 theme_override_font_sizes/font_size = 14
+text = "LMB  RIFLE"
+horizontal_alignment = 1
 
-[node name="Bar" type="ProgressBar" parent="HUD/AbilityBar/Rifle"]
+[node name="Bar" type="ProgressBar" parent="HUD/AbilityBar/Rifle" unique_id=397724183]
 custom_minimum_size = Vector2(0, 10)
 layout_mode = 2
 max_value = 1.0
-step = 0.01
 value = 1.0
 show_percentage = false
 
-[node name="Grenade" type="VBoxContainer" parent="HUD/AbilityBar"]
+[node name="Grenade" type="VBoxContainer" parent="HUD/AbilityBar" unique_id=171367986]
 layout_mode = 2
 size_flags_horizontal = 3
 
-[node name="Label" type="Label" parent="HUD/AbilityBar/Grenade"]
+[node name="Label" type="Label" parent="HUD/AbilityBar/Grenade" unique_id=1675772372]
 layout_mode = 2
-text = "RMB  GRENADE"
-horizontal_alignment = 1
 theme_override_colors/font_color = Color(0.7, 1, 0.4, 1)
 theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
 theme_override_constants/outline_size = 3
 theme_override_font_sizes/font_size = 14
+text = "RMB  GRENADE"
+horizontal_alignment = 1
 
-[node name="Bar" type="ProgressBar" parent="HUD/AbilityBar/Grenade"]
+[node name="Bar" type="ProgressBar" parent="HUD/AbilityBar/Grenade" unique_id=667287130]
 custom_minimum_size = Vector2(0, 10)
 layout_mode = 2
 max_value = 1.0
-step = 0.01
 value = 1.0
 show_percentage = false
 
-[node name="Dash" type="VBoxContainer" parent="HUD/AbilityBar"]
+[node name="Dash" type="VBoxContainer" parent="HUD/AbilityBar" unique_id=1004431068]
 layout_mode = 2
 size_flags_horizontal = 3
 
-[node name="Label" type="Label" parent="HUD/AbilityBar/Dash"]
+[node name="Label" type="Label" parent="HUD/AbilityBar/Dash" unique_id=1781548228]
 layout_mode = 2
-text = "SHIFT  DASH"
-horizontal_alignment = 1
 theme_override_colors/font_color = Color(0.6, 0.9, 1, 1)
 theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
 theme_override_constants/outline_size = 3
 theme_override_font_sizes/font_size = 14
+text = "SHIFT  DASH"
+horizontal_alignment = 1
 
-[node name="Bar" type="ProgressBar" parent="HUD/AbilityBar/Dash"]
+[node name="Bar" type="ProgressBar" parent="HUD/AbilityBar/Dash" unique_id=345116693]
 custom_minimum_size = Vector2(0, 10)
 layout_mode = 2
 max_value = 1.0
-step = 0.01
 value = 1.0
 show_percentage = false
 
-[node name="Melee" type="VBoxContainer" parent="HUD/AbilityBar"]
+[node name="Melee" type="VBoxContainer" parent="HUD/AbilityBar" unique_id=2017014334]
 layout_mode = 2
 size_flags_horizontal = 3
 
-[node name="Label" type="Label" parent="HUD/AbilityBar/Melee"]
+[node name="Label" type="Label" parent="HUD/AbilityBar/Melee" unique_id=1840252079]
 layout_mode = 2
-text = "F  MELEE"
-horizontal_alignment = 1
 theme_override_colors/font_color = Color(1, 0.4, 0.9, 1)
 theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
 theme_override_constants/outline_size = 3
 theme_override_font_sizes/font_size = 14
+text = "F  MELEE"
+horizontal_alignment = 1
 
-[node name="Bar" type="ProgressBar" parent="HUD/AbilityBar/Melee"]
+[node name="Bar" type="ProgressBar" parent="HUD/AbilityBar/Melee" unique_id=344427990]
 custom_minimum_size = Vector2(0, 10)
 layout_mode = 2
 max_value = 1.0
-step = 0.01
 value = 1.0
 show_percentage = false
 
-[node name="Scoreboard" type="Label" parent="HUD"]
+[node name="Scoreboard" type="Label" parent="HUD" unique_id=1951592118]
 anchors_preset = 1
 anchor_left = 1.0
 anchor_right = 1.0
@@ -195,13 +184,13 @@ offset_top = 20.0
 offset_right = -20.0
 offset_bottom = 220.0
 grow_horizontal = 0
-text = "— ROUNDS —"
 theme_override_colors/font_color = Color(1, 0.8, 0.4, 1)
 theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
 theme_override_constants/outline_size = 4
 theme_override_font_sizes/font_size = 18
+text = "— ROUNDS —"
 
-[node name="RoundBanner" type="Label" parent="HUD"]
+[node name="RoundBanner" type="Label" parent="HUD" unique_id=933426930]
 visible = false
 anchors_preset = 5
 anchor_left = 0.5
@@ -211,65 +200,64 @@ offset_top = 70.0
 offset_right = 320.0
 offset_bottom = 160.0
 grow_horizontal = 2
-text = "ROUND 1"
-horizontal_alignment = 1
-vertical_alignment = 1
 theme_override_colors/font_color = Color(1, 0.95, 0.5, 1)
 theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
 theme_override_constants/outline_size = 6
 theme_override_font_sizes/font_size = 56
+text = "ROUND 1"
+horizontal_alignment = 1
+vertical_alignment = 1
 
-[node name="BannerTimer" type="Timer" parent="HUD"]
+[node name="BannerTimer" type="Timer" parent="HUD" unique_id=1505668053]
 wait_time = 1.4
 one_shot = true
 
-[node name="CardPickOverlay" type="Control" parent="HUD"]
+[node name="CardPickOverlay" type="Control" parent="HUD" unique_id=1217190643]
 visible = false
+layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
-mouse_filter = 0
 
-[node name="Background" type="ColorRect" parent="HUD/CardPickOverlay"]
-anchors_preset = 15
+[node name="Background" type="ColorRect" parent="HUD/CardPickOverlay" unique_id=1728261560]
+layout_mode = 0
 anchor_right = 1.0
 anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
 color = Color(0, 0, 0, 0.72)
 
-[node name="Center" type="CenterContainer" parent="HUD/CardPickOverlay"]
-anchors_preset = 15
+[node name="Center" type="CenterContainer" parent="HUD/CardPickOverlay" unique_id=899942701]
+layout_mode = 0
 anchor_right = 1.0
 anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
-mouse_filter = 1
 
-[node name="VBox" type="VBoxContainer" parent="HUD/CardPickOverlay/Center"]
+[node name="VBox" type="VBoxContainer" parent="HUD/CardPickOverlay/Center" unique_id=174582077]
 layout_mode = 2
 theme_override_constants/separation = 18
 alignment = 1
 
-[node name="Title" type="Label" parent="HUD/CardPickOverlay/Center/VBox"]
+[node name="Title" type="Label" parent="HUD/CardPickOverlay/Center/VBox" unique_id=962014373]
 layout_mode = 2
-text = "PICK A CARD"
-horizontal_alignment = 1
 theme_override_colors/font_color = Color(1, 0.95, 0.5, 1)
 theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
 theme_override_constants/outline_size = 5
 theme_override_font_sizes/font_size = 46
-
-[node name="Subtitle" type="Label" parent="HUD/CardPickOverlay/Center/VBox"]
-layout_mode = 2
-text = "you lost the round — choose an upgrade"
+text = "PICK A CARD"
 horizontal_alignment = 1
+
+[node name="Subtitle" type="Label" parent="HUD/CardPickOverlay/Center/VBox" unique_id=1669747753]
+layout_mode = 2
 theme_override_colors/font_color = Color(0.8, 0.8, 0.9, 1)
 theme_override_font_sizes/font_size = 18
+text = "you lost the round — choose an upgrade"
+horizontal_alignment = 1
 
-[node name="CardRow" type="HBoxContainer" parent="HUD/CardPickOverlay/Center/VBox"]
+[node name="CardRow" type="HBoxContainer" parent="HUD/CardPickOverlay/Center/VBox" unique_id=472032689]
 layout_mode = 2
 theme_override_constants/separation = 22
 alignment = 1

@@ -1,14 +1,6 @@
-[gd_scene load_steps=12 format=3 uid="uid://b0player01"]
+[gd_scene load_steps=11 format=3 uid="uid://b0player01"]
 
 [ext_resource type="Script" path="res://scripts/player.gd" id="1_player"]
-
-[sub_resource type="SceneReplicationConfig" id="Repl_1"]
-properties/0/path = NodePath(".:position")
-properties/0/spawn = true
-properties/0/replication_mode = 1
-properties/1/path = NodePath(".:rotation")
-properties/1/spawn = true
-properties/1/replication_mode = 1
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_1"]
 radius = 0.4
@@ -82,6 +74,3 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.4, 0)
 billboard = 1
 text = "Player"
 label_settings = SubResource("LabelSettings_1")
-
-[node name="Synchronizer" type="MultiplayerSynchronizer" parent="."]
-replication_config = SubResource("Repl_1")

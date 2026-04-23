@@ -52,6 +52,10 @@ var mag: int = Weapon.BASE_MAG_SIZE
 var reloading: bool = false
 var frozen: bool = false
 
+# Last broadcast state — avoids flooding the wire when idle.
+var _last_sync_pos: Vector3 = Vector3.INF
+var _last_sync_yaw: float = INF
+
 # Camera / gun feel — updated by fire, decayed per frame.
 var look_pitch := 0.0
 var recoil_pitch := 0.0
@@ -106,8 +110,6 @@ func _unhandled_input(event: InputEvent) -> void:
 		rotate_y(-event.relative.x * MOUSE_SENS)
 		look_pitch = clamp(look_pitch - event.relative.y * MOUSE_SENS, -1.4, 1.4)
 		camera.rotation.x = look_pitch + recoil_pitch
-	if event.is_action_pressed("ui_cancel"):
-		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	if event is InputEventMouseButton and event.pressed and Input.mouse_mode == Input.MOUSE_MODE_VISIBLE:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
@@ -200,6 +202,7 @@ func _physics_process(delta: float) -> void:
 			velocity.z = move_toward(velocity.z, 0.0, FRICTION * delta * WALK_SPEED * 0.1)
 
 	move_and_slide()
+	_maybe_broadcast_state()
 
 	# --- Combat actions ---
 	# Full-auto rifle: hold LMB, fires every fire-interval until mag is empty.
@@ -427,7 +430,19 @@ func _hit_confirm(is_headshot: bool) -> void:
 		return
 	var g := get_tree().current_scene
 	if g and g.has_method("show_hitmarker"):
-		g.show_hitmarker(is_headshot)
+		g.show_hitmarker("head" if is_headshot else "body")
+
+@rpc("any_peer", "call_local", "reliable")
+func confirm_kill() -> void:
+	# Server tells the killer's client to pop a kill-colored hitmarker.
+	var sender := multiplayer.get_remote_sender_id()
+	if sender != 1 and sender != 0:
+		return
+	if not is_multiplayer_authority():
+		return
+	var g := get_tree().current_scene
+	if g and g.has_method("show_hitmarker"):
+		g.show_hitmarker("kill")
 
 func _spawn_tracer(from: Vector3, to: Vector3, color: Color = Color(1.0, 0.9, 0.3), scale_f: float = 1.0) -> void:
 	var mesh_inst := MeshInstance3D.new()
@@ -639,6 +654,28 @@ func server_respawn(pos: Vector3) -> void:
 	dash_charges = MAX_DASH_CHARGES
 	dash_timer = 0.0
 	jumps_left = 2
+	# Push the teleport to every peer immediately so they don't see us at the
+	# old position for a frame while waiting for the next _physics_process.
+	_broadcast_state.rpc(global_position, rotation.y)
+	_last_sync_pos = global_position
+	_last_sync_yaw = rotation.y
+
+# -------------------- STATE REPLICATION --------------------
+
+func _maybe_broadcast_state() -> void:
+	if global_position.distance_squared_to(_last_sync_pos) < 0.0001 \
+			and absf(rotation.y - _last_sync_yaw) < 0.001:
+		return
+	_last_sync_pos = global_position
+	_last_sync_yaw = rotation.y
+	_broadcast_state.rpc(global_position, rotation.y)
+
+@rpc("authority", "unreliable_ordered")
+func _broadcast_state(pos: Vector3, yaw: float) -> void:
+	if is_multiplayer_authority():
+		return
+	global_position = pos
+	rotation.y = yaw
 
 @rpc("any_peer", "call_local", "reliable")
 func set_frozen(f: bool) -> void:
