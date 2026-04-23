@@ -84,13 +84,18 @@ static func all() -> Array:
 		{
 			"id": "explosive",
 			"name": "EXPLOSIVE ROUNDS",
-			"desc": "Bullets explode (2m / +20 dmg)",
+			"desc": "Bullets explode. Stacks: bigger radius + more damage",
 			"color": Color(1.0, 0.4, 0.1),
 			"apply": func(w: Weapon) -> void:
-				w.explosive_radius = max(w.explosive_radius, 2.0)
-				w.explosive_damage += 20.0
+				# First stack establishes a sizable baseline; each extra one
+				# grows the blast. Three stacks → ~9m one-shot zone.
+				if w.explosive_radius <= 0.0:
+					w.explosive_radius = 4.0
+				else:
+					w.explosive_radius += 2.5
+				w.explosive_damage += 35.0
 				w.bullet_scale *= 1.35
-				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.45, 0.08), 0.5),
+				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.45, 0.08), 0.45),
 		},
 		{
 			"id": "precision",

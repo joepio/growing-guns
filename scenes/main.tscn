@@ -1,6 +1,6 @@
-[gd_scene load_steps=3 format=3 uid="uid://b0main001"]
+[gd_scene format=3 uid="uid://b0main001"]
 
-[ext_resource type="Script" path="res://scripts/main_menu.gd" id="1_menu"]
+[ext_resource type="Script" uid="uid://bvlcwa5kvdtp2" path="res://scripts/main_menu.gd" id="1_menu"]
 
 [sub_resource type="StyleBoxFlat" id="Style_1"]
 bg_color = Color(0.08, 0.02, 0.08, 0.9)
@@ -14,7 +14,7 @@ corner_radius_top_right = 8
 corner_radius_bottom_right = 8
 corner_radius_bottom_left = 8
 
-[node name="MainMenu" type="Control"]
+[node name="MainMenu" type="Control" unique_id=1063304552]
 layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0
@@ -23,14 +23,16 @@ grow_horizontal = 2
 grow_vertical = 2
 script = ExtResource("1_menu")
 
-[node name="Background" type="ColorRect" parent="."]
+[node name="Background" type="ColorRect" parent="." unique_id=1488341276]
 layout_mode = 1
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
 color = Color(0.05, 0.01, 0.08, 1)
 
-[node name="Title" type="Label" parent="."]
+[node name="Title" type="Label" parent="." unique_id=479278422]
 layout_mode = 1
 anchors_preset = 5
 anchor_left = 0.5
@@ -48,7 +50,7 @@ text = "JUMPSHOOT"
 horizontal_alignment = 1
 vertical_alignment = 1
 
-[node name="Subtitle" type="Label" parent="."]
+[node name="Subtitle" type="Label" parent="." unique_id=779172597]
 layout_mode = 1
 anchors_preset = 5
 anchor_left = 0.5
@@ -63,7 +65,7 @@ theme_override_font_sizes/font_size = 16
 text = "WASD · SPACE · SHIFT dash · LMB rifle · RMB grenade · F melee"
 horizontal_alignment = 1
 
-[node name="Panel" type="PanelContainer" parent="."]
+[node name="Panel" type="PanelContainer" parent="." unique_id=897502891]
 layout_mode = 1
 anchors_preset = 8
 anchor_left = 0.5
@@ -78,43 +80,43 @@ grow_horizontal = 2
 grow_vertical = 2
 theme_override_styles/panel = SubResource("Style_1")
 
-[node name="VBox" type="VBoxContainer" parent="Panel"]
+[node name="VBox" type="VBoxContainer" parent="Panel" unique_id=1258404963]
 layout_mode = 2
 theme_override_constants/separation = 12
 
-[node name="NameLabel" type="Label" parent="Panel/VBox"]
+[node name="NameLabel" type="Label" parent="Panel/VBox" unique_id=358431496]
 layout_mode = 2
-text = "Name:"
 theme_override_colors/font_color = Color(1, 0.9, 0.9, 1)
+text = "Name:"
 
-[node name="NameInput" type="LineEdit" parent="Panel/VBox"]
+[node name="NameInput" type="LineEdit" parent="Panel/VBox" unique_id=351040208]
 layout_mode = 2
 placeholder_text = "Your name"
 
-[node name="AddrLabel" type="Label" parent="Panel/VBox"]
+[node name="AddrLabel" type="Label" parent="Panel/VBox" unique_id=487624180]
 layout_mode = 2
-text = "Server address (for Join):"
 theme_override_colors/font_color = Color(1, 0.9, 0.9, 1)
+text = "Server address (for Join):"
 
-[node name="AddrInput" type="LineEdit" parent="Panel/VBox"]
+[node name="AddrInput" type="LineEdit" parent="Panel/VBox" unique_id=1154198742]
 layout_mode = 2
 text = "127.0.0.1"
 
-[node name="HBox" type="HBoxContainer" parent="Panel/VBox"]
+[node name="HBox" type="HBoxContainer" parent="Panel/VBox" unique_id=63854551]
 layout_mode = 2
 theme_override_constants/separation = 12
 
-[node name="HostButton" type="Button" parent="Panel/VBox/HBox"]
+[node name="HostButton" type="Button" parent="Panel/VBox/HBox" unique_id=1950222270]
 layout_mode = 2
 size_flags_horizontal = 3
 text = "HOST"
 
-[node name="JoinButton" type="Button" parent="Panel/VBox/HBox"]
+[node name="JoinButton" type="Button" parent="Panel/VBox/HBox" unique_id=501678384]
 layout_mode = 2
 size_flags_horizontal = 3
 text = "JOIN"
 
-[node name="Status" type="Label" parent="Panel/VBox"]
+[node name="Status" type="Label" parent="Panel/VBox" unique_id=1727785162]
 layout_mode = 2
-horizontal_alignment = 1
 theme_override_colors/font_color = Color(1, 0.6, 0.3, 1)
+horizontal_alignment = 1

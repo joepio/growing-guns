@@ -6,12 +6,11 @@ extends Resource
 # means: add a field here, add a getter if derived, add a card that sets it.
 
 # --- Immutable base (the "unmodified" gun) ---
-# Default is a semi-auto mid-damage rifle with a small non-zero spread — you
-# can't just hold LMB, and long-range snap-headshots aren't free. Cards push
-# the weapon toward sniper (precision) or uzi (spray) archetypes.
+# Default is a semi-auto mid-damage pistol with a small non-zero spread — you
+# can't just hold LMB, and long-range snap-headshots aren't free. 
 const BASE_DAMAGE := 22.0
 const BASE_FIRE_INTERVAL := 0.22
-const BASE_MAG_SIZE := 10
+const BASE_MAG_SIZE := 5
 const BASE_RELOAD_TIME := 1.2
 const BASE_HEADSHOT_MULT := 2.0
 const BASE_SPREAD := 0.008                # radians — ~0.46°, noticeable at range
