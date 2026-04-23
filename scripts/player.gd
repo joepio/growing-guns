@@ -31,6 +31,17 @@ const MELEE_RELOAD := 0.5
 const MELEE_RANGE := 2.2
 const MELEE_DAMAGE := 50
 const MELEE_BACKSTAB := 9999  # guaranteed kill
+const VFX_TRANSIENT_LIGHTS := false
+const VFX_MAX_IMPACT_DUST := 2
+const VFX_MAX_BLOOD_DROPS := 3
+const REMOTE_INTERP_SPEED := 24.0
+const REMOTE_SNAP_DISTANCE := 8.0
+const MINE_RELOAD := 2.5
+const MINE_FORWARD_OFFSET := 0.9
+const GHOST_ALPHA := 0.06
+const INVISIBLE_RELOAD := 10.0
+const INVISIBLE_DURATION := 4.0
+const INVISIBLE_ALPHA := 0.06
 
 @onready var camera: Camera3D = $Camera
 @onready var muzzle: Node3D = $Camera/Muzzle
@@ -43,6 +54,7 @@ const MELEE_BACKSTAB := 9999  # guaranteed kill
 @onready var gun_body: MeshInstance3D = $Camera/Muzzle/GunMesh
 var gun_barrel: MeshInstance3D = null
 var gun_magazine: MeshInstance3D = null
+var _ragdoll_pieces: Array[Node] = []
 
 var jumps_left := 2
 var dash_timer := 0.0
@@ -57,10 +69,15 @@ var weapon: Weapon = Weapon.new()
 var mag: int = Weapon.BASE_MAG_SIZE
 var reloading: bool = false
 var frozen: bool = false
+var ghost_mode: bool = false
+var invisible_mode: bool = false
 
 # Last broadcast state — avoids flooding the wire when idle.
 var _last_sync_pos: Vector3 = Vector3.INF
 var _last_sync_yaw: float = INF
+var _remote_target_pos: Vector3 = Vector3.INF
+var _remote_target_yaw: float = 0.0
+var _remote_has_target := false
 
 # Camera / gun feel — updated by fire, decayed per frame.
 var look_pitch := 0.0
@@ -71,6 +88,7 @@ var melee_offset := Vector3.ZERO
 var _muzzle_rest_pos: Vector3
 var _camera_rest_pos: Vector3
 var _melee_tween: Tween = null
+var _body_materials: Dictionary = {}
 
 @export var player_id: int = 1
 @export var player_name: String = "Player"
@@ -107,13 +125,16 @@ func _ready() -> void:
 	name_label.text = player_name
 	_muzzle_rest_pos = muzzle.position
 	_camera_rest_pos = camera.position
+	_capture_body_materials()
 	_setup_gun_visuals()
 	_update_gun_visuals()
 	_update_body_scale()
 	_refresh_authority_view()
 	add_to_group("players")
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
+	if not is_multiplayer_authority():
+		_interpolate_remote_state(delta)
 	if is_bot:
 		return
 	# Re-assert camera state every frame until authority is established.
@@ -121,6 +142,17 @@ func _process(_delta: float) -> void:
 	# is false during _ready (peer id == 0 before connected_to_server fires).
 	if is_multiplayer_authority() and not camera.current:
 		_refresh_authority_view()
+
+func _interpolate_remote_state(delta: float) -> void:
+	if not _remote_has_target:
+		return
+	var alpha := clampf(delta * REMOTE_INTERP_SPEED, 0.0, 1.0)
+	global_position = global_position.lerp(_remote_target_pos, alpha)
+	rotation.y = lerp_angle(rotation.y, _remote_target_yaw, alpha)
+	if global_position.distance_squared_to(_remote_target_pos) < 0.0004:
+		global_position = _remote_target_pos
+	if absf(angle_difference(rotation.y, _remote_target_yaw)) < 0.001:
+		rotation.y = _remote_target_yaw
 
 func _refresh_authority_view() -> void:
 	if is_bot:
@@ -139,6 +171,50 @@ func _refresh_authority_view() -> void:
 		camera.clear_current()
 		body_model.visible = true
 		name_label.visible = true
+	_apply_ghost_visuals()
+
+func _capture_body_materials() -> void:
+	_body_materials.clear()
+	for mesh in _body_meshes():
+		_body_materials[mesh] = mesh.material_override
+
+func _body_meshes() -> Array[MeshInstance3D]:
+	var out: Array[MeshInstance3D] = []
+	if body_model == null:
+		return out
+	for child in body_model.get_children():
+		if child is MeshInstance3D:
+			out.append(child)
+	return out
+
+func _apply_ghost_visuals() -> void:
+	if body_model == null:
+		return
+	body_model.visible = (is_bot or not is_multiplayer_authority())
+	name_label.visible = not ghost_mode and not invisible_mode and (is_bot or not is_multiplayer_authority())
+	muzzle.visible = not ghost_mode
+	for mesh in _body_meshes():
+		if ghost_mode:
+			var mat := StandardMaterial3D.new()
+			mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
+			mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			mat.albedo_color = Color(0.45, 0.95, 1.0, GHOST_ALPHA)
+			mat.emission_enabled = true
+			mat.emission = Color(0.25, 0.75, 0.9)
+			mat.emission_energy_multiplier = 0.05
+			mat.metallic = 0.0
+			mat.roughness = 1.0
+			mesh.material_override = mat
+		elif invisible_mode:
+			var stealth := StandardMaterial3D.new()
+			stealth.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			stealth.albedo_color = Color(0.75, 1.0, 0.9, INVISIBLE_ALPHA)
+			stealth.emission_enabled = true
+			stealth.emission = Color(0.45, 1.0, 0.8)
+			stealth.emission_energy_multiplier = 0.08
+			mesh.material_override = stealth
+		else:
+			mesh.material_override = _body_materials.get(mesh, mesh.material_override)
 
 func _unhandled_input(event: InputEvent) -> void:
 	if not is_multiplayer_authority():
@@ -239,19 +315,26 @@ func _physics_process(delta: float) -> void:
 
 	# --- Movement ---
 	var wish_dir := _input_vector()
+	var current_walk_speed := WALK_SPEED * weapon.move_speed_mult
+	var target_vel := wish_dir * current_walk_speed
+	var accel := GROUND_ACCEL if is_on_floor() else AIR_ACCEL
+
 	if dash_timer > 0.0:
 		dash_timer -= delta
-		velocity.x = dash_dir.x * DASH_SPEED
-		velocity.z = dash_dir.z * DASH_SPEED
 		velocity.y = max(velocity.y, 0.0)
-	else:
-		var accel := GROUND_ACCEL if is_on_floor() else AIR_ACCEL
-		var target_vel := wish_dir * WALK_SPEED
-		velocity.x = move_toward(velocity.x, target_vel.x, accel * delta)
-		velocity.z = move_toward(velocity.z, target_vel.z, accel * delta)
-		if is_on_floor() and wish_dir == Vector3.ZERO:
-			velocity.x = move_toward(velocity.x, 0.0, FRICTION * delta * WALK_SPEED * 0.1)
-			velocity.z = move_toward(velocity.z, 0.0, FRICTION * delta * WALK_SPEED * 0.1)
+		# Taper dash speed at the end (last 50% of duration).
+		var dash_factor := clampf(dash_timer / (DASH_TIME * 0.5), 0.0, 1.0)
+		var dash_vel := dash_dir * DASH_SPEED
+		# Blend between dash velocity and walk velocity.
+		target_vel = target_vel.lerp(dash_vel, dash_factor)
+		accel = 2000.0 # Snap to dash trajectory
+
+	velocity.x = move_toward(velocity.x, target_vel.x, accel * delta)
+	velocity.z = move_toward(velocity.z, target_vel.z, accel * delta)
+
+	if is_on_floor() and wish_dir == Vector3.ZERO and dash_timer <= 0.0:
+		velocity.x = move_toward(velocity.x, 0.0, FRICTION * delta * current_walk_speed * 0.1)
+		velocity.z = move_toward(velocity.z, 0.0, FRICTION * delta * current_walk_speed * 0.1)
 
 	move_and_slide()
 	_maybe_broadcast_state()
@@ -261,6 +344,11 @@ func _physics_process(delta: float) -> void:
 	# so holding LMB fires continuously until the mag runs out.
 	var fire_input := Input.is_action_pressed("shoot") if weapon.full_auto \
 		else Input.is_action_just_pressed("shoot")
+	if ghost_mode:
+		fire_input = false
+		if Input.is_action_just_pressed("shoot") and grenade_cooldown <= 0.0:
+			grenade_cooldown = MINE_RELOAD
+			_place_mine()
 	if fire_input and not reloading and mag > 0 and rifle_cooldown <= 0.0:
 		rifle_cooldown = weapon.get_fire_interval()
 		mag -= 1
@@ -268,15 +356,19 @@ func _physics_process(delta: float) -> void:
 		if mag <= 0:
 			reloading = true
 			rifle_cooldown = weapon.get_reload_time()
-	if Input.is_action_just_pressed("shoot_grenade") and grenade_cooldown <= 0.0:
+	if Input.is_action_just_pressed("shoot_grenade") and grenade_cooldown <= 0.0 and not ghost_mode:
 		_use_special()
-	if Input.is_action_just_pressed("melee") and melee_cooldown <= 0.0:
+	if Input.is_action_just_pressed("melee") and melee_cooldown <= 0.0 and not ghost_mode:
 		melee_cooldown = MELEE_RELOAD
 		_swing_melee()
 
 	# --- Fell off the map ---
 	if global_position.y < -30.0:
-		_apply_damage(MAX_HEALTH, player_id)
+		if ghost_mode:
+			global_position = Vector3(0, 5, 0)
+			_last_sync_pos = Vector3.INF
+		else:
+			_apply_damage(MAX_HEALTH, player_id)
 
 func _input_vector() -> Vector3:
 	var input := Input.get_vector("move_left", "move_right", "move_forward", "move_back")
@@ -339,17 +431,31 @@ func _rifle_fired(origin: Vector3, dir: Vector3, shooter_id: int) -> void:
 		if result.is_empty():
 			break
 		var dmg_ratio: float = clampf(w.get_damage() / Weapon.BASE_DAMAGE, 0.5, 5.0)
-		_spawn_impact(result.position, w.bullet_color, w.bullet_scale, dmg_ratio)
 		var collider: Node = result.collider
 		var hit_pos: Vector3 = result.position
 
 		var hit_player := _player_from_hit_collider(collider)
+		if hit_player and hit_player.get("ghost_mode") == true:
+			if hit_player.has_method("get_hitbox_rids"):
+				excluded_rids.append_array(hit_player.get_hitbox_rids())
+			else:
+				excluded_rids.append(hit_player.get_rid())
+			cur_origin = hit_pos + cur_dir * 0.05
+			continue
+		# Players bleed; walls/grenades kick up dust.
+		if hit_player:
+			_spawn_blood(hit_pos, cur_dir, dmg_ratio)
+		else:
+			_spawn_impact(hit_pos, w.bullet_color, w.bullet_scale, dmg_ratio)
 		if hit_player:
 			var vid: int = hit_player.player_id
 			if is_server and vid != shooter_id:
 				var is_head := _is_head_hit(collider)
 				var dmg: int = int(w.get_damage() * (w.get_headshot_mult() if is_head else 1.0))
 				hit_player.take_damage.rpc_id(hit_player.get_multiplayer_authority(), dmg, shooter_id)
+				if w.knockback > 0.0:
+					var knock_dir := (cur_dir + Vector3.UP * 0.18).normalized()
+					hit_player.apply_knockback.rpc_id(hit_player.get_multiplayer_authority(), knock_dir * w.knockback)
 				if shooter_node:
 					_hit_confirm.rpc_id(shooter_node.get_multiplayer_authority(), is_head, dmg)
 				if w.lifesteal > 0.0 and shooter_node:
@@ -488,17 +594,18 @@ func _spawn_bullet_blast(pos: Vector3, radius: float, color: Color) -> void:
 	tw.tween_property(mat, "emission_energy_multiplier", 0.0, expand_time + 0.05)
 	tw.chain().tween_callback(wave.queue_free)
 
-	# 3) Point light — scales with blast.
-	var light := OmniLight3D.new()
-	light.light_color = color
-	light.light_energy = clampf(6.0 + radius * 1.2, 6.0, 22.0)
-	light.omni_range = radius * 2.5
-	light.position = pos
-	scene.add_child(light)
-	var ltw := light.create_tween()
-	ltw.tween_property(light, "light_energy", 0.0, clampf(0.12 + radius * 0.01, 0.12, 0.28))\
-		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
-	ltw.tween_callback(light.queue_free)
+	# 3) Point light — costly in multiplayer, so keep it behind the cheap-VFX flag.
+	if VFX_TRANSIENT_LIGHTS:
+		var light := OmniLight3D.new()
+		light.light_color = color
+		light.light_energy = clampf(6.0 + radius * 1.2, 6.0, 22.0)
+		light.omni_range = radius * 2.5
+		light.position = pos
+		scene.add_child(light)
+		var ltw := light.create_tween()
+		ltw.tween_property(light, "light_energy", 0.0, clampf(0.12 + radius * 0.01, 0.12, 0.28))\
+			.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+		ltw.tween_callback(light.queue_free)
 
 	# 4) Big blasts play the full explosion SFX; smaller impacts stay visual.
 	if radius >= 3.5:
@@ -525,21 +632,21 @@ func _spawn_muzzle_flash(color: Color = Color(1.0, 0.88, 0.45), scale_f: float =
 	flash.rotation = Vector3(0.0, 0.0, randf_range(0.0, TAU))
 	muzzle.add_child(flash)
 
-	var light := OmniLight3D.new()
-	light.light_color = color
-	light.light_energy = 4.0 * scale_f
-	light.omni_range = 7.0 * scale_f
-	light.position = Vector3(0.0, 0.0, -0.35)
-	muzzle.add_child(light)
-
 	var tw := flash.create_tween().set_parallel(true)
 	tw.tween_property(flash, "scale", Vector3(1.9, 1.9, 1.9), 0.06)\
 		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
 	tw.tween_property(mat, "albedo_color", Color(1, 1, 1, 0.0), 0.08)
 	tw.tween_property(mat, "emission_energy_multiplier", 0.0, 0.08)
-	tw.tween_property(light, "light_energy", 0.0, 0.07)
+	if VFX_TRANSIENT_LIGHTS:
+		var light := OmniLight3D.new()
+		light.light_color = color
+		light.light_energy = 4.0 * scale_f
+		light.omni_range = 7.0 * scale_f
+		light.position = Vector3(0.0, 0.0, -0.35)
+		muzzle.add_child(light)
+		tw.tween_property(light, "light_energy", 0.0, 0.07)
+		tw.chain().tween_callback(light.queue_free)
 	tw.chain().tween_callback(flash.queue_free)
-	tw.chain().tween_callback(light.queue_free)
 
 @rpc("any_peer", "call_local", "reliable")
 func _hit_confirm(is_headshot: bool, dmg: int = 0) -> void:
@@ -575,20 +682,22 @@ func _spawn_impact(pos: Vector3, color: Color = Color(1.0, 0.9, 0.3), scale_f: f
 	var sz: float = scale_f * sqrt(dmg_ratio)
 	var spark_boost: float = lerpf(1.0, 2.5, clampf((dmg_ratio - 1.0) / 4.0, 0.0, 1.0))
 
-	# Brief colored point light — the hit "spark".
-	var light := OmniLight3D.new()
-	light.light_color = color
-	light.light_energy = 3.5 * scale_f * spark_boost
-	light.omni_range = 2.2 * sz
-	light.position = pos
-	scene.add_child(light)
-	var ltw := light.create_tween()
-	ltw.tween_property(light, "light_energy", 0.0, 0.12) \
-		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
-	ltw.tween_callback(light.queue_free)
+	# Brief colored point lights look good, but they are expensive when every
+	# peer renders every hit. Keep them optional for LAN playtests.
+	if VFX_TRANSIENT_LIGHTS:
+		var light := OmniLight3D.new()
+		light.light_color = color
+		light.light_energy = 3.5 * scale_f * spark_boost
+		light.omni_range = 2.2 * sz
+		light.position = pos
+		scene.add_child(light)
+		var ltw := light.create_tween()
+		ltw.tween_property(light, "light_energy", 0.0, 0.12) \
+			.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+		ltw.tween_callback(light.queue_free)
 
 	# Heat flash: a very brief, almost-white burst for high-damage hits.
-	if dmg_ratio > 1.8:
+	if VFX_TRANSIENT_LIGHTS and dmg_ratio > 1.8:
 		var heat := OmniLight3D.new()
 		heat.light_color = Color(1.0, 0.88, 0.65)
 		heat.light_energy = 6.0 + 3.0 * dmg_ratio
@@ -601,7 +710,7 @@ func _spawn_impact(pos: Vector3, color: Color = Color(1.0, 0.9, 0.3), scale_f: f
 		htw.tween_callback(heat.queue_free)
 
 	# A handful of dust particles scattering outward and falling.
-	var dust_count: int = int(round(5.0 * sqrt(dmg_ratio)))
+	var dust_count: int = min(VFX_MAX_IMPACT_DUST, int(round(5.0 * sqrt(dmg_ratio))))
 	for i in dust_count:
 		var dust := MeshInstance3D.new()
 		var m := SphereMesh.new()
@@ -629,6 +738,133 @@ func _spawn_impact(pos: Vector3, color: Color = Color(1.0, 0.9, 0.3), scale_f: f
 		tw.tween_property(mat, "albedo_color", Color(0.72, 0.66, 0.55, 0.0), 0.4)
 		tw.chain().tween_callback(dust.queue_free)
 
+func _spawn_blood(pos: Vector3, dir: Vector3, dmg_ratio: float) -> void:
+	# Dark-red cloud with a short red-lit core. Spatter biases in the bullet's
+	# travel direction (through the body) plus a random scatter cone.
+	var scene := get_tree().current_scene
+	var sz: float = sqrt(dmg_ratio)
+	var count: int = min(VFX_MAX_BLOOD_DROPS, int(round(8.0 * sz)))
+
+	if VFX_TRANSIENT_LIGHTS:
+		var light := OmniLight3D.new()
+		light.light_color = Color(0.8, 0.05, 0.05)
+		light.light_energy = 2.5 * sz
+		light.omni_range = 1.3 * sz
+		light.position = pos
+		scene.add_child(light)
+		var lt := light.create_tween()
+		lt.tween_property(light, "light_energy", 0.0, 0.18)\
+			.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+		lt.tween_callback(light.queue_free)
+
+	for i in count:
+		var drop := MeshInstance3D.new()
+		var m := SphereMesh.new()
+		m.radius = randf_range(0.04, 0.09) * sz
+		m.height = m.radius * 2.0
+		m.radial_segments = 5
+		m.rings = 3
+		drop.mesh = m
+		var mat := StandardMaterial3D.new()
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		var shade := randf_range(0.28, 0.55)
+		mat.albedo_color = Color(shade, 0.03, 0.02, 0.9)
+		drop.material_override = mat
+		drop.position = pos
+		scene.add_child(drop)
+		var scatter := Vector3(randf_range(-0.8, 0.8), randf_range(-0.3, 0.9),
+			randf_range(-0.8, 0.8)).normalized()
+		var spray: Vector3 = (dir * randf_range(0.3, 0.9) + scatter * randf_range(0.4, 1.1)).normalized()
+		var travel := randf_range(0.45, 1.2) * sz
+		var end := pos + spray * travel + Vector3.DOWN * 0.25 * sz
+		var dur := randf_range(0.35, 0.55)
+		var tw := drop.create_tween().set_parallel(true)
+		tw.tween_property(drop, "position", end, dur)\
+			.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+		tw.tween_property(mat, "albedo_color", Color(shade, 0.03, 0.02, 0.0), dur * 1.1)
+		tw.chain().tween_callback(drop.queue_free)
+
+# -------------------- RAGDOLL --------------------
+
+@rpc("any_peer", "call_local", "reliable")
+func _ragdoll(push_dir: Vector3) -> void:
+	# Hide the standing body and scatter a matching set of rigid chunks.
+	# Every peer simulates its own — cosmetic desync is fine.
+	body_model.visible = false
+	_spawn_ragdoll(push_dir)
+
+func _spawn_ragdoll(push_dir: Vector3) -> void:
+	# Match the scene's mesh/shape sizes. Each part becomes a free-flying
+	# RigidBody3D that collides with the world but ignores players/bullets.
+	var scene := get_tree().current_scene
+	var bs: float = weapon.body_scale
+	var hs: float = weapon.head_scale
+	var torso_size := Vector3(0.58, 0.82, 0.34) * bs
+	var leg_size := Vector3(0.18, 0.7, 0.22) * bs
+	var arm_size := Vector3(0.15, 0.72, 0.16) * bs
+	var head_r: float = 0.28 * hs
+	# Each part: the source MeshInstance3D + the physics shape for its chunk.
+	var parts: Array = [
+		{"node": head_mesh, "shape_type": "sphere", "radius": head_r, "mass": 2.0},
+		{"node": body_model.get_node("Torso"), "shape_type": "box", "size": torso_size, "mass": 5.0},
+		{"node": body_model.get_node("LeftLeg"), "shape_type": "box", "size": leg_size, "mass": 1.5},
+		{"node": body_model.get_node("RightLeg"), "shape_type": "box", "size": leg_size, "mass": 1.5},
+		{"node": body_model.get_node("LeftArm"), "shape_type": "box", "size": arm_size, "mass": 1.2},
+		{"node": body_model.get_node("RightArm"), "shape_type": "box", "size": arm_size, "mass": 1.2},
+	]
+	for p in parts:
+		var src: MeshInstance3D = p.node
+		if src == null:
+			continue
+		var rb := RigidBody3D.new()
+		rb.mass = float(p.mass)
+		rb.collision_layer = 0           # nothing detects the corpse
+		rb.collision_mask = 1            # collide with world only
+		rb.gravity_scale = 1.0
+		scene.add_child(rb)
+		rb.global_transform = src.global_transform
+		var mi := MeshInstance3D.new()
+		mi.mesh = src.mesh
+		mi.material_override = src.material_override
+		rb.add_child(mi)
+		var cs := CollisionShape3D.new()
+		if p.shape_type == "sphere":
+			var sh := SphereShape3D.new()
+			sh.radius = float(p.radius)
+			cs.shape = sh
+		else:
+			var sh := BoxShape3D.new()
+			sh.size = p.size
+			cs.shape = sh
+		rb.add_child(cs)
+		rb.linear_velocity = push_dir * randf_range(4.0, 8.0) \
+			+ Vector3.UP * randf_range(2.0, 5.0) \
+			+ Vector3(randf_range(-1.5, 1.5), 0, randf_range(-1.5, 1.5))
+		rb.angular_velocity = Vector3(
+			randf_range(-8.0, 8.0),
+			randf_range(-8.0, 8.0),
+			randf_range(-8.0, 8.0),
+		)
+		_ragdoll_pieces.append(rb)
+		# Safety net — in case respawn never fires (e.g. match ends), clean up.
+		get_tree().create_timer(14.0).timeout.connect(func() -> void:
+			if is_instance_valid(rb):
+				rb.queue_free())
+
+@rpc("any_peer", "call_local", "reliable")
+func clear_ragdoll() -> void:
+	var sender := multiplayer.get_remote_sender_id()
+	if sender != 1 and sender != 0:
+		return
+	for piece in _ragdoll_pieces:
+		if is_instance_valid(piece):
+			piece.queue_free()
+	_ragdoll_pieces.clear()
+	# Restore body visibility on every peer except the local authority
+	# (their body stays hidden in first-person, same as normal).
+	_apply_ghost_visuals()
+
 # -------------------- SPECIAL (RMB) --------------------
 
 const TELEPORT_RELOAD := 2.0
@@ -639,6 +875,7 @@ const SHIELD_DURATION := 2.0
 
 var shielded: bool = false
 var _shield_visual: Node3D = null
+var _invisible_timer: SceneTreeTimer = null
 
 func _use_special() -> void:
 	match weapon.special:
@@ -648,6 +885,9 @@ func _use_special() -> void:
 		Weapon.SPECIAL_SHIELD:
 			grenade_cooldown = SHIELD_RELOAD
 			_use_shield()
+		Weapon.SPECIAL_INVISIBLE:
+			grenade_cooldown = INVISIBLE_RELOAD
+			_use_invisible()
 		_:
 			grenade_cooldown = GRENADE_RELOAD
 			_fire_grenade()
@@ -704,21 +944,39 @@ func _spawn_teleport_vfx(pos: Vector3) -> void:
 	tw.tween_property(mat, "albedo_color", Color(0.7, 0.3, 1.0, 0.0), 0.35)
 	tw.tween_property(mat, "emission_energy_multiplier", 0.0, 0.35)
 	tw.chain().tween_callback(mesh.queue_free)
-	# Brief purple light
-	var light := OmniLight3D.new()
-	light.light_color = Color(0.7, 0.3, 1.0)
-	light.light_energy = 5.0
-	light.omni_range = 4.0
-	light.position = pos
-	scene.add_child(light)
-	var ltw := light.create_tween()
-	ltw.tween_property(light, "light_energy", 0.0, 0.3)
-	ltw.tween_callback(light.queue_free)
+	if VFX_TRANSIENT_LIGHTS:
+		var light := OmniLight3D.new()
+		light.light_color = Color(0.7, 0.3, 1.0)
+		light.light_energy = 5.0
+		light.omni_range = 4.0
+		light.position = pos
+		scene.add_child(light)
+		var ltw := light.create_tween()
+		ltw.tween_property(light, "light_energy", 0.0, 0.3)
+		ltw.tween_callback(light.queue_free)
 
 # -------------------- SHIELD --------------------
 
 func _use_shield() -> void:
 	_shield_on.rpc(SHIELD_DURATION)
+
+func _use_invisible() -> void:
+	_invisible_on.rpc(INVISIBLE_DURATION)
+
+@rpc("authority", "call_local", "reliable")
+func _invisible_on(duration: float) -> void:
+	invisible_mode = true
+	_apply_ghost_visuals()
+	if _invisible_timer:
+		# timer objects are fire-and-forget; just invalidate by replacing reference
+		_invisible_timer = null
+	_invisible_timer = get_tree().create_timer(duration)
+	_invisible_timer.timeout.connect(_end_invisible, CONNECT_ONE_SHOT)
+
+func _end_invisible() -> void:
+	invisible_mode = false
+	_invisible_timer = null
+	_apply_ghost_visuals()
 
 @rpc("authority", "call_local", "reliable")
 func _shield_on(duration: float) -> void:
@@ -792,6 +1050,62 @@ func _spawn_grenade(origin: Vector3, dir: Vector3, shooter: int, uname: String) 
 	if multiplayer.is_server():
 		g.linear_velocity = dir * GRENADE_LAUNCH_SPEED + Vector3(0.0, GRENADE_LAUNCH_LIFT, 0.0)
 
+func _place_mine() -> void:
+	var pos := _mine_position()
+	if multiplayer.is_server():
+		var uname := "M_%d_%d" % [player_id, Time.get_ticks_usec()]
+		_spawn_mine.rpc(pos, player_id, uname)
+	else:
+		_request_mine.rpc_id(1, pos)
+
+func _mine_position() -> Vector3:
+	var start := global_position + Vector3.UP * 0.6 - global_transform.basis.z * MINE_FORWARD_OFFSET
+	var end := start + Vector3.DOWN * 3.0
+	var q := PhysicsRayQueryParameters3D.create(start, end)
+	q.collision_mask = 1
+	var hit := get_world_3d().direct_space_state.intersect_ray(q)
+	if hit.is_empty():
+		return start + Vector3.DOWN * 0.6
+	return Vector3(hit.position.x, hit.position.y + 0.12, hit.position.z)
+
+@rpc("any_peer", "reliable")
+func _request_mine(pos: Vector3) -> void:
+	if not multiplayer.is_server():
+		return
+	var sender := multiplayer.get_remote_sender_id()
+	if sender == 0:
+		sender = player_id
+	var p := get_parent().get_node_or_null(str(sender))
+	if p == null or p.get("ghost_mode") != true:
+		return
+	var uname := "M_%d_%d" % [sender, Time.get_ticks_usec()]
+	_spawn_mine.rpc(pos, sender, uname)
+
+@rpc("any_peer", "call_local", "reliable")
+func _spawn_mine(pos: Vector3, shooter: int, uname: String) -> void:
+	var sender := multiplayer.get_remote_sender_id()
+	if sender != 0 and sender != 1:
+		return
+	var scene: PackedScene = load("res://scenes/grenade.tscn")
+	var g := scene.instantiate()
+	g.name = uname
+	g.shooter_id = shooter
+	g.is_mine = true
+	get_tree().current_scene.add_child(g)
+	g.global_position = pos
+	g.freeze = true
+	g.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
+	g.scale = Vector3(1.35, 0.35, 1.35)
+	var mesh := g.get_node_or_null("Mesh")
+	if mesh is MeshInstance3D:
+		var mat := StandardMaterial3D.new()
+		mat.albedo_color = Color(0.05, 0.35, 0.32, 0.78)
+		mat.emission_enabled = true
+		mat.emission = Color(0.0, 0.9, 0.75)
+		mat.emission_energy_multiplier = 0.45
+		(mesh as MeshInstance3D).material_override = mat
+	SFX.grenade_launch(pos)
+
 # -------------------- MELEE --------------------
 
 func _swing_melee() -> void:
@@ -826,6 +1140,8 @@ func _melee_swung(origin: Vector3, dir: Vector3, attacker_id: int) -> void:
 		return
 	var target := _player_from_hit_collider(result.collider)
 	if target == null:
+		return
+	if target.get("ghost_mode") == true:
 		return
 	if target.player_id == attacker_id:
 		return
@@ -884,11 +1200,13 @@ func _spawn_slice_trail(origin: Vector3, dir: Vector3) -> void:
 	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	trail.material_override = mat
 
-	var light := OmniLight3D.new()
-	light.light_color = Color(0.75, 0.9, 1.0)
-	light.light_energy = 3.5
-	light.omni_range = 5.0
-	trail.add_child(light)
+	var light: OmniLight3D = null
+	if VFX_TRANSIENT_LIGHTS:
+		light = OmniLight3D.new()
+		light.light_color = Color(0.75, 0.9, 1.0)
+		light.light_energy = 3.5
+		light.omni_range = 5.0
+		trail.add_child(light)
 
 	get_tree().current_scene.add_child(trail)
 	trail.global_position = origin + dir * 1.6
@@ -903,7 +1221,8 @@ func _spawn_slice_trail(origin: Vector3, dir: Vector3) -> void:
 		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
 	tw.tween_property(mat, "albedo_color", Color(1, 1, 1, 0.0), 0.07).set_delay(0.02)
 	tw.tween_property(mat, "emission_energy_multiplier", 0.0, 0.07).set_delay(0.02)
-	tw.tween_property(light, "light_energy", 0.0, 0.06)
+	if light:
+		tw.tween_property(light, "light_energy", 0.0, 0.06)
 	tw.chain().tween_callback(trail.queue_free)
 
 # -------------------- DAMAGE / DEATH --------------------
@@ -915,7 +1234,7 @@ func take_damage(amount: int, from_id: int) -> void:
 	_apply_damage(amount, from_id)
 
 func _apply_damage(amount: int, from_id: int) -> void:
-	if frozen or health <= 0:
+	if ghost_mode or frozen or health <= 0:
 		return
 	if shielded:
 		return  # SHIELD special absorbs the hit
@@ -924,8 +1243,22 @@ func _apply_damage(amount: int, from_id: int) -> void:
 		_notify_damage_source(from_id)
 		SFX.hit_received()
 	if health <= 0:
+		var push: Vector3 = Vector3.UP
+		var killer := get_parent().get_node_or_null(str(from_id))
+		if killer and killer is Node3D:
+			push = (global_position - killer.global_position).normalized() + Vector3.UP * 0.6
+		_ragdoll.rpc(push)
 		died.emit(from_id)
 		_report_death.rpc_id(1, from_id)
+
+@rpc("any_peer", "call_local", "reliable")
+func apply_knockback(impulse: Vector3) -> void:
+	var sender := multiplayer.get_remote_sender_id()
+	if sender != 1 and sender != 0:
+		return
+	if ghost_mode or frozen or not is_multiplayer_authority():
+		return
+	velocity += impulse
 
 func _notify_damage_source(from_id: int) -> void:
 	var attacker := get_parent().get_node_or_null(str(from_id))
@@ -939,14 +1272,14 @@ func _notify_damage_source(from_id: int) -> void:
 func _report_death(killer_id: int) -> void:
 	# Server-side: tell the game controller the round ended. Respawn is handled
 	# by the game controller at the start of the next round (after card pick).
+	# The RPC is invoked on the victim's Player node, so `player_id` IS the
+	# victim. Using get_remote_sender_id() here misidentifies server-hosted
+	# bot deaths as a self-kill by the host (sender=1 for server-to-self RPCs).
 	if not multiplayer.is_server():
 		return
-	var victim_id := multiplayer.get_remote_sender_id()
-	if victim_id == 0:
-		victim_id = player_id
 	var game := get_tree().current_scene
 	if game and game.has_method("report_kill"):
-		game.report_kill(killer_id, victim_id)
+		game.report_kill(killer_id, player_id)
 
 @rpc("any_peer", "call_local", "reliable")
 func server_respawn(pos: Vector3) -> void:
@@ -956,6 +1289,8 @@ func server_respawn(pos: Vector3) -> void:
 		return
 	global_position = pos
 	velocity = Vector3.ZERO
+	ghost_mode = false
+	invisible_mode = false
 	health = MAX_HEALTH + weapon.max_hp_bonus
 	rifle_cooldown = 0.0
 	grenade_cooldown = 0.0
@@ -967,11 +1302,29 @@ func server_respawn(pos: Vector3) -> void:
 	dash_timer = 0.0
 	jumps_left = 2 + weapon.extra_jumps
 	_end_shield()
+	_apply_ghost_visuals()
 	# Push the teleport to every peer immediately so they don't see us at the
 	# old position for a frame while waiting for the next _physics_process.
 	_broadcast_state.rpc(global_position, rotation.y)
 	_last_sync_pos = global_position
 	_last_sync_yaw = rotation.y
+
+@rpc("any_peer", "call_local", "reliable")
+func set_ghost_mode(enabled: bool) -> void:
+	var sender := multiplayer.get_remote_sender_id()
+	if sender != 1 and sender != 0:
+		return
+	ghost_mode = enabled
+	if enabled:
+		frozen = false
+		invisible_mode = false
+		health = 0
+		if is_multiplayer_authority():
+			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	else:
+		invisible_mode = false
+		health = MAX_HEALTH + weapon.max_hp_bonus
+	_apply_ghost_visuals()
 
 # -------------------- STATE REPLICATION --------------------
 
@@ -987,8 +1340,12 @@ func _maybe_broadcast_state() -> void:
 func _broadcast_state(pos: Vector3, yaw: float) -> void:
 	if is_multiplayer_authority():
 		return
-	global_position = pos
-	rotation.y = yaw
+	if not _remote_has_target or global_position.distance_to(pos) > REMOTE_SNAP_DISTANCE:
+		global_position = pos
+		rotation.y = yaw
+	_remote_target_pos = pos
+	_remote_target_yaw = yaw
+	_remote_has_target = true
 
 @rpc("any_peer", "call_local", "reliable")
 func set_frozen(f: bool) -> void:
@@ -1167,8 +1524,6 @@ func _bot_physics(delta: float) -> void:
 	var move_dir: Vector3 = fwd_dir * chase + right_dir * _bot_strafe_side
 	if move_dir.length() > 1.0:
 		move_dir = move_dir.normalized()
-	velocity.x = move_dir.x * BOT_MOVE_SPEED
-	velocity.z = move_dir.z * BOT_MOVE_SPEED
 
 	# Occasional hop — keeps the bot moving vertically, harder to track.
 	if is_on_floor() and _bot_jump_cooldown <= 0.0 and randf() < BOT_JUMP_CHANCE:
@@ -1186,12 +1541,20 @@ func _bot_physics(delta: float) -> void:
 		_bot_dash_cooldown = randf_range(2.5, 5.5)
 		SFX.dash(global_position)
 
-	# Apply dash override if one is active (same formula as the player path).
+	# --- Movement ---
+	var target_vel := move_dir * BOT_MOVE_SPEED
+	var accel := GROUND_ACCEL if is_on_floor() else AIR_ACCEL
+
 	if dash_timer > 0.0:
 		dash_timer -= delta
-		velocity.x = dash_dir.x * DASH_SPEED
-		velocity.z = dash_dir.z * DASH_SPEED
 		velocity.y = max(velocity.y, 0.0)
+		# Taper dash speed at the end.
+		var dash_factor := clampf(dash_timer / (DASH_TIME * 0.5), 0.0, 1.0)
+		target_vel = target_vel.lerp(dash_dir * DASH_SPEED, dash_factor)
+		accel = 2000.0
+
+	velocity.x = move_toward(velocity.x, target_vel.x, accel * delta)
+	velocity.z = move_toward(velocity.z, target_vel.z, accel * delta)
 
 	move_and_slide()
 	_maybe_broadcast_state()
@@ -1212,6 +1575,8 @@ func _bot_find_target() -> Node3D:
 		if not p.is_in_group("players"):
 			continue
 		if p.get("is_bot"):
+			continue
+		if p.get("ghost_mode") == true:
 			continue
 		return p
 	return null

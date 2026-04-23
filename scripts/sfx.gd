@@ -20,6 +20,8 @@ const NO_POS := Vector3.INF
 # reverb-colored 3D bus so distant fights get the "outdoors" echo.
 const DRY_RADIUS := 4.0
 
+var _sample_cache: Dictionary = {}
+
 func _ready() -> void:
 	_ensure_reverb_bus()
 
@@ -88,17 +90,43 @@ func _play(samples: PackedVector2Array, volume_db: float = -6.0, at: Vector3 = N
 		pb.push_buffer(samples)
 	get_tree().create_timer(duration + 0.15).timeout.connect(freer.queue_free)
 
+func _cached_samples(key: String, generator: Callable) -> PackedVector2Array:
+	if not _sample_cache.has(key):
+		_sample_cache[key] = generator.call()
+	return _sample_cache[key]
+
+func _shot_cache_key(w: Weapon = null) -> String:
+	if w == null:
+		return "shot:default"
+	var damage_bucket := int(round(w.get_damage() / 5.0))
+	var spread_bucket := int(round(w.spread * 1000.0))
+	var fire_bucket := int(round(w.fire_rate_mult * 10.0))
+	return "shot:%d:%d:%d" % [damage_bucket, spread_bucket, fire_bucket]
+
+func _hitmarker_cache_key(kind: String, dmg: int) -> String:
+	var dmg_bucket := 0
+	if dmg > 0:
+		dmg_bucket = int(round(clampf(float(dmg) / Weapon.BASE_DAMAGE, 0.5, 5.0) * 4.0))
+	return "hitmarker:%s:%d" % [kind, dmg_bucket]
+
 # -------------------- sounds --------------------
 
 func shot(w: Weapon = null, at: Vector3 = NO_POS) -> void:
-	_play(_synth_shot(w), randf_range(-5.5, -2.5), at)
-func grenade_launch(at: Vector3 = NO_POS) -> void: _play(_synth_grenade_launch(), -6.0, at)
-func explosion(at: Vector3 = NO_POS) -> void: _play(_synth_explosion(), -2.0, at)
-func melee(at: Vector3 = NO_POS) -> void: _play(_synth_melee(), -6.0, at)
-func jump(at: Vector3 = NO_POS) -> void: _play(_synth_jump(), -12.0, at)
-func dash(at: Vector3 = NO_POS) -> void: _play(_synth_dash(), -10.0, at)
-func hit_received() -> void: _play(_synth_hit_received(), -4.0)
-func kill_confirm() -> void: _play(_synth_kill_confirm(), -6.0)
+	_play(_cached_samples(_shot_cache_key(w), Callable(self, "_synth_shot").bind(w)), randf_range(-5.5, -2.5), at)
+func grenade_launch(at: Vector3 = NO_POS) -> void:
+	_play(_cached_samples("grenade_launch", Callable(self, "_synth_grenade_launch")), -6.0, at)
+func explosion(at: Vector3 = NO_POS) -> void:
+	_play(_cached_samples("explosion", Callable(self, "_synth_explosion")), -2.0, at)
+func melee(at: Vector3 = NO_POS) -> void:
+	_play(_cached_samples("melee", Callable(self, "_synth_melee")), -6.0, at)
+func jump(at: Vector3 = NO_POS) -> void:
+	_play(_cached_samples("jump", Callable(self, "_synth_jump")), -12.0, at)
+func dash(at: Vector3 = NO_POS) -> void:
+	_play(_cached_samples("dash", Callable(self, "_synth_dash")), -10.0, at)
+func hit_received() -> void:
+	_play(_cached_samples("hit_received", Callable(self, "_synth_hit_received")), -4.0)
+func kill_confirm() -> void:
+	_play(_cached_samples("kill_confirm", Callable(self, "_synth_kill_confirm")), -6.0)
 func hitmarker(kind: String = "body", dmg: int = 0) -> void:
 	# Scale pitch down and volume up with damage — heavy guns land with a
 	# bassy thunk, baseline pistol keeps the sharp "tink".
@@ -106,7 +134,7 @@ func hitmarker(kind: String = "body", dmg: int = 0) -> void:
 	if dmg > 0:
 		dmg_ratio = clampf(float(dmg) / Weapon.BASE_DAMAGE, 0.5, 5.0)
 	var vol_bonus: float = clampf(log(dmg_ratio) / log(2.0) * 2.0, 0.0, 4.0)
-	_play(_synth_hitmarker(kind, dmg_ratio), -5.0 + vol_bonus)
+	_play(_cached_samples(_hitmarker_cache_key(kind, dmg), Callable(self, "_synth_hitmarker").bind(kind, dmg_ratio)), -5.0 + vol_bonus)
 
 # -------------------- synthesis --------------------
 
