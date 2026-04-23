@@ -99,6 +99,12 @@ size = Vector3(5, 0.5, 10)
 [sub_resource type="BoxShape3D" id="Shape_Ramp"]
 size = Vector3(5, 0.5, 10)
 
+[sub_resource type="BoxMesh" id="Box_Cover"]
+size = Vector3(3.5, 2, 1.2)
+
+[sub_resource type="BoxShape3D" id="Shape_Cover"]
+size = Vector3(3.5, 2, 1.2)
+
 [sub_resource type="BoxMesh" id="Box_AccentStrip"]
 size = Vector3(0.3, 10, 0.3)
 
@@ -355,3 +361,71 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 12, 9, -12)
 
 [node name="S7" type="Marker3D" parent="SpawnPoints" groups=["spawnpoints"]]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -12, 9, 12)
+
+[node name="CoverBlocks" type="Node3D" parent="."]
+
+[node name="C1" type="StaticBody3D" parent="CoverBlocks"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -12, 1, -26)
+collision_layer = 1
+
+[node name="Mesh" type="MeshInstance3D" parent="CoverBlocks/C1"]
+mesh = SubResource("Box_Cover")
+material_override = SubResource("Mat_BuildingDark")
+
+[node name="Shape" type="CollisionShape3D" parent="CoverBlocks/C1"]
+shape = SubResource("Shape_Cover")
+
+[node name="C2" type="StaticBody3D" parent="CoverBlocks"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 12, 1, 26)
+collision_layer = 1
+
+[node name="Mesh" type="MeshInstance3D" parent="CoverBlocks/C2"]
+mesh = SubResource("Box_Cover")
+material_override = SubResource("Mat_BuildingDark")
+
+[node name="Shape" type="CollisionShape3D" parent="CoverBlocks/C2"]
+shape = SubResource("Shape_Cover")
+
+[node name="C3" type="StaticBody3D" parent="CoverBlocks"]
+transform = Transform3D(-4.37114e-08, 0, 1, 0, 1, 0, -1, 0, -4.37114e-08, 28, 1, 0)
+collision_layer = 1
+
+[node name="Mesh" type="MeshInstance3D" parent="CoverBlocks/C3"]
+mesh = SubResource("Box_Cover")
+material_override = SubResource("Mat_BuildingDark")
+
+[node name="Shape" type="CollisionShape3D" parent="CoverBlocks/C3"]
+shape = SubResource("Shape_Cover")
+
+[node name="C4" type="StaticBody3D" parent="CoverBlocks"]
+transform = Transform3D(-4.37114e-08, 0, 1, 0, 1, 0, -1, 0, -4.37114e-08, -28, 1, 0)
+collision_layer = 1
+
+[node name="Mesh" type="MeshInstance3D" parent="CoverBlocks/C4"]
+mesh = SubResource("Box_Cover")
+material_override = SubResource("Mat_BuildingDark")
+
+[node name="Shape" type="CollisionShape3D" parent="CoverBlocks/C4"]
+shape = SubResource("Shape_Cover")
+
+[node name="C5" type="StaticBody3D" parent="CoverBlocks"]
+transform = Transform3D(0.866025, 0, 0.5, 0, 1, 0, -0.5, 0, 0.866025, 10, 1, 10)
+collision_layer = 1
+
+[node name="Mesh" type="MeshInstance3D" parent="CoverBlocks/C5"]
+mesh = SubResource("Box_Cover")
+material_override = SubResource("Mat_BuildingDark")
+
+[node name="Shape" type="CollisionShape3D" parent="CoverBlocks/C5"]
+shape = SubResource("Shape_Cover")
+
+[node name="C6" type="StaticBody3D" parent="CoverBlocks"]
+transform = Transform3D(0.866025, 0, -0.5, 0, 1, 0, 0.5, 0, 0.866025, -10, 1, -10)
+collision_layer = 1
+
+[node name="Mesh" type="MeshInstance3D" parent="CoverBlocks/C6"]
+mesh = SubResource("Box_Cover")
+material_override = SubResource("Mat_BuildingDark")
+
+[node name="Shape" type="CollisionShape3D" parent="CoverBlocks/C6"]
+shape = SubResource("Shape_Cover")

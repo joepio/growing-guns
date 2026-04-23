@@ -52,6 +52,8 @@ const INVISIBLE_ALPHA := 0.06
 @onready var legs_hitbox: Area3D = $LegsHitbox
 @onready var name_label: Label3D = $NameLabel
 @onready var gun_body: MeshInstance3D = $Camera/Muzzle/GunMesh
+@onready var blade: MeshInstance3D = $Camera/Muzzle/Blade
+var _blade_rest_transform: Transform3D
 var gun_barrel: MeshInstance3D = null
 var gun_magazine: MeshInstance3D = null
 var _ragdoll_pieces: Array[Node] = []
@@ -71,6 +73,7 @@ var reloading: bool = false
 var frozen: bool = false
 var ghost_mode: bool = false
 var invisible_mode: bool = false
+var is_zooming: bool = false
 
 # Last broadcast state — avoids flooding the wire when idle.
 var _last_sync_pos: Vector3 = Vector3.INF
@@ -86,6 +89,12 @@ var muzzle_kick_z := 0.0
 var shake_amt := 0.0
 var melee_offset := Vector3.ZERO
 var _muzzle_rest_pos: Vector3
+var _head_hitbox_rest_y: float = 0.86
+var _torso_hitbox_rest_y: float = 0.12
+var _legs_hitbox_rest_y: float = -0.55
+var reload_offset: Vector3 = Vector3.ZERO
+var _reload_tween: Tween = null
+var _reload_audio: Node = null
 var _camera_rest_pos: Vector3
 var _melee_tween: Tween = null
 var _body_materials: Dictionary = {}
@@ -125,6 +134,13 @@ func _ready() -> void:
 	name_label.text = player_name
 	_muzzle_rest_pos = muzzle.position
 	_camera_rest_pos = camera.position
+	# Capture authored hitbox positions so body-scaling can shift them cleanly.
+	if head_hitbox:
+		_head_hitbox_rest_y = head_hitbox.position.y
+	if torso_hitbox:
+		_torso_hitbox_rest_y = torso_hitbox.position.y
+	if legs_hitbox:
+		_legs_hitbox_rest_y = legs_hitbox.position.y
 	_capture_body_materials()
 	_setup_gun_visuals()
 	_update_gun_visuals()
@@ -142,6 +158,10 @@ func _process(delta: float) -> void:
 	# is false during _ready (peer id == 0 before connected_to_server fires).
 	if is_multiplayer_authority() and not camera.current:
 		_refresh_authority_view()
+
+	if is_multiplayer_authority():
+		var target_fov := 30.0 if is_zooming else 75.0
+		camera.fov = lerp(camera.fov, target_fov, delta * 12.0)
 
 func _interpolate_remote_state(delta: float) -> void:
 	if not _remote_has_target:
@@ -220,8 +240,11 @@ func _unhandled_input(event: InputEvent) -> void:
 	if not is_multiplayer_authority():
 		return
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-		rotate_y(-event.relative.x * MOUSE_SENS)
-		look_pitch = clamp(look_pitch - event.relative.y * MOUSE_SENS, -1.4, 1.4)
+		var sens := MOUSE_SENS
+		if is_zooming:
+			sens *= 0.4 # Slower aim when zoomed
+		rotate_y(-event.relative.x * sens)
+		look_pitch = clamp(look_pitch - event.relative.y * sens, -1.4, 1.4)
 		camera.rotation.x = look_pitch + recoil_pitch
 	if event is InputEventMouseButton and event.pressed \
 			and event.button_index == MOUSE_BUTTON_LEFT \
@@ -266,11 +289,13 @@ func _physics_process(delta: float) -> void:
 	muzzle_kick_z = lerp(muzzle_kick_z, 0.0, delta * 14.0)
 	shake_amt = lerp(shake_amt, 0.0, delta * 14.0)
 	camera.rotation.x = look_pitch + recoil_pitch
-	muzzle.position = _muzzle_rest_pos + Vector3(0.0, 0.0, muzzle_kick_z) + melee_offset
-	camera.position = _camera_rest_pos + Vector3(
-		randf_range(-1.0, 1.0) * shake_amt,
-		randf_range(-1.0, 1.0) * shake_amt,
-		0.0,
+	muzzle.position = _muzzle_rest_pos + Vector3(0.0, 0.0, muzzle_kick_z) + melee_offset + reload_offset
+	# Height scales with body_scale so the viewpoint follows the taller head.
+	var cam_y: float = _camera_rest_pos.y * maxf(0.1, weapon.body_scale)
+	camera.position = Vector3(
+		_camera_rest_pos.x + randf_range(-1.0, 1.0) * shake_amt,
+		cam_y + randf_range(-1.0, 1.0) * shake_amt,
+		_camera_rest_pos.z,
 	)
 
 	# --- Gravity ---
@@ -289,7 +314,7 @@ func _physics_process(delta: float) -> void:
 		if is_on_floor():
 			velocity.y = JUMP_VELOCITY
 			jumps_left = 1 + weapon.extra_jumps
-			SFX.jump(global_position)
+			if not ghost_mode: SFX.jump(global_position)
 		elif is_on_wall() and wall_jump_cooldown <= 0.0:
 			var n := get_wall_normal()
 			velocity.y = WALL_JUMP_V
@@ -297,11 +322,11 @@ func _physics_process(delta: float) -> void:
 			velocity.z += n.z * WALL_JUMP_H
 			wall_jump_cooldown = WALL_JUMP_COOLDOWN
 			jumps_left = 1 + weapon.extra_jumps  # wall-jump refreshes all air-jumps
-			SFX.jump(global_position)
+			if not ghost_mode: SFX.jump(global_position)
 		elif jumps_left > 0:
 			velocity.y = DOUBLE_JUMP_VELOCITY
 			jumps_left -= 1
-			SFX.jump(global_position)
+			if not ghost_mode: SFX.jump(global_position)
 
 	# --- Dash ---
 	if Input.is_action_just_pressed("dash") and dash_charges > 0:
@@ -311,7 +336,7 @@ func _physics_process(delta: float) -> void:
 		dash_dir = input_dir.normalized()
 		dash_timer = DASH_TIME
 		dash_charges -= 1
-		SFX.dash(global_position)
+		if not ghost_mode: SFX.dash(global_position)
 
 	# --- Movement ---
 	var wish_dir := _input_vector()
@@ -354,10 +379,17 @@ func _physics_process(delta: float) -> void:
 		mag -= 1
 		_fire_rifle()
 		if mag <= 0:
-			reloading = true
-			rifle_cooldown = weapon.get_reload_time()
-	if Input.is_action_just_pressed("shoot_grenade") and grenade_cooldown <= 0.0 and not ghost_mode:
-		_use_special()
+			_start_reload()
+	if Input.is_action_just_pressed("reload") and not ghost_mode:
+		_start_reload()
+	if Input.is_action_just_pressed("shoot_grenade") and not ghost_mode:
+		if weapon.special == Weapon.SPECIAL_ZOOM:
+			is_zooming = !is_zooming
+		elif grenade_cooldown <= 0.0:
+			_use_special()
+
+	if weapon.special != Weapon.SPECIAL_ZOOM:
+		is_zooming = false # Auto-cancel zoom if weapon special changes (e.g. card reset)
 	if Input.is_action_just_pressed("melee") and melee_cooldown <= 0.0 and not ghost_mode:
 		melee_cooldown = MELEE_RELOAD
 		_swing_melee()
@@ -401,102 +433,15 @@ func _fire_rifle() -> void:
 
 @rpc("any_peer", "call_local", "reliable")
 func _rifle_fired(origin: Vector3, dir: Vector3, shooter_id: int) -> void:
-	var shooter_node := get_parent().get_node_or_null(str(shooter_id))
+	var shooter_node: Node3D = get_parent().get_node_or_null(str(shooter_id))
 	var w: Weapon = shooter_node.weapon if shooter_node else Weapon.new()
 	SFX.shot(w, origin)
-	var is_server := multiplayer.is_server()
-	var space := get_world_3d().direct_space_state
 
-	# Iterative raycast path: pierce through players, ricochet off walls.
-	# Each peer runs this loop to render consistent tracer segments; only the
-	# server mutates game state (damage / lifesteal / grenade detonation).
-	var cur_origin := origin
-	var cur_dir := dir
-	var pierce_left := w.pierce_count
-	var ricochet_left := w.ricochet_count
-	var excluded_rids: Array[RID] = []
-	if shooter_node:
-		if shooter_node.has_method("get_hitbox_rids"):
-			excluded_rids.append_array(shooter_node.get_hitbox_rids())
-		else:
-			excluded_rids.append(shooter_node.get_rid())
-
-	var max_steps := pierce_left + ricochet_left + 1
-	for _step in range(max_steps):
-		var q := PhysicsRayQueryParameters3D.create(cur_origin, cur_origin + cur_dir * RIFLE_RANGE)
-		q.collision_mask = 1 | 2 | 4  # world + players + projectiles
-		q.exclude = excluded_rids
-		q.collide_with_areas = true
-		var result := space.intersect_ray(q)
-		if result.is_empty():
-			break
-		var dmg_ratio: float = clampf(w.get_damage() / Weapon.BASE_DAMAGE, 0.5, 5.0)
-		var collider: Node = result.collider
-		var hit_pos: Vector3 = result.position
-
-		var hit_player := _player_from_hit_collider(collider)
-		if hit_player and hit_player.get("ghost_mode") == true:
-			if hit_player.has_method("get_hitbox_rids"):
-				excluded_rids.append_array(hit_player.get_hitbox_rids())
-			else:
-				excluded_rids.append(hit_player.get_rid())
-			cur_origin = hit_pos + cur_dir * 0.05
-			continue
-		# Players bleed; walls/grenades kick up dust.
-		if hit_player:
-			_spawn_blood(hit_pos, cur_dir, dmg_ratio)
-		else:
-			_spawn_impact(hit_pos, w.bullet_color, w.bullet_scale, dmg_ratio)
-		if hit_player:
-			var vid: int = hit_player.player_id
-			if is_server and vid != shooter_id:
-				var is_head := _is_head_hit(collider)
-				var dmg: int = int(w.get_damage() * (w.get_headshot_mult() if is_head else 1.0))
-				hit_player.take_damage.rpc_id(hit_player.get_multiplayer_authority(), dmg, shooter_id)
-				if w.knockback > 0.0:
-					var knock_dir := (cur_dir + Vector3.UP * 0.18).normalized()
-					hit_player.apply_knockback.rpc_id(hit_player.get_multiplayer_authority(), knock_dir * w.knockback)
-				if shooter_node:
-					_hit_confirm.rpc_id(shooter_node.get_multiplayer_authority(), is_head, dmg)
-				if w.lifesteal > 0.0 and shooter_node:
-					var heal_amt: int = int(float(dmg) * w.lifesteal)
-					if heal_amt > 0:
-						shooter_node.heal.rpc_id(shooter_node.get_multiplayer_authority(), heal_amt)
-			# Bullet explosion on player hit (visual + server damage)
-			if w.explosive_radius > 0.0:
-				_spawn_bullet_blast(hit_pos, w.explosive_radius, w.bullet_color)
-				if is_server:
-					_apply_bullet_splash(hit_pos, w.explosive_radius, w.explosive_damage, shooter_id)
-			# Pierce continues; else stop at this hit.
-			if pierce_left > 0:
-				pierce_left -= 1
-				if hit_player.has_method("get_hitbox_rids"):
-					excluded_rids.append_array(hit_player.get_hitbox_rids())
-				else:
-					excluded_rids.append(hit_player.get_rid())
-				cur_origin = hit_pos + cur_dir * 0.05
-				continue
-			break
-
-		elif collider and collider.is_in_group("grenades") and collider.has_method("detonate"):
-			if is_server:
-				collider.detonate()
-				if shooter_node:
-					_hit_confirm.rpc_id(shooter_node.get_multiplayer_authority(), true, 0)
-			break
-
-		else:
-			# World hit. Trigger explosive payload, then ricochet if available.
-			if w.explosive_radius > 0.0:
-				_spawn_bullet_blast(hit_pos, w.explosive_radius, w.bullet_color)
-				if is_server:
-					_apply_bullet_splash(hit_pos, w.explosive_radius, w.explosive_damage, shooter_id)
-			if ricochet_left > 0:
-				ricochet_left -= 1
-				cur_dir = cur_dir.bounce(result.normal).normalized()
-				cur_origin = hit_pos + result.normal * 0.02
-				continue
-			break
+	var bullet_script: GDScript = preload("res://scripts/bullet.gd")
+	var bullet := Node3D.new()
+	bullet.set_script(bullet_script)
+	get_tree().current_scene.add_child(bullet)
+	bullet.setup(origin, dir, shooter_id, w)
 
 	_spawn_muzzle_flash(w.bullet_color, w.bullet_scale)
 
@@ -518,6 +463,20 @@ func _apply_bullet_splash(pos: Vector3, radius: float, damage: float, shooter_id
 		var dmg: int = int(damage * falloff)
 		if dmg > 0:
 			p.take_damage.rpc_id(p.get_multiplayer_authority(), dmg, shooter_id)
+			# Splash pushes outward from the blast, scaled by falloff + the
+			# shooter's knockback stat so HAYMAKER explosions really fling.
+			var shooter := get_parent().get_node_or_null(str(shooter_id))
+			var kb: float = Weapon.BASE_KNOCKBACK
+			if shooter and shooter.get("weapon") != null:
+				kb = shooter.weapon.knockback
+			if kb > 0.0:
+				var dir: Vector3 = (p.global_position - pos)
+				if dir.length_squared() > 0.001:
+					dir = dir.normalized()
+				else:
+					dir = Vector3.UP
+				var impulse: Vector3 = dir * kb * falloff + Vector3.UP * kb * 0.35 * falloff
+				p.apply_knockback.rpc_id(p.get_multiplayer_authority(), impulse)
 
 func _player_from_hit_collider(collider: Node) -> Node:
 	if collider == null:
@@ -838,14 +797,18 @@ func _spawn_ragdoll(push_dir: Vector3) -> void:
 			sh.size = p.size
 			cs.shape = sh
 		rb.add_child(cs)
-		rb.linear_velocity = push_dir * randf_range(4.0, 8.0) \
-			+ Vector3.UP * randf_range(2.0, 5.0) \
+		# push_dir carries both direction and magnitude (bigger knockback =
+		# bigger cadaver launch). Normalize, scale speeds by magnitude.
+		var kb_mag: float = clampf(push_dir.length(), 1.0, 6.0)
+		var dir_n: Vector3 = push_dir.normalized() if push_dir.length_squared() > 0.01 else Vector3.UP
+		rb.linear_velocity = dir_n * randf_range(4.0, 8.0) * kb_mag \
+			+ Vector3.UP * randf_range(2.0, 5.0) * sqrt(kb_mag) \
 			+ Vector3(randf_range(-1.5, 1.5), 0, randf_range(-1.5, 1.5))
 		rb.angular_velocity = Vector3(
 			randf_range(-8.0, 8.0),
 			randf_range(-8.0, 8.0),
 			randf_range(-8.0, 8.0),
-		)
+		) * sqrt(kb_mag)
 		_ragdoll_pieces.append(rb)
 		# Safety net — in case respawn never fires (e.g. match ends), clean up.
 		get_tree().create_timer(14.0).timeout.connect(func() -> void:
@@ -878,19 +841,59 @@ var _shield_visual: Node3D = null
 var _invisible_timer: SceneTreeTimer = null
 
 func _use_special() -> void:
+	var mult: float = weapon.special_cooldown_mult
 	match weapon.special:
 		Weapon.SPECIAL_TELEPORT:
-			grenade_cooldown = TELEPORT_RELOAD
+			grenade_cooldown = TELEPORT_RELOAD * mult
 			_use_teleport()
 		Weapon.SPECIAL_SHIELD:
-			grenade_cooldown = SHIELD_RELOAD
+			grenade_cooldown = SHIELD_RELOAD * mult
 			_use_shield()
 		Weapon.SPECIAL_INVISIBLE:
-			grenade_cooldown = INVISIBLE_RELOAD
+			grenade_cooldown = INVISIBLE_RELOAD * mult
 			_use_invisible()
 		_:
-			grenade_cooldown = GRENADE_RELOAD
+			grenade_cooldown = GRENADE_RELOAD * mult
 			_fire_grenade()
+
+# -------------------- RELOAD --------------------
+
+func _start_reload() -> void:
+	if reloading:
+		return
+	if mag >= weapon.get_mag_size():
+		return
+	reloading = true
+	rifle_cooldown = weapon.get_reload_time()
+	_animate_reload(rifle_cooldown)
+	_stop_reload_audio()
+	if is_multiplayer_authority() and not is_bot:
+		_reload_audio = SFX.reload(rifle_cooldown)
+
+func _stop_reload_audio() -> void:
+	if _reload_audio and is_instance_valid(_reload_audio):
+		_reload_audio.queue_free()
+	_reload_audio = null
+
+func _animate_reload(duration: float) -> void:
+	if muzzle == null:
+		return
+	if _reload_tween and _reload_tween.is_valid():
+		_reload_tween.kill()
+	reload_offset = Vector3.ZERO
+	var down := Vector3(0.03, -0.22, -0.03)
+	_reload_tween = create_tween()
+	# Drop gun (clip out)
+	_reload_tween.tween_method(_set_reload_offset, Vector3.ZERO, down, duration * 0.25) \
+		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	# Hold at bottom (clip swap)
+	_reload_tween.tween_interval(duration * 0.45)
+	# Bring it back up (rack)
+	_reload_tween.tween_method(_set_reload_offset, down, Vector3.ZERO, duration * 0.30) \
+		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
+
+func _set_reload_offset(v: Vector3) -> void:
+	reload_offset = v
 
 # -------------------- TELEPORT --------------------
 
@@ -991,10 +994,15 @@ func _shield_on(duration: float) -> void:
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.albedo_color = Color(0.35, 0.75, 1.0, 0.25)
+
+	var is_me := is_multiplayer_authority() and not is_bot
+	var base_alpha := 0.04 if is_me else 0.25
+	var base_emission := 0.4 if is_me else 1.6
+
+	mat.albedo_color = Color(0.35, 0.75, 1.0, base_alpha)
 	mat.emission_enabled = true
 	mat.emission = Color(0.35, 0.75, 1.0)
-	mat.emission_energy_multiplier = 1.6
+	mat.emission_energy_multiplier = base_emission
 	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	mesh.material_override = mat
 	add_child(mesh)
@@ -1006,7 +1014,6 @@ func _shield_on(duration: float) -> void:
 	tw.tween_property(mat, "albedo_color", Color(0.35, 0.75, 1.0, 0.0), fade_dur).set_delay(fade_start)
 	tw.tween_property(mat, "emission_energy_multiplier", 0.0, fade_dur).set_delay(fade_start)
 	get_tree().create_timer(duration).timeout.connect(_end_shield)
-
 func _end_shield() -> void:
 	shielded = false
 	if _shield_visual and is_instance_valid(_shield_visual):
@@ -1104,7 +1111,10 @@ func _spawn_mine(pos: Vector3, shooter: int, uname: String) -> void:
 		mat.emission = Color(0.0, 0.9, 0.75)
 		mat.emission_energy_multiplier = 0.45
 		(mesh as MeshInstance3D).material_override = mat
-	SFX.grenade_launch(pos)
+
+	var shooter_node: Node3D = get_parent().get_node_or_null(str(shooter))
+	if shooter_node == null or shooter_node.get("ghost_mode") != true:
+		SFX.grenade_launch(pos)
 
 # -------------------- MELEE --------------------
 
@@ -1115,21 +1125,23 @@ func _swing_melee() -> void:
 
 @rpc("any_peer", "call_local", "reliable")
 func _melee_swung(origin: Vector3, dir: Vector3, attacker_id: int) -> void:
-	SFX.melee(origin)
+	var shooter_node := get_parent().get_node_or_null(str(attacker_id))
+	var w: Weapon = shooter_node.weapon if shooter_node else Weapon.new()
+
+	SFX.melee(origin, w.get_melee_damage())
 	# Gun swing + blade trail play on every peer.
-	_animate_gun_slash()
-	_spawn_slice_trail(origin, dir)
+	_animate_gun_slash(w.melee_scale)
+	_spawn_slice_trail(origin, dir, w.melee_scale)
 	# Camera shake only for the attacker.
 	if is_multiplayer_authority():
-		shake_amt = max(shake_amt, 0.035)
+		shake_amt = max(shake_amt, 0.035 * w.melee_scale)
 	# Only the server runs hit detection.
 	if not multiplayer.is_server():
 		return
 	var space := get_world_3d().direct_space_state
-	var q := PhysicsRayQueryParameters3D.create(origin, origin + dir * MELEE_RANGE)
+	var q := PhysicsRayQueryParameters3D.create(origin, origin + dir * MELEE_RANGE * w.melee_scale)
 	q.collision_mask = 1 | 2
 	q.collide_with_areas = true
-	var shooter_node := get_parent().get_node_or_null(str(attacker_id))
 	if shooter_node:
 		if shooter_node.has_method("get_hitbox_rids"):
 			q.exclude = shooter_node.get_hitbox_rids()
@@ -1148,12 +1160,15 @@ func _melee_swung(origin: Vector3, dir: Vector3, attacker_id: int) -> void:
 	var v_fwd: Vector3 = -target.global_transform.basis.z
 	var attacker_fwd: Vector3 = dir
 	var backstab: bool = v_fwd.dot(attacker_fwd) > 0.4
-	var dmg: int = MELEE_BACKSTAB if backstab else MELEE_DAMAGE
+	var dmg: int = MELEE_BACKSTAB if backstab else w.get_melee_damage()
 	target.take_damage.rpc_id(target.get_multiplayer_authority(), dmg, attacker_id)
+	if w.knockback > 0.0:
+		var melee_impulse: Vector3 = dir.normalized() * w.knockback + Vector3.UP * w.knockback * 0.25
+		target.apply_knockback.rpc_id(target.get_multiplayer_authority(), melee_impulse)
 	if shooter_node:
 		_hit_confirm.rpc_id(shooter_node.get_multiplayer_authority(), backstab, dmg)
 
-func _animate_gun_slash() -> void:
+func _animate_gun_slash(m_scale: float = 1.0) -> void:
 	if muzzle == null:
 		return
 	if _melee_tween and _melee_tween.is_valid():
@@ -1165,7 +1180,7 @@ func _animate_gun_slash() -> void:
 	# the gun has lunged slightly forward. Rotation + translation together give the
 	# blade a large visible path (pure rotation around the muzzle pivot is too tight).
 	var slash_rot := Vector3(-0.45, 0.15, -1.25)         # pitch down, slight yaw, hard left roll
-	var slash_pos := Vector3(-0.28, -0.16, -0.2)         # shove gun left+down+forward
+	var slash_pos := Vector3(-0.28, -0.16, -0.2) * m_scale # shove gun left+down+forward
 	_melee_tween = create_tween().set_parallel(true)
 	# STRIKE (0.045 s): rest → slash end. EXPO ease-IN peaks velocity at contact.
 	_melee_tween.tween_property(muzzle, "rotation", slash_rot, 0.045)\
@@ -1182,13 +1197,13 @@ func _animate_gun_slash() -> void:
 func _set_melee_offset(v: Vector3) -> void:
 	melee_offset = v
 
-func _spawn_slice_trail(origin: Vector3, dir: Vector3) -> void:
+func _spawn_slice_trail(origin: Vector3, dir: Vector3, m_scale: float = 1.0) -> void:
 	# A bright emissive bar placed in world-space along the diagonal arc the
 	# blade sweeps through. Grows outward on X (length) to suggest speed, then
 	# fades out. Visible to every peer because it lives in the world.
 	var trail := MeshInstance3D.new()
 	var box := BoxMesh.new()
-	box.size = Vector3(2.4, 0.07, 0.04)
+	box.size = Vector3(2.4 * m_scale, 0.07 * m_scale, 0.04 * m_scale)
 	trail.mesh = box
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -1204,12 +1219,12 @@ func _spawn_slice_trail(origin: Vector3, dir: Vector3) -> void:
 	if VFX_TRANSIENT_LIGHTS:
 		light = OmniLight3D.new()
 		light.light_color = Color(0.75, 0.9, 1.0)
-		light.light_energy = 3.5
-		light.omni_range = 5.0
+		light.light_energy = 3.5 * m_scale
+		light.omni_range = 5.0 * m_scale
 		trail.add_child(light)
 
 	get_tree().current_scene.add_child(trail)
-	trail.global_position = origin + dir * 1.6
+	trail.global_position = origin + dir * 1.6 * m_scale
 	trail.look_at(origin, Vector3.UP)
 	# Tilt the bar along a top-right → bottom-left diagonal (matches the gun swing).
 	trail.rotate_object_local(Vector3.FORWARD, deg_to_rad(-55.0))
@@ -1242,14 +1257,33 @@ func _apply_damage(amount: int, from_id: int) -> void:
 	if from_id != player_id and not is_bot:
 		_notify_damage_source(from_id)
 		SFX.hit_received()
+
+	if health > 0:
+		_play_hurt_sound.rpc(global_position)
+
 	if health <= 0:
+		_play_death_sound.rpc(global_position)
 		var push: Vector3 = Vector3.UP
 		var killer := get_parent().get_node_or_null(str(from_id))
 		if killer and killer is Node3D:
 			push = (global_position - killer.global_position).normalized() + Vector3.UP * 0.6
+			# Scale ragdoll impulse by the killer's knockback stat — HAYMAKER
+			# launches the corpse across the map, default push just topples.
+			var kb: float = Weapon.BASE_KNOCKBACK
+			if killer.get("weapon") != null:
+				kb = killer.weapon.knockback
+			push *= clampf(kb / Weapon.BASE_KNOCKBACK, 1.0, 6.0)
 		_ragdoll.rpc(push)
 		died.emit(from_id)
 		_report_death.rpc_id(1, from_id)
+
+@rpc("any_peer", "call_local", "unreliable")
+func _play_hurt_sound(pos: Vector3) -> void:
+	SFX.hurt(pos)
+
+@rpc("any_peer", "call_local", "unreliable")
+func _play_death_sound(pos: Vector3) -> void:
+	SFX.death(pos)
 
 @rpc("any_peer", "call_local", "reliable")
 func apply_knockback(impulse: Vector3) -> void:
@@ -1298,6 +1332,10 @@ func server_respawn(pos: Vector3) -> void:
 	wall_jump_cooldown = 0.0
 	mag = weapon.get_mag_size()
 	reloading = false
+	if _reload_tween and _reload_tween.is_valid():
+		_reload_tween.kill()
+	reload_offset = Vector3.ZERO
+	_stop_reload_audio()
 	dash_charges = MAX_DASH_CHARGES
 	dash_timer = 0.0
 	jumps_left = 2 + weapon.extra_jumps
@@ -1414,6 +1452,10 @@ func _setup_gun_visuals() -> void:
 	gun_magazine.material_override = mat
 	muzzle.add_child(gun_magazine)
 
+	# Remember the blade's authored position so scaling it doesn't drift.
+	if blade:
+		_blade_rest_transform = blade.transform
+
 func _update_gun_visuals() -> void:
 	if gun_body == null or gun_barrel == null or gun_magazine == null:
 		return
@@ -1445,24 +1487,52 @@ func _update_gun_visuals() -> void:
 	gun_magazine.transform = Transform3D(Basis.IDENTITY,
 		Vector3(0, -body_h * 0.5 - mag_h * 0.5, body_front_z + body_d * 0.35))
 
+	# Blade — under the gun, grows with melee damage × reach. BIG SWORD makes
+	# it very obviously a sword; default melee keeps it a small knife.
+	if blade:
+		var melee_s: float = sqrt(maxf(0.01, weapon.melee_damage_mult * weapon.melee_scale))
+		blade.scale = Vector3.ONE * melee_s
+		# Anchor the heel of the blade at its rest spot so the tip extends
+		# outward as it grows, rather than clipping into the gun body.
+		var base_pos: Vector3 = _blade_rest_transform.origin
+		var extra_reach: float = 0.25 * (melee_s - 1.0)    # push forward as blade grows (local +Z → forward-ish)
+		blade.transform = Transform3D(_blade_rest_transform.basis,
+			Vector3(base_pos.x, base_pos.y, base_pos.z - extra_reach))
+
 func _update_body_scale() -> void:
 	# BodyModel holds the visual mesh parts; hitboxes are siblings under the
-	# Player root. We scale visuals + hitboxes independently so the displayed
-	# head/body and the physics areas stay in agreement.
+	# Player root and must be kept in sync with the visual body size + height.
 	if body_model == null or head_mesh == null:
 		return
 	var bs: float = maxf(0.1, weapon.body_scale)
 	var hs: float = maxf(0.1, weapon.head_scale)
 	body_model.scale = Vector3.ONE * bs
-	# Body-model scaling already magnifies the head; counter-scale so head
-	# ends up at exactly `head_scale` relative to the player root.
-	head_mesh.scale = Vector3.ONE * (hs / bs)
+	# Let the head ride on body_model's scale AND apply head_scale on top, so
+	# a bigger body carries a proportionally bigger head (not a shrunken one).
+	head_mesh.scale = Vector3.ONE * hs
+	# Hitboxes are siblings under the Player root — shift their y so they sit
+	# where the scaled visual parts actually are, and scale them to match.
 	if head_hitbox:
-		head_hitbox.scale = Vector3.ONE * hs
+		head_hitbox.position.y = _head_hitbox_rest_y * bs
+		head_hitbox.scale = Vector3.ONE * (bs * hs)
 	if torso_hitbox:
+		torso_hitbox.position.y = _torso_hitbox_rest_y * bs
 		torso_hitbox.scale = Vector3.ONE * bs
 	if legs_hitbox:
+		legs_hitbox.position.y = _legs_hitbox_rest_y * bs
 		legs_hitbox.scale = Vector3.ONE * bs
+	# Camera sits at head height — scale the rest position so a CHONKY player
+	# looks out from their actual (taller) head rather than mid-torso.
+	if camera:
+		camera.position = Vector3(
+			_camera_rest_pos.x,
+			_camera_rest_pos.y * bs,
+			_camera_rest_pos.z,
+		)
+	# Gun feels smaller in the hands of a bigger player (inverse sqrt scaling
+	# keeps it gently smaller, not microscopic, as the body grows).
+	if muzzle:
+		muzzle.scale = Vector3.ONE * (1.0 / sqrt(bs))
 
 # -------------------- BOT AI --------------------
 
@@ -1529,7 +1599,7 @@ func _bot_physics(delta: float) -> void:
 	if is_on_floor() and _bot_jump_cooldown <= 0.0 and randf() < BOT_JUMP_CHANCE:
 		velocity.y = JUMP_VELOCITY
 		_bot_jump_cooldown = randf_range(1.2, 3.0)
-		SFX.jump(global_position)
+		if not ghost_mode: SFX.jump(global_position)
 
 	# Occasional dash — usually in the current move direction, sometimes sideways.
 	if dash_timer <= 0.0 and dash_charges > 0 and _bot_dash_cooldown <= 0.0 \
@@ -1539,7 +1609,7 @@ func _bot_physics(delta: float) -> void:
 		dash_timer = DASH_TIME
 		dash_charges -= 1
 		_bot_dash_cooldown = randf_range(2.5, 5.5)
-		SFX.dash(global_position)
+		if not ghost_mode: SFX.dash(global_position)
 
 	# --- Movement ---
 	var target_vel := move_dir * BOT_MOVE_SPEED

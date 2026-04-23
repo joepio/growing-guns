@@ -9,6 +9,7 @@ const SHAKE_RADIUS := 22.0
 const SHAKE_STRENGTH := 0.16     # max camera-shake amplitude (m) at the epicenter
 const VFX_TRANSIENT_LIGHTS := false
 const MINE_TRIGGER_RADIUS := 1.25
+const MINE_LIFETIME := 10.0        # mines self-detonate if nobody wanders in
 
 @export var shooter_id: int = 1
 @export var is_mine: bool = false
@@ -30,7 +31,10 @@ func _physics_process(delta: float) -> void:
 	if not multiplayer.is_server():
 		return
 	if is_mine:
-		_maybe_trigger_mine()
+		if _age >= MINE_LIFETIME:
+			_explode()
+		else:
+			_maybe_trigger_mine()
 	elif _age >= FUSE:
 		_explode()
 

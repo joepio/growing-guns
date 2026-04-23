@@ -89,15 +89,15 @@ static func all() -> Array:
 				w.ricochet_count += 2,
 		},
 		{
-			"id": "shotgun",
-			"name": "SHOTGUN",
-			"desc": "+2 extra projectiles, adds spread",
-			"color": Color(1.0, 0.5, 0.75),
-			"apply": func(w: Weapon) -> void:
-				w.extra_projectiles += 2
-				w.spread = max(w.spread, deg_to_rad(2.0)) + deg_to_rad(2.0),
-		},
-		{
+				"id": "shotgun",
+				"name": "SHOTGUN",
+				"desc": "+2 extra projectiles, slower bullets, adds spread",
+				"color": Color(1.0, 0.5, 0.75),
+				"apply": func(w: Weapon) -> void:
+						w.extra_projectiles += 2
+						w.bullet_speed_mult *= 0.75
+						w.spread = max(w.spread, deg_to_rad(2.0)) + deg_to_rad(2.0),
+		},		{
 			"id": "lifesteal",
 			"name": "LIFESTEAL",
 			"desc": "Heal 25% of damage dealt",
@@ -110,6 +110,7 @@ static func all() -> Array:
 			"id": "explosive",
 			"name": "EXPLOSIVE ROUNDS",
 			"desc": "Bullets explode. Stacks: bigger radius + more damage",
+			"rarity": "rare",
 			"color": Color(1.0, 0.4, 0.1),
 			"apply": func(w: Weapon) -> void:
 				# First stack establishes a sizable baseline; each extra one
@@ -131,52 +132,72 @@ static func all() -> Array:
 				w.headshot_mult *= 2.0,
 		},
 		{
-			"id": "heavy_rounds",
-			"name": "HEAVY ROUNDS",
-			"desc": "+100% damage, -30% fire rate",
-			"color": Color(0.7, 0.4, 0.2),
-			"apply": func(w: Weapon) -> void:
-				w.damage_mult *= 2.0
-				w.fire_rate_mult *= 0.7
-				w.bullet_scale *= 1.4
-				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.55, 0.2), 0.3),
+				"id": "heavy_rounds",
+				"name": "HEAVY ROUNDS",
+				"desc": "+100% damage, slower projectiles, -30% fire rate",
+				"rarity": "rare",
+				"color": Color(0.7, 0.4, 0.2),
+				"apply": func(w: Weapon) -> void:
+						w.damage_mult *= 2.0
+						w.bullet_speed_mult *= 0.65
+						w.fire_rate_mult *= 0.7
+						w.bullet_scale *= 1.4
+						w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.55, 0.2), 0.3),
 		},
 		{
-			"id": "sniper",
-			"name": "SNIPER",
-			"desc": "×3 damage, slower, 3-round mag, pin-point accurate",
-			"color": Color(0.55, 0.85, 1.0),
-			"apply": func(w: Weapon) -> void:
-				w.damage_mult *= 3.0
-				w.fire_rate_mult *= 0.4
-				w.mag_size_bonus -= 7
-				w.spread = 0.0
-				w.headshot_mult *= 1.5
-				w.bullet_scale *= 0.8
-				w.bullet_color = w.bullet_color.lerp(Color(0.55, 0.85, 1.0), 0.6),
-		},
-		{
-			"id": "uzi",
-			"name": "UZI",
-			"desc": "Full-auto, ×3 fire rate, +20 ammo, more spread",
+				"id": "sniper",
+				"name": "SNIPER",
+				"desc": "×3 dmg, hypnotic bullets, accurate, RMB: Zoom (no cooldown)",
+				"rarity": "rare",
+				"color": Color(0.55, 0.85, 1.0),
+				"apply": func(w: Weapon) -> void:
+						w.damage_mult *= 3.0
+						w.bullet_speed_mult *= 2.5
+						w.fire_rate_mult *= 0.4
+						w.mag_size_bonus -= 7
+						w.spread = 0.0
+						w.headshot_mult *= 1.5
+						w.bullet_scale *= 0.8
+						w.special = Weapon.SPECIAL_ZOOM
+						w.bullet_color = w.bullet_color.lerp(Color(0.55, 0.85, 1.0), 0.6),
+		},		{
+				"id": "uzi",
+				"name": "UZI",
+				"desc": "Full-auto, ×3 fire rate, +20 ammo, slower bullets, more spread",
+				"rarity": "rare",
+				"color": Color(1.0, 0.65, 0.25),
+				"apply": func(w: Weapon) -> void:
+						w.full_auto = true
+						w.fire_rate_mult *= 3.0
+						w.bullet_speed_mult *= 0.85
+						w.mag_size_bonus += 20
+						w.spread += deg_to_rad(2.5)
+						w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.55, 0.15), 0.5),
+		},		{
+			"id": "homing",
+			"name": "HOMING",
+			"desc": "Bullets lazily curve toward enemies, but travel slower",
 			"rarity": "rare",
-			"color": Color(1.0, 0.65, 0.25),
+			"color": Color(0.7, 1.0, 0.55),
 			"apply": func(w: Weapon) -> void:
-				w.full_auto = true
-				w.fire_rate_mult *= 3.0
-				w.mag_size_bonus += 20
-				w.spread += deg_to_rad(2.5)
-				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.55, 0.15), 0.5),
+				# Subtle steering — ~25°/s lets near-misses sometimes bend into
+				# hits, but direct aim is still required. Slower projectiles
+				# give defenders time to dodge the curve.
+				w.homing += 25.0
+				w.bullet_speed_mult *= 0.6
+				w.bullet_color = w.bullet_color.lerp(Color(0.6, 1.0, 0.45), 0.35),
 		},
 		{
-			"id": "knockback",
-			"name": "KNOCKBACK",
-			"desc": "Bullet hits shove enemies away",
-			"color": Color(0.8, 0.95, 1.0),
+			"id": "haymaker",
+			"name": "HAYMAKER",
+			"desc": "Huge bullets, hurts",
+			"rarity": "rare",
+			"color": Color(0.65, 0.85, 1.0),
 			"apply": func(w: Weapon) -> void:
-				w.knockback += 10.0
-				w.bullet_scale *= 1.08
-				w.bullet_color = w.bullet_color.lerp(Color(0.72, 0.95, 1.0), 0.4),
+				w.knockback += 30.0
+				w.bullet_scale *= 2
+				w.damage_mult *= 1.5
+				w.bullet_color = w.bullet_color.lerp(Color(0.6, 0.9, 1.0), 0.45),
 		},
 		{
 			"id": "big_head",
@@ -207,6 +228,14 @@ static func all() -> Array:
 				w.extra_jumps += 2,
 		},
 		{
+			"id": "quick_recharge",
+			"name": "QUICK RECHARGE",
+			"desc": "-15% special cooldown",
+			"color": Color(0.85, 0.55, 1.0),
+			"apply": func(w: Weapon) -> void:
+				w.special_cooldown_mult *= 0.85,
+		},
+		{
 			"id": "teleport",
 			"name": "TELEPORT",
 			"desc": "RMB: teleport where you aim (2s cooldown)",
@@ -218,6 +247,7 @@ static func all() -> Array:
 			"id": "shield",
 			"name": "SHIELD",
 			"desc": "RMB: 2s invulnerability bubble (8s cooldown)",
+			"rarity": "rare",
 			"color": Color(0.4, 0.8, 1.0),
 			"apply": func(w: Weapon) -> void:
 				w.special = Weapon.SPECIAL_SHIELD,
@@ -226,12 +256,22 @@ static func all() -> Array:
 			"id": "invisible",
 			"name": "INVISIBLE",
 			"desc": "RMB: vanish for 4s (10s cooldown)",
+			"rarity": "rare",
 			"color": Color(0.55, 1.0, 0.9),
 			"apply": func(w: Weapon) -> void:
 				w.special = Weapon.SPECIAL_INVISIBLE,
 		},
+		{
+			"id": "cleaver",
+			"name": "CLEAVER",
+			"desc": "+200% melee damage, longer reach",
+			"rarity": "rare",
+			"color": Color(0.8, 0.4, 0.9),
+			"apply": func(w: Weapon) -> void:
+				w.melee_damage_mult *= 3.0
+				w.melee_scale *= 1.8,
+		},
 	]
-
 static func by_id(id: String) -> Dictionary:
 	for c in all():
 		if c.id == id:
@@ -239,17 +279,25 @@ static func by_id(id: String) -> Dictionary:
 	return {}
 
 # Pick `count` unique random card ids. If count > pool size, returns the full pool.
-static func random_ids(count: int) -> Array[String]:
+# score_factor: 1.0 is neutral. > 1.0 means higher chance of rare cards (for losers).
+static func random_ids(count: int, score_factor: float = 1.0) -> Array[String]:
 	var out: Array[String] = []
 	var pool: Array = all()
 	while out.size() < count and not pool.is_empty():
 		var total_weight := 0.0
 		for card in pool:
-			total_weight += _rarity_weight(str(card.get("rarity", "common")))
+			var base_weight := _rarity_weight(str(card.get("rarity", "common")))
+			if str(card.get("rarity", "common")) == "rare":
+				base_weight *= score_factor
+			total_weight += base_weight
+
 		var pick := randf() * total_weight
 		var chosen_index := 0
 		for i in pool.size():
-			pick -= _rarity_weight(str(pool[i].get("rarity", "common")))
+			var w := _rarity_weight(str(pool[i].get("rarity", "common")))
+			if str(pool[i].get("rarity", "common")) == "rare":
+				w *= score_factor
+			pick -= w
 			if pick <= 0.0:
 				chosen_index = i
 				break
@@ -260,6 +308,6 @@ static func random_ids(count: int) -> Array[String]:
 static func _rarity_weight(rarity: String) -> float:
 	match rarity:
 		"rare":
-			return 0.35
+			return 0.15 # Baseline rare chance is even lower now (15%)
 		_:
 			return 1.0

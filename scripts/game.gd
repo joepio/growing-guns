@@ -40,6 +40,10 @@ var eliminated_players: Dictionary = {}
 var round_winner_id: int = 0
 var local_player: Node3D
 
+var _pick_timeout_timer: float = 0.0
+var _pick_timeout_active: bool = false
+var _last_pling_sec: int = -1
+
 # --- Match over / rematch ---
 var _rematch_overlay: Control = null
 var _rematch_title: Label = null
@@ -50,6 +54,10 @@ var _rematch_requested: bool = false
 # --- Dev panel (F1) ---
 var _dev_root: PanelContainer = null
 var _dev_content: VBoxContainer
+
+# --- Tab scoreboard overlay ---
+var _tab_root: PanelContainer = null
+var _tab_content: VBoxContainer = null
 
 # --- Pause menu (ESC) ---
 var _pause_menu: Control = null
@@ -72,17 +80,27 @@ func _ready() -> void:
 	banner_timer.timeout.connect(func() -> void: round_banner.visible = false)
 	pick_overlay.visible = false
 	round_banner.visible = false
+	scoreboard.visible = false
 	_build_rematch_overlay()
 	_build_ghost_overlay()
+	_build_tab_overlay()
 
 	if multiplayer.is_server():
 		multiplayer.peer_disconnected.connect(_on_peer_disconnected)
 		for pid in NetworkManager.players:
 			round_wins[pid] = 0
 			_spawn_player(pid, NetworkManager.players[pid])
+
+		var bot_requested: bool = NetworkManager.has_meta("spawn_bot_on_start") and NetworkManager.get_meta("spawn_bot_on_start")
+		if bot_requested:
+			_maybe_spawn_bot()
+
 		_maybe_start_match()
-		# SP fallback: if nobody else has joined yet, give us a bot to fight.
-		_maybe_spawn_bot.call_deferred()
+
+		# SP fallback: if nobody else has joined yet, and no bot was specifically requested,
+		# we still give a bot to fight as a default "sandbox" experience.
+		if not bot_requested:
+			_maybe_spawn_bot.call_deferred()
 	else:
 		# Instantly show the client state — makes it obvious when you thought
 		# you were solo but actually joined an orphan on port 27015.
@@ -106,11 +124,42 @@ func _client_request_spawn_when_ready() -> void:
 		CONNECT_ONE_SHOT,
 	)
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	if local_player and is_instance_valid(local_player):
 		health_label.text = "GHOST" if local_player.get("ghost_mode") == true else "HP  %d" % local_player.health
 		_refresh_cooldowns()
 		_update_ghost_overlay()
+
+	if _pick_timeout_active:
+		_pick_timeout_timer -= delta
+		var sec := int(ceil(_pick_timeout_timer))
+
+		# Show countdown in subtitle
+		if pick_overlay.visible:
+			pick_subtitle.text = "you lost the round — choose an upgrade (%ds left)" % max(0, sec)
+
+		# Audio feedback in last 3 seconds
+		if sec <= 3 and sec > 0 and sec != _last_pling_sec:
+			_last_pling_sec = sec
+			var pitch := 1.0 + (3 - sec) * 0.3 # Higher pitch as time runs out
+			SFX.pling(pitch)
+
+		if _pick_timeout_timer <= 0.0:
+			_on_pick_timeout()
+
+	# Tab is handled in _input — Godot's GUI focus navigation eats the Tab key
+	# before _process polling can see it, so we intercept it earlier.
+
+func _input(event: InputEvent) -> void:
+	# Tab hold = scoreboard overlay. Use _input (not _unhandled_input) so we
+	# beat the viewport's GUI focus navigation, which would otherwise consume
+	# Tab and prevent our polling from ever seeing it.
+	if event is InputEventKey and not event.echo and event.keycode == KEY_TAB:
+		if event.pressed:
+			_show_tab_overlay()
+		else:
+			_hide_tab_overlay()
+		get_viewport().set_input_as_handled()
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_F1:
@@ -143,7 +192,8 @@ func _refresh_cooldowns() -> void:
 		Weapon.SPECIAL_TELEPORT: special_max = local_player.TELEPORT_RELOAD
 		Weapon.SPECIAL_SHIELD:   special_max = local_player.SHIELD_RELOAD
 		Weapon.SPECIAL_INVISIBLE: special_max = local_player.INVISIBLE_RELOAD
-	grenade_bar.value = 1.0 - (local_player.grenade_cooldown / special_max)
+	special_max *= w.special_cooldown_mult
+	grenade_bar.value = 1.0 - (local_player.grenade_cooldown / max(0.01, special_max))
 	grenade_label.text = "RMB  %s" % w.special.to_upper()
 	melee_bar.value = 1.0 - (local_player.melee_cooldown / local_player.MELEE_RELOAD)
 	var charge_progress: float = local_player.dash_recharge_timer / local_player.DASH_RECHARGE_TIME
@@ -408,7 +458,9 @@ func _end_round(winner_id: int) -> void:
 func _begin_card_pick_for_loser(loser_id: int) -> void:
 	if completed_picks.has(loser_id) or pending_pick_cards_by_player.has(loser_id):
 		return
-	var cards := CardLibrary.random_ids(CARDS_PER_PICK)
+
+	var score_factor := _get_rarity_score_factor(loser_id)
+	var cards := CardLibrary.random_ids(CARDS_PER_PICK, score_factor)
 	pending_pick_cards_by_player[loser_id] = cards
 	pending_picker_id = loser_id
 	pending_pick_cards = cards
@@ -417,6 +469,21 @@ func _begin_card_pick_for_loser(loser_id: int) -> void:
 		_show_card_pick.rpc_id(peer, loser_id, cards)
 	if loser_id == BOT_ID:
 		_bot_auto_pick.call_deferred(loser_id)
+
+func _get_rarity_score_factor(pid: int) -> float:
+	# Calculate score rank.
+	# 1.0 = top score, >1.0 = trailing.
+	var my_score := int(round_wins.get(pid, 0))
+	var max_score := 0
+	for other_id in NetworkManager.players:
+		max_score = max(max_score, int(round_wins.get(int(other_id), 0)))
+
+	if max_score <= 0:
+		return 1.0
+
+	# Trailing players get up to 4x better luck (if they have 0 and someone has 8)
+	var diff := float(max_score - my_score)
+	return 1.0 + (diff * 0.4)
 
 func _bot_auto_pick(loser_id: int) -> void:
 	await get_tree().create_timer(1.2).timeout
@@ -495,20 +562,36 @@ func _show_card_pick(loser_id: int, card_ids: Array) -> void:
 	# Loser: full overlay + cursor + card buttons.
 	pick_overlay.visible = true
 	pick_title.text = "PICK A CARD"
-	pick_subtitle.text = "you lost the round — choose an upgrade"
+	pick_subtitle.text = "you lost the round — choose an upgrade (8s left)"
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	_populate_cards(card_ids, true)
+
+	_pick_timeout_timer = 8.0
+	_pick_timeout_active = true
+	_last_pling_sec = -1
+
 	# 1-second grace period before the loser can actually click — avoids
 	# accidental picks mid-death animation / mid-mouse-release.
-	for btn in pick_row.get_children():
-		if btn is Button:
-			(btn as Button).disabled = true
+	_set_card_buttons_disabled(true)
 	await get_tree().create_timer(1.0).timeout
 	if not pick_overlay.visible:
 		return
-	for btn in pick_row.get_children():
-		if btn is Button:
-			(btn as Button).disabled = false
+	_set_card_buttons_disabled(false)
+
+func _set_card_buttons_disabled(disabled: bool) -> void:
+	for wrapper in pick_row.get_children():
+		var btn := _find_button_recursive(wrapper)
+		if btn:
+			btn.disabled = disabled
+
+func _find_button_recursive(node: Node) -> Button:
+	if node is Button:
+		return node
+	for child in node.get_children():
+		var res := _find_button_recursive(child)
+		if res:
+			return res
+	return null
 
 func _populate_cards(card_ids: Array, clickable: bool) -> void:
 	for c in pick_row.get_children():
@@ -520,52 +603,149 @@ func _populate_cards(card_ids: Array, clickable: bool) -> void:
 			continue
 		pick_row.add_child(_make_card_button(cid, card, clickable))
 
-func _make_card_button(card_id: String, card: Dictionary, clickable: bool) -> Button:
-	var btn := Button.new()
-	btn.custom_minimum_size = Vector2(220, 260)
-	btn.focus_mode = Control.FOCUS_NONE
-	btn.text = "%s\n\n%s" % [card.name, card.desc]
-	btn.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	btn.add_theme_font_size_override("font_size", 20)
-	btn.add_theme_color_override("font_color", Color(1, 1, 1))
-	btn.add_theme_color_override("font_hover_color", card.color)
-	var col: Color = card.color
+func _make_card_button(card_id: String, card: Dictionary, clickable: bool) -> Control:
 	var rarity: String = str(card.get("rarity", "common"))
+	var col: Color = card.color
+
+	# Root container - provides the spacing in the HBox
+	var root := Control.new()
+	root.custom_minimum_size = Vector2(230, 300)
+
+	# Offset container - handles the idle floating (bobbing)
+	var idle_node := Control.new()
+	idle_node.size = Vector2(220, 260)
+	root.add_child(idle_node)
+
+	# Main card body - handles scale/hover/visuals
+	var card_body := PanelContainer.new()
+	card_body.size = Vector2(220, 260)
+	card_body.pivot_offset = card_body.size * 0.5
+	idle_node.add_child(card_body)
+
+	# Styles
 	var sb := StyleBoxFlat.new()
-	sb.bg_color = Color(col.r * 0.18, col.g * 0.18, col.b * 0.18, 0.95)
-	sb.border_color = col
+	sb.set_corner_radius_all(12)
 	sb.set_border_width_all(3)
-	sb.set_corner_radius_all(10)
-	sb.content_margin_left = 14
-	sb.content_margin_right = 14
-	sb.content_margin_top = 14
-	sb.content_margin_bottom = 14
-	var sb_hover := sb.duplicate() as StyleBoxFlat
-	sb_hover.bg_color = Color(col.r * 0.32, col.g * 0.32, col.b * 0.32, 0.95)
-	sb_hover.set_border_width_all(5)
+	sb.content_margin_left = 16
+	sb.content_margin_right = 16
+	sb.content_margin_top = 16
+	sb.content_margin_bottom = 16
+
 	if rarity == "rare":
-		sb.bg_color = Color(0.08, 0.12, 0.22, 0.98)
-		sb.border_color = Color(0.95, 0.82, 1.0)
-		sb.shadow_color = Color(0.25, 0.9, 1.0, 0.55)
-		sb.shadow_size = 12
-		sb_hover.bg_color = Color(0.14, 0.2, 0.34, 1.0)
-		sb_hover.border_color = Color(1.0, 0.92, 0.72)
-		sb_hover.shadow_color = Color(0.45, 0.95, 1.0, 0.8)
-		sb_hover.shadow_size = 18
-		btn.text = "RARE\n%s\n\n%s" % [card.name, card.desc]
-		btn.add_theme_color_override("font_color", Color(0.95, 0.98, 1.0))
-		btn.add_theme_color_override("font_hover_color", Color(1.0, 0.95, 0.72))
-	btn.add_theme_stylebox_override("normal", sb)
-	btn.add_theme_stylebox_override("pressed", sb_hover)
-	btn.add_theme_stylebox_override("hover", sb_hover)
-	btn.add_theme_stylebox_override("focus", sb)
-	btn.add_theme_stylebox_override("disabled", sb)
-	btn.disabled = not clickable
+		sb.bg_color = Color(0.06, 0.07, 0.18, 0.98)
+		sb.border_color = Color(0.8, 0.9, 1.0)
+		sb.shadow_color = Color(0.4, 0.6, 1.0, 0.4)
+		sb.shadow_size = 25
+	else:
+		sb.bg_color = Color(col.r * 0.15, col.g * 0.15, col.b * 0.15, 0.96)
+		sb.border_color = col.lerp(Color.WHITE, 0.2)
+		sb.shadow_color = Color(0, 0, 0, 0.3)
+		sb.shadow_size = 8
+
+	card_body.add_theme_stylebox_override("panel", sb)
+
+	# Content
+	var v_content := VBoxContainer.new()
+	v_content.add_theme_constant_override("separation", 12)
+	card_body.add_child(v_content)
+
+	var title := Label.new()
+	title.text = card.name.to_upper()
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	title.add_theme_font_size_override("font_size", 22)
+	title.add_theme_color_override("font_color", Color.WHITE if rarity != "rare" else Color(1.0, 0.95, 0.8))
+	v_content.add_child(title)
+
+	var desc := Label.new()
+	desc.text = card.desc
+	desc.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	desc.add_theme_font_size_override("font_size", 15)
+	desc.add_theme_color_override("font_color", Color(0.9, 0.9, 0.9))
+	v_content.add_child(desc)
+
+	# Holographic effects for rare
+	if rarity == "rare":
+		card_body.clip_contents = true
+
+		# Shifting gradient "Holo" sweep
+		for i in range(2):
+			var shine := ColorRect.new()
+			shine.size = Vector2(60, 500)
+			shine.rotation = deg_to_rad(35)
+			shine.position = Vector2(-150, -100)
+			# Cyan/Magenta holo colors
+			shine.color = Color(0.5, 0.9, 1.0, 0.12) if i == 0 else Color(1.0, 0.5, 0.9, 0.08)
+			shine.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			card_body.add_child(shine)
+
+			var tw_shine := shine.create_tween().set_loops()
+			tw_shine.tween_property(shine, "position:x", 400.0, 2.0 + (i * 0.5)).set_delay(0.5 + (i * 1.2))
+			tw_shine.tween_property(shine, "position:x", -150.0, 0.0)
+
+		# Pulsing border color
+		var tw_border := card_body.create_tween().set_loops()
+		tw_border.tween_property(sb, "border_color", Color(0.6, 0.95, 1.0), 1.5)
+		tw_border.tween_property(sb, "border_color", Color(0.95, 0.7, 1.0), 1.5)
+
+	# Clickable overlay
+	var btn := Button.new()
+	btn.flat = true
+	btn.size = card_body.size
+	btn.focus_mode = Control.FOCUS_NONE
+	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	card_body.add_child(btn)
+
 	if clickable:
 		btn.pressed.connect(func() -> void: _on_card_button(card_id))
-	return btn
+
+		# Idle Float (bobbing)
+		var idle_tw := idle_node.create_tween().set_loops()
+		idle_tw.tween_property(idle_node, "position:y", 4.0, 2.2).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+		idle_tw.tween_property(idle_node, "position:y", -4.0, 2.2).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+
+		# Initial random tilt
+		var base_rot := randf_range(-1.2, 1.2)
+		card_body.rotation_degrees = base_rot
+
+		# Hover logic
+		btn.mouse_entered.connect(func() -> void:
+			var tw := card_body.create_tween().set_parallel(true)
+			tw.tween_property(card_body, "scale", Vector2(1.12, 1.12), 0.2).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+			tw.tween_property(card_body, "rotation_degrees", 0.0, 0.15).set_trans(Tween.TRANS_CUBIC)
+			tw.tween_property(card_body, "position:y", -10.0, 0.2).set_trans(Tween.TRANS_CUBIC)
+			if rarity == "rare":
+				sb.shadow_size = 40
+				sb.shadow_color.a = 0.7
+		)
+
+		btn.mouse_exited.connect(func() -> void:
+			var tw := card_body.create_tween().set_parallel(true)
+			tw.tween_property(card_body, "scale", Vector2.ONE, 0.25).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
+			tw.tween_property(card_body, "rotation_degrees", base_rot, 0.2).set_trans(Tween.TRANS_CUBIC)
+			tw.tween_property(card_body, "position:y", 0.0, 0.25).set_trans(Tween.TRANS_CUBIC)
+			if rarity == "rare":
+				sb.shadow_size = 25
+				sb.shadow_color.a = 0.4
+		)
+
+	return root
+func _on_pick_timeout() -> void:
+	_pick_timeout_active = false
+	if not pick_overlay.visible:
+		return
+
+	# Pick first available card
+	var card_id := ""
+	if not pending_pick_cards.is_empty():
+		card_id = str(pending_pick_cards[0])
+
+	if card_id != "":
+		_on_card_button(card_id)
 
 func _on_card_button(card_id: String) -> void:
+	_pick_timeout_active = false
 	if multiplayer.is_server():
 		_server_card_picked(card_id)
 	else:
@@ -691,9 +871,24 @@ func _build_ghost_overlay() -> void:
 	veil.anchor_right = 1.0
 	veil.anchor_bottom = 1.0
 	veil.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	veil.color = Color(0.45, 0.9, 1.0, 0.04)
-	_ghost_overlay.add_child(veil)
 
+	var spirit_shader := Shader.new()
+	spirit_shader.code = "
+		shader_type canvas_item;
+		uniform sampler2D screen_texture : hint_screen_texture, repeat_disable, filter_nearest;
+		void fragment() {
+			vec4 color = texture(screen_texture, SCREEN_UV);
+			float gray = dot(color.rgb, vec3(0.299, 0.587, 0.114));
+			vec3 b_w = vec3(gray);
+			vec3 tint = vec3(0.5, 0.8, 1.0);
+			COLOR.rgb = mix(b_w, tint * (gray + 0.1), 0.35);
+			COLOR.a = 1.0;
+		}
+	"
+	var mat := ShaderMaterial.new()
+	mat.shader = spirit_shader
+	veil.material = mat
+	_ghost_overlay.add_child(veil)
 	_ghost_label = Label.new()
 	_ghost_label.text = "GHOST MODE"
 	_ghost_label.anchor_left = 0.5
@@ -876,8 +1071,129 @@ func _update_scoreboard() -> void:
 	for id in NetworkManager.players:
 		var wins := int(round_wins.get(id, 0))
 		var marker := "  ★" if wins >= ROUNDS_TO_WIN else ""
-		lines.append("%s  %d/%d%s" % [NetworkManager.players[id], wins, ROUNDS_TO_WIN, marker])
+		var pname := str(NetworkManager.players[id])
+		lines.append("%s  %d/%d%s" % [pname, wins, ROUNDS_TO_WIN, marker])
+
 	scoreboard.text = "\n".join(lines)
+
+# -------------------- TAB SCOREBOARD OVERLAY --------------------
+
+func _build_tab_overlay() -> void:
+	_tab_root = PanelContainer.new()
+	_tab_root.anchor_left = 0.5
+	_tab_root.anchor_right = 0.5
+	_tab_root.anchor_top = 0.12
+	_tab_root.anchor_bottom = 0.88
+	_tab_root.offset_left = -360.0
+	_tab_root.offset_right = 360.0
+	_tab_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_tab_root.visible = false
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.04, 0.04, 0.07, 0.93)
+	style.set_border_width_all(2)
+	style.border_color = Color(1.0, 0.85, 0.4, 0.8)
+	style.set_corner_radius_all(6)
+	style.content_margin_left = 20
+	style.content_margin_right = 20
+	style.content_margin_top = 16
+	style.content_margin_bottom = 16
+	_tab_root.add_theme_stylebox_override("panel", style)
+	var scroll := ScrollContainer.new()
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	_tab_root.add_child(scroll)
+	_tab_content = VBoxContainer.new()
+	_tab_content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_tab_content.add_theme_constant_override("separation", 10)
+	scroll.add_child(_tab_content)
+	$HUD.add_child(_tab_root)
+
+func _show_tab_overlay() -> void:
+	if _tab_root == null:
+		_build_tab_overlay()
+	_refresh_tab_overlay()
+	_tab_root.visible = true
+
+func _hide_tab_overlay() -> void:
+	if _tab_root:
+		_tab_root.visible = false
+
+func _refresh_tab_overlay() -> void:
+	for c in _tab_content.get_children():
+		c.queue_free()
+	var header := Label.new()
+	header.text = "SCOREBOARD"
+	header.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	header.add_theme_font_size_override("font_size", 28)
+	header.add_theme_color_override("font_color", Color(1, 0.9, 0.5))
+	_tab_content.add_child(header)
+	var sub := Label.new()
+	sub.text = "first to %d rounds wins" % ROUNDS_TO_WIN
+	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	sub.add_theme_font_size_override("font_size", 13)
+	sub.add_theme_color_override("font_color", Color(0.65, 0.65, 0.8))
+	_tab_content.add_child(sub)
+	_tab_content.add_child(HSeparator.new())
+	for id in NetworkManager.players:
+		_tab_content.add_child(_tab_player_row(int(id)))
+
+func _tab_player_row(id: int) -> Control:
+	var row := VBoxContainer.new()
+	row.add_theme_constant_override("separation", 4)
+	# Name + kills line
+	var hbox := HBoxContainer.new()
+	var nlbl := Label.new()
+	nlbl.text = str(NetworkManager.players.get(id, "Player"))
+	nlbl.add_theme_font_size_override("font_size", 20)
+	nlbl.add_theme_color_override("font_color", Color(1, 1, 1))
+	nlbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	hbox.add_child(nlbl)
+	var wins := int(round_wins.get(id, 0))
+	var score_lbl := Label.new()
+	score_lbl.text = "%d / %d" % [wins, ROUNDS_TO_WIN]
+	score_lbl.add_theme_font_size_override("font_size", 20)
+	score_lbl.add_theme_color_override("font_color", Color(1, 0.85, 0.4))
+	hbox.add_child(score_lbl)
+	row.add_child(hbox)
+	# Cards as colored pills (empty for fresh players).
+	var p_node := players_root.get_node_or_null(str(id))
+	if p_node and p_node.get("weapon") != null:
+		var cards: Array = p_node.weapon.applied_cards
+		if cards.is_empty():
+			var empty_lbl := Label.new()
+			empty_lbl.text = "    (no cards)"
+			empty_lbl.add_theme_font_size_override("font_size", 12)
+			empty_lbl.add_theme_color_override("font_color", Color(0.5, 0.5, 0.6))
+			row.add_child(empty_lbl)
+		else:
+			var flow := HFlowContainer.new()
+			flow.add_theme_constant_override("h_separation", 6)
+			flow.add_theme_constant_override("v_separation", 4)
+			for cid in cards:
+				var cdata := CardLibrary.by_id(str(cid))
+				if cdata.is_empty():
+					continue
+				flow.add_child(_tab_card_pill(str(cdata.get("name", cid)), cdata.get("color", Color.WHITE)))
+			row.add_child(flow)
+	return row
+
+func _tab_card_pill(text: String, col: Color) -> Control:
+	var pc := PanelContainer.new()
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(col.r * 0.22, col.g * 0.22, col.b * 0.22, 0.95)
+	sb.border_color = col
+	sb.set_border_width_all(1)
+	sb.set_corner_radius_all(3)
+	sb.content_margin_left = 7
+	sb.content_margin_right = 7
+	sb.content_margin_top = 2
+	sb.content_margin_bottom = 2
+	pc.add_theme_stylebox_override("panel", sb)
+	var lbl := Label.new()
+	lbl.text = text
+	lbl.add_theme_font_size_override("font_size", 12)
+	lbl.add_theme_color_override("font_color", col)
+	pc.add_child(lbl)
+	return pc
 
 # -------------------- DEV PANEL (F1) --------------------
 
@@ -944,17 +1260,17 @@ func _refresh_dev_panel() -> void:
 		_dev_stat("bullet color", "#%s" % w.bullet_color.to_html(false))
 	else:
 		_dev_note("(local player not spawned)")
-	_dev_heading("— APPLIED CARDS —", Color(0.8, 1.0, 0.5), 15)
+	_dev_heading("— CARDS —", Color(1.0, 0.6, 0.9), 15)
 	if local_player and is_instance_valid(local_player):
 		var applied: Array = local_player.weapon.applied_cards
-		if applied.is_empty():
-			_dev_note("(none)")
-		else:
-			for card_id in applied:
-				_dev_applied_row(str(card_id))
-	_dev_heading("— ALL CARDS —", Color(1.0, 0.6, 0.9), 15)
-	for card in CardLibrary.all():
-		_dev_available_row(card)
+		var counts := {}
+		for cid in applied:
+			counts[cid] = counts.get(cid, 0) + 1
+
+		for card in CardLibrary.all():
+			_dev_card_row(card, counts.get(card.id, 0))
+	else:
+		_dev_note("(local player not spawned)")
 
 func _dev_heading(text: String, color: Color, font_size: int) -> void:
 	var lbl := Label.new()
@@ -982,38 +1298,38 @@ func _dev_note(text: String) -> void:
 	lbl.add_theme_color_override("font_color", Color(0.6, 0.6, 0.7))
 	_dev_content.add_child(lbl)
 
-func _dev_applied_row(card_id: String) -> void:
-	var card: Dictionary = CardLibrary.by_id(card_id)
-	var label_text := card_id
-	var col := Color(1, 1, 1)
-	if not card.is_empty():
-		label_text = "%s  —  %s" % [card.name, card.desc]
-		col = card.color
+func _dev_card_row(card: Dictionary, count: int) -> void:
 	var hbox := HBoxContainer.new()
-	var n := Label.new()
-	n.text = label_text
-	n.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	n.add_theme_color_override("font_color", col)
-	hbox.add_child(n)
-	var btn := Button.new()
-	btn.text = "Remove"
-	btn.focus_mode = Control.FOCUS_NONE
-	btn.pressed.connect(_dev_remove_card.bind(card_id))
-	hbox.add_child(btn)
-	_dev_content.add_child(hbox)
+	hbox.add_theme_constant_override("separation", 10)
 
-func _dev_available_row(card: Dictionary) -> void:
-	var hbox := HBoxContainer.new()
 	var n := Label.new()
 	n.text = "%s  —  %s" % [card.name, card.desc]
 	n.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	n.add_theme_color_override("font_color", card.color)
 	hbox.add_child(n)
-	var btn := Button.new()
-	btn.text = "Apply"
-	btn.focus_mode = Control.FOCUS_NONE
-	btn.pressed.connect(_dev_apply_card.bind(card.id))
-	hbox.add_child(btn)
+
+	var clbl := Label.new()
+	clbl.text = str(count)
+	clbl.custom_minimum_size = Vector2(30, 0)
+	clbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	clbl.add_theme_color_override("font_color", Color(1, 1, 1) if count > 0 else Color(0.4, 0.4, 0.4))
+	hbox.add_child(clbl)
+
+	var btn_minus := Button.new()
+	btn_minus.text = "-"
+	btn_minus.custom_minimum_size = Vector2(30, 30)
+	btn_minus.focus_mode = Control.FOCUS_NONE
+	btn_minus.disabled = count <= 0
+	btn_minus.pressed.connect(_dev_remove_card.bind(card.id))
+	hbox.add_child(btn_minus)
+
+	var btn_plus := Button.new()
+	btn_plus.text = "+"
+	btn_plus.custom_minimum_size = Vector2(30, 30)
+	btn_plus.focus_mode = Control.FOCUS_NONE
+	btn_plus.pressed.connect(_dev_apply_card.bind(card.id))
+	hbox.add_child(btn_plus)
+
 	_dev_content.add_child(hbox)
 
 func _dev_apply_card(card_id: String) -> void:
