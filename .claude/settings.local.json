@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(godot --version)",
+      "Bash(/Applications/Godot.app/Contents/MacOS/Godot --headless --path /Users/joep/dev/godot --check-only --quit)",
+      "Bash(/Applications/Godot.app/Contents/MacOS/Godot --headless --path /Users/joep/dev/godot --quit)",
+      "Bash(/Applications/Godot.app/Contents/MacOS/Godot --headless --path /Users/joep/dev/godot res://scenes/game.tscn --quit-after 2)"
+    ]
+  }
+}

@@ -1,0 +1,51 @@
+[gd_scene format=3 uid="uid://b0grenade01"]
+
+[ext_resource type="Script" path="res://scripts/grenade.gd" id="1_grenade"]
+
+[sub_resource type="SphereShape3D" id="SphereShape3D_g"]
+radius = 0.2
+
+[sub_resource type="SphereMesh" id="SphereMesh_g"]
+radius = 0.2
+height = 0.4
+
+[sub_resource type="StandardMaterial3D" id="Mat_g"]
+albedo_color = Color(0.2, 0.6, 0.2, 1)
+metallic = 0.4
+roughness = 0.6
+emission_enabled = true
+emission = Color(0.8, 1, 0.2, 1)
+emission_energy_multiplier = 0.8
+
+[sub_resource type="SceneReplicationConfig" id="Repl_g"]
+properties/0/path = NodePath(".:position")
+properties/0/spawn = true
+properties/0/replication_mode = 1
+properties/1/path = NodePath(".:rotation")
+properties/1/spawn = true
+properties/1/replication_mode = 1
+properties/2/path = NodePath(".:linear_velocity")
+properties/2/spawn = true
+properties/2/replication_mode = 0
+properties/3/path = NodePath(".:shooter_id")
+properties/3/spawn = true
+properties/3/replication_mode = 0
+
+[node name="Grenade" type="RigidBody3D" groups=["grenades"]]
+collision_layer = 4
+collision_mask = 3
+gravity_scale = 1.5
+contact_monitor = true
+max_contacts_reported = 4
+physics_material_override = null
+script = ExtResource("1_grenade")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+shape = SubResource("SphereShape3D_g")
+
+[node name="Mesh" type="MeshInstance3D" parent="."]
+mesh = SubResource("SphereMesh_g")
+material_override = SubResource("Mat_g")
+
+[node name="Synchronizer" type="MultiplayerSynchronizer" parent="."]
+replication_config = SubResource("Repl_g")

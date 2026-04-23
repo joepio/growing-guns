@@ -1,0 +1,357 @@
+[gd_scene load_steps=25 format=3 uid="uid://b0arena01"]
+
+[sub_resource type="ProceduralSkyMaterial" id="Sky_1"]
+sky_top_color = Color(0.04, 0.02, 0.1, 1)
+sky_horizon_color = Color(0.55, 0.1, 0.25, 1)
+ground_bottom_color = Color(0.01, 0.0, 0.03, 1)
+ground_horizon_color = Color(0.2, 0.05, 0.15, 1)
+sun_angle_max = 30.0
+
+[sub_resource type="Sky" id="Sky_2"]
+sky_material = SubResource("Sky_1")
+
+[sub_resource type="Environment" id="Env_1"]
+background_mode = 2
+sky = SubResource("Sky_2")
+ambient_light_source = 2
+ambient_light_color = Color(0.35, 0.35, 0.55, 1)
+ambient_light_energy = 0.6
+fog_enabled = true
+fog_light_color = Color(0.25, 0.08, 0.2, 1)
+fog_density = 0.012
+glow_enabled = true
+glow_intensity = 0.9
+glow_bloom = 0.2
+
+[sub_resource type="StandardMaterial3D" id="Mat_Floor"]
+albedo_color = Color(0.13, 0.13, 0.17, 1)
+roughness = 0.9
+shading_mode = 1
+
+[sub_resource type="BoxMesh" id="Box_Floor"]
+size = Vector3(80, 1, 80)
+
+[sub_resource type="BoxShape3D" id="Shape_Floor"]
+size = Vector3(80, 1, 80)
+
+[sub_resource type="StandardMaterial3D" id="Mat_Wall"]
+albedo_color = Color(0.22, 0.22, 0.28, 1)
+roughness = 0.85
+shading_mode = 1
+
+[sub_resource type="BoxMesh" id="Box_WallA"]
+size = Vector3(80, 12, 1)
+
+[sub_resource type="BoxShape3D" id="Shape_WallA"]
+size = Vector3(80, 12, 1)
+
+[sub_resource type="BoxMesh" id="Box_WallB"]
+size = Vector3(1, 12, 80)
+
+[sub_resource type="BoxShape3D" id="Shape_WallB"]
+size = Vector3(1, 12, 80)
+
+[sub_resource type="StandardMaterial3D" id="Mat_Building"]
+albedo_color = Color(0.3, 0.3, 0.38, 1)
+roughness = 0.7
+shading_mode = 1
+
+[sub_resource type="StandardMaterial3D" id="Mat_BuildingDark"]
+albedo_color = Color(0.14, 0.16, 0.22, 1)
+roughness = 0.8
+shading_mode = 1
+
+[sub_resource type="StandardMaterial3D" id="Mat_Accent"]
+albedo_color = Color(0.9, 0.2, 0.2, 1)
+emission_enabled = true
+emission = Color(1, 0.3, 0.1, 1)
+emission_energy_multiplier = 2.2
+shading_mode = 1
+
+[sub_resource type="StandardMaterial3D" id="Mat_AccentYellow"]
+albedo_color = Color(1, 0.75, 0.1, 1)
+emission_enabled = true
+emission = Color(1, 0.7, 0.1, 1)
+emission_energy_multiplier = 2.5
+shading_mode = 1
+
+[sub_resource type="BoxMesh" id="Box_Pillar"]
+size = Vector3(3, 8, 3)
+
+[sub_resource type="BoxShape3D" id="Shape_Pillar"]
+size = Vector3(3, 8, 3)
+
+[sub_resource type="BoxMesh" id="Box_BigBuilding"]
+size = Vector3(10, 10, 10)
+
+[sub_resource type="BoxShape3D" id="Shape_BigBuilding"]
+size = Vector3(10, 10, 10)
+
+[sub_resource type="BoxMesh" id="Box_Ledge"]
+size = Vector3(6, 0.5, 2)
+
+[sub_resource type="BoxShape3D" id="Shape_Ledge"]
+size = Vector3(6, 0.5, 2)
+
+[sub_resource type="BoxMesh" id="Box_Ramp"]
+size = Vector3(5, 0.5, 10)
+
+[sub_resource type="BoxShape3D" id="Shape_Ramp"]
+size = Vector3(5, 0.5, 10)
+
+[sub_resource type="BoxMesh" id="Box_AccentStrip"]
+size = Vector3(0.3, 10, 0.3)
+
+[node name="Arena" type="Node3D"]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Env_1")
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.707107, -0.5, 0.5, 0, 0.707107, 0.707107, -0.707107, -0.5, 0.5, 0, 20, 0)
+light_color = Color(1, 0.75, 0.65, 1)
+light_energy = 1.2
+shadow_enabled = true
+
+[node name="RedFill" type="OmniLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 20, 0)
+light_color = Color(1, 0.35, 0.2, 1)
+light_energy = 1.4
+omni_range = 60.0
+
+[node name="Floor" type="StaticBody3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.5, 0)
+collision_layer = 1
+
+[node name="Mesh" type="MeshInstance3D" parent="Floor"]
+mesh = SubResource("Box_Floor")
+material_override = SubResource("Mat_Floor")
+
+[node name="Shape" type="CollisionShape3D" parent="Floor"]
+shape = SubResource("Shape_Floor")
+
+[node name="Walls" type="Node3D" parent="."]
+
+[node name="WallN" type="StaticBody3D" parent="Walls"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 6, -40)
+collision_layer = 1
+
+[node name="Mesh" type="MeshInstance3D" parent="Walls/WallN"]
+mesh = SubResource("Box_WallA")
+material_override = SubResource("Mat_Wall")
+
+[node name="Shape" type="CollisionShape3D" parent="Walls/WallN"]
+shape = SubResource("Shape_WallA")
+
+[node name="WallS" type="StaticBody3D" parent="Walls"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 6, 40)
+collision_layer = 1
+
+[node name="Mesh" type="MeshInstance3D" parent="Walls/WallS"]
+mesh = SubResource("Box_WallA")
+material_override = SubResource("Mat_Wall")
+
+[node name="Shape" type="CollisionShape3D" parent="Walls/WallS"]
+shape = SubResource("Shape_WallA")
+
+[node name="WallE" type="StaticBody3D" parent="Walls"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 40, 6, 0)
+collision_layer = 1
+
+[node name="Mesh" type="MeshInstance3D" parent="Walls/WallE"]
+mesh = SubResource("Box_WallB")
+material_override = SubResource("Mat_Wall")
+
+[node name="Shape" type="CollisionShape3D" parent="Walls/WallE"]
+shape = SubResource("Shape_WallB")
+
+[node name="WallW" type="StaticBody3D" parent="Walls"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -40, 6, 0)
+collision_layer = 1
+
+[node name="Mesh" type="MeshInstance3D" parent="Walls/WallW"]
+mesh = SubResource("Box_WallB")
+material_override = SubResource("Mat_Wall")
+
+[node name="Shape" type="CollisionShape3D" parent="Walls/WallW"]
+shape = SubResource("Shape_WallB")
+
+[node name="Buildings" type="Node3D" parent="."]
+
+[node name="TallN" type="StaticBody3D" parent="Buildings"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -18, 5, -14)
+collision_layer = 1
+
+[node name="Mesh" type="MeshInstance3D" parent="Buildings/TallN"]
+mesh = SubResource("Box_BigBuilding")
+material_override = SubResource("Mat_Building")
+
+[node name="Shape" type="CollisionShape3D" parent="Buildings/TallN"]
+shape = SubResource("Shape_BigBuilding")
+
+[node name="AccentStripN" type="MeshInstance3D" parent="Buildings/TallN"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 5.1)
+mesh = SubResource("Box_AccentStrip")
+material_override = SubResource("Mat_Accent")
+
+[node name="TallS" type="StaticBody3D" parent="Buildings"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 18, 5, 14)
+collision_layer = 1
+
+[node name="Mesh" type="MeshInstance3D" parent="Buildings/TallS"]
+mesh = SubResource("Box_BigBuilding")
+material_override = SubResource("Mat_Building")
+
+[node name="Shape" type="CollisionShape3D" parent="Buildings/TallS"]
+shape = SubResource("Shape_BigBuilding")
+
+[node name="AccentStripS" type="MeshInstance3D" parent="Buildings/TallS"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -5.1)
+mesh = SubResource("Box_AccentStrip")
+material_override = SubResource("Mat_AccentYellow")
+
+[node name="LedgeTallN" type="StaticBody3D" parent="Buildings"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -18, 6, -8)
+collision_layer = 1
+
+[node name="Mesh" type="MeshInstance3D" parent="Buildings/LedgeTallN"]
+mesh = SubResource("Box_Ledge")
+material_override = SubResource("Mat_Building")
+
+[node name="Shape" type="CollisionShape3D" parent="Buildings/LedgeTallN"]
+shape = SubResource("Shape_Ledge")
+
+[node name="LedgeTallS" type="StaticBody3D" parent="Buildings"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 18, 6, 8)
+collision_layer = 1
+
+[node name="Mesh" type="MeshInstance3D" parent="Buildings/LedgeTallS"]
+mesh = SubResource("Box_Ledge")
+material_override = SubResource("Mat_Building")
+
+[node name="Shape" type="CollisionShape3D" parent="Buildings/LedgeTallS"]
+shape = SubResource("Shape_Ledge")
+
+[node name="Pillars" type="Node3D" parent="."]
+
+[node name="P1" type="StaticBody3D" parent="Pillars"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 12, 4, -12)
+collision_layer = 1
+
+[node name="Mesh" type="MeshInstance3D" parent="Pillars/P1"]
+mesh = SubResource("Box_Pillar")
+material_override = SubResource("Mat_BuildingDark")
+
+[node name="Shape" type="CollisionShape3D" parent="Pillars/P1"]
+shape = SubResource("Shape_Pillar")
+
+[node name="P2" type="StaticBody3D" parent="Pillars"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -12, 4, 12)
+collision_layer = 1
+
+[node name="Mesh" type="MeshInstance3D" parent="Pillars/P2"]
+mesh = SubResource("Box_Pillar")
+material_override = SubResource("Mat_BuildingDark")
+
+[node name="Shape" type="CollisionShape3D" parent="Pillars/P2"]
+shape = SubResource("Shape_Pillar")
+
+[node name="P3" type="StaticBody3D" parent="Pillars"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 6, 4, 22)
+collision_layer = 1
+
+[node name="Mesh" type="MeshInstance3D" parent="Pillars/P3"]
+mesh = SubResource("Box_Pillar")
+material_override = SubResource("Mat_BuildingDark")
+
+[node name="Shape" type="CollisionShape3D" parent="Pillars/P3"]
+shape = SubResource("Shape_Pillar")
+
+[node name="P4" type="StaticBody3D" parent="Pillars"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -6, 4, -22)
+collision_layer = 1
+
+[node name="Mesh" type="MeshInstance3D" parent="Pillars/P4"]
+mesh = SubResource("Box_Pillar")
+material_override = SubResource("Mat_BuildingDark")
+
+[node name="Shape" type="CollisionShape3D" parent="Pillars/P4"]
+shape = SubResource("Shape_Pillar")
+
+[node name="CenterTower" type="StaticBody3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 2, 0, 0, 0, 1, 0, 8, 0)
+collision_layer = 1
+
+[node name="Mesh" type="MeshInstance3D" parent="CenterTower"]
+mesh = SubResource("Box_BigBuilding")
+material_override = SubResource("Mat_Building")
+
+[node name="Shape" type="CollisionShape3D" parent="CenterTower"]
+shape = SubResource("Shape_BigBuilding")
+
+[node name="Ramps" type="Node3D" parent="."]
+
+[node name="RampA" type="StaticBody3D" parent="Ramps"]
+transform = Transform3D(0.92388, 0, 0.382683, 0, 1, 0, -0.382683, 0, 0.92388, 18, 2.3, -26)
+collision_layer = 1
+
+[node name="Mesh" type="MeshInstance3D" parent="Ramps/RampA"]
+mesh = SubResource("Box_Ramp")
+material_override = SubResource("Mat_BuildingDark")
+
+[node name="Shape" type="CollisionShape3D" parent="Ramps/RampA"]
+shape = SubResource("Shape_Ramp")
+
+[node name="RampB" type="StaticBody3D" parent="Ramps"]
+transform = Transform3D(-0.92388, 0, -0.382683, 0, 1, 0, 0.382683, 0, -0.92388, -18, 2.3, 26)
+collision_layer = 1
+
+[node name="Mesh" type="MeshInstance3D" parent="Ramps/RampB"]
+mesh = SubResource("Box_Ramp")
+material_override = SubResource("Mat_BuildingDark")
+
+[node name="Shape" type="CollisionShape3D" parent="Ramps/RampB"]
+shape = SubResource("Shape_Ramp")
+
+[node name="AccentLights" type="Node3D" parent="."]
+
+[node name="L1" type="OmniLight3D" parent="AccentLights"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -18, 12, -14)
+light_color = Color(1, 0.3, 0.2, 1)
+light_energy = 3.0
+omni_range = 15.0
+
+[node name="L2" type="OmniLight3D" parent="AccentLights"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 18, 12, 14)
+light_color = Color(1, 0.7, 0.2, 1)
+light_energy = 3.0
+omni_range = 15.0
+
+[node name="L3" type="OmniLight3D" parent="AccentLights"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 18, 0)
+light_color = Color(0.6, 0.3, 1, 1)
+light_energy = 2.0
+omni_range = 25.0
+
+[node name="SpawnPoints" type="Node3D" parent="."]
+
+[node name="S1" type="Marker3D" parent="SpawnPoints" groups=["spawnpoints"]]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -28, 3, -28)
+
+[node name="S2" type="Marker3D" parent="SpawnPoints" groups=["spawnpoints"]]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 28, 3, 28)
+
+[node name="S3" type="Marker3D" parent="SpawnPoints" groups=["spawnpoints"]]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -28, 3, 28)
+
+[node name="S4" type="Marker3D" parent="SpawnPoints" groups=["spawnpoints"]]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 28, 3, -28)
+
+[node name="S5" type="Marker3D" parent="SpawnPoints" groups=["spawnpoints"]]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 14, 0)
+
+[node name="S6" type="Marker3D" parent="SpawnPoints" groups=["spawnpoints"]]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 12, 9, -12)
+
+[node name="S7" type="Marker3D" parent="SpawnPoints" groups=["spawnpoints"]]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -12, 9, 12)
