@@ -14,7 +14,7 @@ corner_radius_top_right = 8
 corner_radius_bottom_right = 8
 corner_radius_bottom_left = 8
 
-[node name="MainMenu" type="Control" unique_id=1063304552]
+[node name="MainMenu" type="Control" unique_id=1760365584]
 layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0
@@ -23,7 +23,7 @@ grow_horizontal = 2
 grow_vertical = 2
 script = ExtResource("1_menu")
 
-[node name="Background" type="ColorRect" parent="." unique_id=1488341276]
+[node name="Background" type="ColorRect" parent="." unique_id=1334316516]
 layout_mode = 1
 anchors_preset = 15
 anchor_right = 1.0
@@ -32,15 +32,15 @@ grow_horizontal = 2
 grow_vertical = 2
 color = Color(0.05, 0.01, 0.08, 1)
 
-[node name="Title" type="Label" parent="." unique_id=479278422]
+[node name="Title" type="Label" parent="." unique_id=929315831]
 layout_mode = 1
 anchors_preset = 5
 anchor_left = 0.5
 anchor_right = 0.5
 offset_left = -220.0
-offset_top = 80.0
+offset_top = 40.0
 offset_right = 220.0
-offset_bottom = 180.0
+offset_bottom = 140.0
 grow_horizontal = 2
 theme_override_colors/font_color = Color(1, 0.2, 0.3, 1)
 theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
@@ -50,73 +50,104 @@ text = "JUMPSHOOT"
 horizontal_alignment = 1
 vertical_alignment = 1
 
-[node name="Subtitle" type="Label" parent="." unique_id=779172597]
+[node name="Subtitle" type="Label" parent="." unique_id=1933619471]
 layout_mode = 1
 anchors_preset = 5
 anchor_left = 0.5
 anchor_right = 0.5
 offset_left = -220.0
-offset_top = 180.0
+offset_top = 140.0
 offset_right = 220.0
-offset_bottom = 210.0
+offset_bottom = 170.0
 grow_horizontal = 2
 theme_override_colors/font_color = Color(1, 0.6, 0.2, 1)
 theme_override_font_sizes/font_size = 16
 text = "WASD · SPACE · SHIFT dash · LMB rifle · RMB grenade · F melee"
 horizontal_alignment = 1
 
-[node name="Panel" type="PanelContainer" parent="." unique_id=897502891]
+[node name="Panel" type="PanelContainer" parent="." unique_id=2096109255]
 layout_mode = 1
 anchors_preset = 8
 anchor_left = 0.5
 anchor_top = 0.5
 anchor_right = 0.5
 anchor_bottom = 0.5
-offset_left = -220.0
-offset_top = -120.0
-offset_right = 220.0
-offset_bottom = 140.0
+offset_left = -240.0
+offset_top = -180.0
+offset_right = 240.0
+offset_bottom = 240.0
 grow_horizontal = 2
 grow_vertical = 2
 theme_override_styles/panel = SubResource("Style_1")
 
-[node name="VBox" type="VBoxContainer" parent="Panel" unique_id=1258404963]
+[node name="VBox" type="VBoxContainer" parent="Panel" unique_id=549687302]
 layout_mode = 2
-theme_override_constants/separation = 12
+theme_override_constants/separation = 10
 
-[node name="NameLabel" type="Label" parent="Panel/VBox" unique_id=358431496]
+[node name="NameLabel" type="Label" parent="Panel/VBox" unique_id=1394129134]
 layout_mode = 2
 theme_override_colors/font_color = Color(1, 0.9, 0.9, 1)
-text = "Name:"
+text = "Your Name:"
 
-[node name="NameInput" type="LineEdit" parent="Panel/VBox" unique_id=351040208]
+[node name="NameInput" type="LineEdit" parent="Panel/VBox" unique_id=289054224]
 layout_mode = 2
-placeholder_text = "Your name"
+placeholder_text = "Enter name..."
 
-[node name="AddrLabel" type="Label" parent="Panel/VBox" unique_id=487624180]
+[node name="HSeparator" type="HSeparator" parent="Panel/VBox" unique_id=652535047]
 layout_mode = 2
-theme_override_colors/font_color = Color(1, 0.9, 0.9, 1)
-text = "Server address (for Join):"
 
-[node name="AddrInput" type="LineEdit" parent="Panel/VBox" unique_id=1154198742]
+[node name="BotButton" type="Button" parent="Panel/VBox" unique_id=2074064213]
+custom_minimum_size = Vector2(0, 44)
 layout_mode = 2
+text = "VS BOT"
+
+[node name="HostButton" type="Button" parent="Panel/VBox" unique_id=24855203]
+custom_minimum_size = Vector2(0, 44)
+layout_mode = 2
+text = "HOST MATCH"
+
+[node name="HSeparator2" type="HSeparator" parent="Panel/VBox" unique_id=494789313]
+layout_mode = 2
+
+[node name="JoinIPLabel" type="Label" parent="Panel/VBox" unique_id=1048703386]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.7, 0.7, 0.8, 1)
+theme_override_font_sizes/font_size = 14
+text = "Direct Join by IP:"
+
+[node name="HBoxJoin" type="HBoxContainer" parent="Panel/VBox" unique_id=554552808]
+layout_mode = 2
+
+[node name="AddrInput" type="LineEdit" parent="Panel/VBox/HBoxJoin" unique_id=148003731]
+layout_mode = 2
+size_flags_horizontal = 3
 text = "127.0.0.1"
+placeholder_text = "Server IP"
 
-[node name="HBox" type="HBoxContainer" parent="Panel/VBox" unique_id=63854551]
+[node name="JoinButton" type="Button" parent="Panel/VBox/HBoxJoin" unique_id=1244332451]
+custom_minimum_size = Vector2(80, 0)
 layout_mode = 2
-theme_override_constants/separation = 12
-
-[node name="HostButton" type="Button" parent="Panel/VBox/HBox" unique_id=1950222270]
-layout_mode = 2
-size_flags_horizontal = 3
-text = "HOST"
-
-[node name="JoinButton" type="Button" parent="Panel/VBox/HBox" unique_id=501678384]
-layout_mode = 2
-size_flags_horizontal = 3
 text = "JOIN"
 
-[node name="Status" type="Label" parent="Panel/VBox" unique_id=1727785162]
+[node name="HSeparator3" type="HSeparator" parent="Panel/VBox" unique_id=1529607208]
+layout_mode = 2
+
+[node name="LocalGamesLabel" type="Label" parent="Panel/VBox" unique_id=809544244]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.4, 0.8, 1, 1)
+theme_override_font_sizes/font_size = 14
+text = "Local Games Found:"
+
+[node name="ScrollContainer" type="ScrollContainer" parent="Panel/VBox" unique_id=1164932453]
+layout_mode = 2
+size_flags_vertical = 3
+horizontal_scroll_mode = 0
+
+[node name="GameList" type="VBoxContainer" parent="Panel/VBox/ScrollContainer" unique_id=1994051847]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="Status" type="Label" parent="Panel/VBox" unique_id=508578898]
 layout_mode = 2
 theme_override_colors/font_color = Color(1, 0.6, 0.3, 1)
 horizontal_alignment = 1
