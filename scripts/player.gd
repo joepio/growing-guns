@@ -103,7 +103,10 @@ var _reload_audio: Node = null
 var _camera_rest_pos: Vector3
 var _landing_bump_y: float = 0.0
 var _was_on_floor: bool = true
+var _view_punch_rot: Vector3 = Vector3.ZERO
+var _view_punch_pos: Vector3 = Vector3.ZERO
 var _melee_tween: Tween = null
+var _ragdoll_head: RigidBody3D = null
 var _body_materials: Dictionary = {}
 
 @export var player_id: int = 1
@@ -156,6 +159,10 @@ func _ready() -> void:
 	add_to_group("players")
 
 func _process(delta: float) -> void:
+	if _ragdoll_head and is_instance_valid(_ragdoll_head):
+		camera.global_transform = _ragdoll_head.global_transform
+		return
+
 	if not is_multiplayer_authority():
 		_interpolate_remote_state(delta)
 	if is_bot:
@@ -298,7 +305,14 @@ func _physics_process(delta: float) -> void:
 	shake_amt = lerp(shake_amt, 0.0, delta * 14.0)
 	_landing_bump_y = lerp(_landing_bump_y, 0.0, delta * 10.0) # Smooth recovery
 
-	camera.rotation.x = look_pitch + recoil_pitch
+	# View punch decay
+	_view_punch_pos = _view_punch_pos.lerp(Vector3.ZERO, delta * 12.0)
+	_view_punch_rot = _view_punch_rot.lerp(Vector3.ZERO, delta * 12.0)
+
+	camera.rotation.x = look_pitch + recoil_pitch + _view_punch_rot.x
+	camera.rotation.y = _view_punch_rot.y
+	camera.rotation.z = deg_to_rad(tilt_z) + _view_punch_rot.z
+
 	muzzle.position = _muzzle_rest_pos + Vector3(0.0, 0.0, muzzle_kick_z) + melee_offset + reload_offset
 	# Height scales with body_scale so the viewpoint follows the taller head.
 	var cam_y: float = (_camera_rest_pos.y * maxf(0.1, weapon.body_scale)) - _landing_bump_y
@@ -306,8 +320,7 @@ func _physics_process(delta: float) -> void:
 		_camera_rest_pos.x + randf_range(-1.0, 1.0) * shake_amt,
 		cam_y + randf_range(-1.0, 1.0) * shake_amt,
 		_camera_rest_pos.z,
-	)
-
+	) + _view_punch_pos # Apply hit punch offset
 	# --- Gravity ---
 	if not is_on_floor():
 		velocity.y -= GRAVITY * delta
@@ -363,8 +376,12 @@ func _physics_process(delta: float) -> void:
 	var wish_dir := _input_vector()
 	var current_walk_speed := WALK_SPEED * weapon.move_speed_mult
 	var target_vel := wish_dir * current_walk_speed
-	var accel := GROUND_ACCEL if is_on_floor() else AIR_ACCEL
 
+	# Horizontal velocity only for momentum calculations
+	var horizontal_vel := Vector3(velocity.x, 0.0, velocity.z)
+	var is_speeding := horizontal_vel.length() > current_walk_speed + 0.1
+
+	var accel: float
 	if dash_timer > 0.0:
 		dash_timer -= delta
 		velocity.y = max(velocity.y, 0.0)
@@ -374,14 +391,22 @@ func _physics_process(delta: float) -> void:
 		# Blend between dash velocity and walk velocity.
 		target_vel = target_vel.lerp(dash_vel, dash_factor)
 		accel = 2000.0 # Snap to dash trajectory
+	elif is_on_floor():
+		# If we're moving faster than walk speed (e.g. from explosion), use low friction
+		# instead of high acceleration to stop us.
+		if is_speeding and wish_dir.dot(horizontal_vel.normalized()) <= 0.5:
+			accel = FRICTION
+		else:
+			accel = GROUND_ACCEL
+	else:
+		accel = AIR_ACCEL
 
 	velocity.x = move_toward(velocity.x, target_vel.x, accel * delta)
 	velocity.z = move_toward(velocity.z, target_vel.z, accel * delta)
 
-	if is_on_floor() and wish_dir == Vector3.ZERO and dash_timer <= 0.0:
+	if is_on_floor() and wish_dir == Vector3.ZERO and dash_timer <= 0.0 and not is_speeding:
 		velocity.x = move_toward(velocity.x, 0.0, FRICTION * delta * current_walk_speed * 0.1)
 		velocity.z = move_toward(velocity.z, 0.0, FRICTION * delta * current_walk_speed * 0.1)
-
 	move_and_slide()
 	_maybe_broadcast_state()
 
@@ -436,10 +461,12 @@ func _fire_rifle() -> void:
 	var origin: Vector3 = camera.global_position
 	var base_dir: Vector3 = -camera.global_transform.basis.z
 	# Local feel (authority-only; these fields are driven by the local physics loop).
-	recoil_pitch += RIFLE_RECOIL_PITCH
-	muzzle_kick_z = max(muzzle_kick_z, RIFLE_RECOIL_KICK)
-	shake_amt = max(shake_amt, RIFLE_SHAKE)
-	rotate_y(randf_range(-RIFLE_RECOIL_YAW_JITTER, RIFLE_RECOIL_YAW_JITTER))
+	# Scale recoil and kick by the size of the bullet
+	var scale_f := weapon.bullet_scale
+	recoil_pitch += RIFLE_RECOIL_PITCH * scale_f
+	muzzle_kick_z = max(muzzle_kick_z, RIFLE_RECOIL_KICK * scale_f)
+	shake_amt = max(shake_amt, RIFLE_SHAKE * scale_f)
+	rotate_y(randf_range(-RIFLE_RECOIL_YAW_JITTER, RIFLE_RECOIL_YAW_JITTER) * scale_f)
 	# Multi-shot: fire N rays with random yaw+pitch spread (MULTI-SHOT card).
 	var shots: int = weapon.get_shots_per_trigger()
 	var spread: float = weapon.spread
@@ -468,20 +495,25 @@ func _rifle_fired(origin: Vector3, dir: Vector3, shooter_id: int) -> void:
 	_spawn_muzzle_flash(w.bullet_color, w.bullet_scale)
 
 func _apply_bullet_splash(pos: Vector3, radius: float, damage: float, shooter_id: int) -> void:
-	for p in get_tree().get_nodes_in_group("players"):
+	for p: Node3D in get_tree().get_nodes_in_group("players"):
 		if not is_instance_valid(p):
 			continue
 		var dist: float = pos.distance_to(p.global_position)
 		if dist > radius:
 			continue
-		# LoS check.
-		var q := PhysicsRayQueryParameters3D.create(pos, p.global_position)
+		# LoS check - target torso (UP 1.0m) to avoid floor clipping
+		var target_pos: Vector3 = p.global_position + Vector3.UP * 1.0
+		var q := PhysicsRayQueryParameters3D.create(pos + Vector3.UP * 0.1, target_pos)
 		q.collision_mask = 1
 		if not get_world_3d().direct_space_state.intersect_ray(q).is_empty():
 			continue
 
-		var falloff: float = clamp(1.0 - dist / radius, 0.0, 1.0)
-		var dmg: int = int(damage * falloff)
+		var dist_ratio := dist / radius
+		# Use a square-root falloff so the explosion stays 'hotter' for longer
+		var falloff := clampf(1.0 - dist_ratio, 0.0, 1.0)
+		var curve_falloff := sqrt(falloff)
+
+		var dmg: int = int(damage * curve_falloff)
 
 		# Self-damage reduction (50%) but keep full knockback
 		if p.player_id == shooter_id:
@@ -492,7 +524,7 @@ func _apply_bullet_splash(pos: Vector3, radius: float, damage: float, shooter_id
 
 		# Explosion Knockback
 		var shooter := get_parent().get_node_or_null(str(shooter_id))
-		var kb_mult: float = 12.0 # High base for explosions
+		var kb_mult: float = 24.0 # Doubled base for explosions
 		var weapon_kb: float = shooter.weapon.knockback if shooter and shooter.get("weapon") != null else 1.0
 
 		var dir: Vector3 = (p.global_position - pos)
@@ -501,8 +533,8 @@ func _apply_bullet_splash(pos: Vector3, radius: float, damage: float, shooter_id
 		else:
 			dir = Vector3.UP
 
-		# Violent outward push + upward lift
-		var impulse: Vector3 = (dir * kb_mult * weapon_kb * falloff) + (Vector3.UP * kb_mult * 0.5 * falloff)
+		# Violent outward push + upward lift, using linear falloff for physics feel
+		var impulse: Vector3 = (dir * kb_mult * weapon_kb * falloff) + (Vector3.UP * kb_mult * 0.8 * falloff)
 		p.apply_knockback.rpc_id(p.get_multiplayer_authority(), impulse)
 
 func _player_from_hit_collider(collider: Node) -> Node:
@@ -810,6 +842,13 @@ func _spawn_ragdoll(push_dir: Vector3) -> void:
 		rb.gravity_scale = 1.0
 		scene.add_child(rb)
 		rb.global_transform = src.global_transform
+
+		# For local player: track the head for death-cam
+		if is_multiplayer_authority() and not is_bot and p.node == head_mesh:
+			_ragdoll_head = rb
+			if scene.has_method("show_death_effect"):
+				scene.show_death_effect(true)
+
 		var mi := MeshInstance3D.new()
 		mi.mesh = src.mesh
 		mi.material_override = src.material_override
@@ -1285,6 +1324,16 @@ func _apply_damage(amount: int, from_id: int) -> void:
 		_notify_damage_source(from_id)
 		SFX.hit_received()
 
+		# View punch: shift camera in the direction of the hit
+		var attacker := get_parent().get_node_or_null(str(from_id))
+		if attacker and is_multiplayer_authority():
+			var hit_dir: Vector3 = (attacker.global_position - global_position).normalized()
+			# Transform world hit dir to local space
+			var local_dir: Vector3 = global_transform.basis.inverse() * hit_dir
+			# Punch camera away from hit
+			_view_punch_pos = -local_dir * 0.15
+			# Add some random rotational kick
+			_view_punch_rot = Vector3(randf_range(-0.1, 0.1), randf_range(-0.1, 0.1), randf_range(-0.1, 0.1))
 	if health > 0:
 		_play_hurt_sound.rpc(global_position)
 
@@ -1366,6 +1415,13 @@ func server_respawn(pos: Vector3) -> void:
 	dash_charges = MAX_DASH_CHARGES
 	dash_timer = 0.0
 	jumps_left = 2 + weapon.extra_jumps
+
+	_ragdoll_head = null
+	camera.transform = Transform3D(Basis.IDENTITY, _camera_rest_pos)
+	var scene := get_tree().current_scene
+	if scene and scene.has_method("show_death_effect"):
+		scene.show_death_effect(false)
+
 	_end_shield()
 	_apply_ghost_visuals()
 	# Push the teleport to every peer immediately so they don't see us at the

@@ -4,13 +4,14 @@ const PLAYER_SCENE := preload("res://scenes/player.tscn")
 
 enum State { WAITING, PLAYING, PICKING_CARD, MATCH_OVER }
 
-const ROUNDS_TO_WIN := 10
 const CARDS_PER_PICK := 3
 const SPAWN_CAPSULE_RADIUS := 0.4
 const SPAWN_CAPSULE_HEIGHT := 1.8
 const BOT_ID := 9999
 const BOT_NAME := "BOT"
 const SPAWN_MIN_SPACING := 8.0   # meters — two fresh spawns must be at least this far apart
+
+var rounds_to_win: int = 10
 
 @onready var players_root: Node3D = $Players
 @onready var health_label: Label = $HUD/HealthPanel/HealthLabel
@@ -54,7 +55,9 @@ var _rematch_overlay: Control = null
 var _rematch_title: Label = null
 var _rematch_subtitle: Label = null
 var _rematch_button: Button = null
+var _extend_button: Button = null
 var _rematch_requested: bool = false
+var _extend_votes: Dictionary = {} # id -> bool
 
 # --- Dev panel (F1) ---
 var _dev_root: PanelContainer = null
@@ -68,6 +71,7 @@ var _tab_content: VBoxContainer = null
 var _pause_menu: Control = null
 var _ghost_overlay: Control = null
 var _ghost_label: Label = null
+var _death_overlay: ColorRect = null
 
 func _ready() -> void:
 	# Hide the static label and set up the dynamic one
@@ -101,6 +105,8 @@ func _ready() -> void:
 	scoreboard.visible = false
 	_build_rematch_overlay()
 	_build_ghost_overlay()
+	_build_death_overlay()
+	_build_retro_filter()
 	_build_tab_overlay()
 	_build_stats_panel()
 
@@ -465,21 +471,25 @@ func _end_round(winner_id: int) -> void:
 		round_wins[winner_id] = int(round_wins.get(winner_id, 0)) + 1
 		_broadcast_scores.rpc(round_wins)
 	# Match over?
-	if winner_id != 0 and int(round_wins[winner_id]) >= ROUNDS_TO_WIN:
+	if winner_id != 0 and int(round_wins[winner_id]) >= rounds_to_win:
 		state = State.MATCH_OVER
 		for pid in NetworkManager.players:
 			var pn := players_root.get_node_or_null(str(pid))
 			if pn:
-				pn.set_frozen.rpc(true)
+				# Freeze everyone except the winner so they can celebrate
+				if int(pid) != winner_id:
+					pn.set_frozen.rpc(true)
 				pn.reset_weapon.rpc() # Reset cards immediately when match ends
 		_match_over.rpc(winner_id)
 		return
-	# Freeze the survivor and wait for every eliminated player to finish their pick.
+	# Freeze the losers and wait for them to finish their picks.
 	state = State.PICKING_CARD
 	for pid in NetworkManager.players:
 		var p := players_root.get_node_or_null(str(pid))
 		if p:
-			p.set_frozen.rpc(true)
+			# Only freeze the non-winners
+			if int(pid) != winner_id:
+				p.set_frozen.rpc(true)
 	for raw_loser_id in eliminated_players.keys():
 		var loser_id := int(raw_loser_id)
 		if not completed_picks.has(loser_id) and not pending_pick_cards_by_player.has(loser_id):
@@ -643,44 +653,71 @@ func _populate_cards(card_ids: Array, clickable: bool) -> void:
 		var card_node := _make_card_button(cid, card, clickable)
 		pick_row.add_child(card_node)
 
-		# Entry animation: pop up from below
 		var body = card_node.get_child(0).get_child(0) # root -> idle_node -> card_body
-		body.position.y = 400.0
-		body.modulate.a = 0.0
+		var content = body.get_child(0) # VBoxContainer with labels
 
-		var tw := body.create_tween().set_parallel(true)
-		tw.tween_property(body, "position:y", 0.0, 0.6).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT).set_delay(index * 0.1)
-		tw.tween_property(body, "modulate:a", 1.0, 0.3).set_delay(index * 0.1)
+		# Store the intended 'front' style from the override we just set
+		var front_style = body.get_theme_stylebox("panel")
+
+		# 1. Initial 'Face Down' State
+		body.position.y = 400.0
+		body.scale.x = 0.0 # Narrow for flip
+		content.visible = false
+
+		# Create a temporary back-side style
+		var back_style := StyleBoxFlat.new()
+		back_style.bg_color = Color(0.12, 0.12, 0.15, 1.0)
+		back_style.border_color = Color(0.3, 0.3, 0.4)
+		back_style.set_corner_radius_all(12)
+		body.add_theme_stylebox_override("panel", back_style)
+
+		# 2. Entry + Flip Reveal Sequence
+		var reveal_delay := index * 0.3
+		var tw := body.create_tween()
+
+		# Pop up from below (still face down)
+		tw.tween_property(body, "position:y", 0.0, 0.4)\
+			.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT).set_delay(index * 0.08)
+
+		# Flip animation
+		tw.tween_interval(reveal_delay)
+		tw.tween_property(body, "scale:x", 0.0, 0.1) # Ensure it's narrow
+		tw.tween_callback(func():
+			content.visible = true
+			body.add_theme_stylebox_override("panel", front_style) # Re-apply front style
+			SFX.pling(0.8 + (index * 0.15))
+		)
+		tw.tween_property(body, "scale:x", 1.0, 0.15).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
 		index += 1
 
 func _make_card_button(card_id: String, card: Dictionary, clickable: bool) -> Control:
 	var rarity: String = str(card.get("rarity", "common"))
 	var col: Color = card.color
 
-	# Root container - provides the spacing in the HBox
+	# 1. Root: The stable footprint in the HBox
 	var root := Control.new()
-	root.custom_minimum_size = Vector2(230, 300)
+	root.custom_minimum_size = Vector2(220, 300)
+	root.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 
-	# Offset container - handles the idle floating (bobbing)
+	# 2. Idle: Handles the bobbing animation
 	var idle_node := Control.new()
-	idle_node.size = Vector2(220, 260)
+	idle_node.size = Vector2(200, 280)
+	idle_node.position = (root.custom_minimum_size - idle_node.size) * 0.5
 	root.add_child(idle_node)
 
-	# Main card body - handles scale/hover/visuals
-	var card_body := PanelContainer.new()
-	card_body.size = Vector2(220, 260)
+	# 3. Card Body: Handles scaling and visuals. Use a simple Panel (not Container)
+	# to prevent any child from growing the card's physical footprint.
+	var card_body := Panel.new()
+	card_body.custom_minimum_size = Vector2(200, 280)
+	card_body.size = card_body.custom_minimum_size
 	card_body.pivot_offset = card_body.size * 0.5
 	idle_node.add_child(card_body)
 
-	# Styles
+	# Style the card body
 	var sb := StyleBoxFlat.new()
 	sb.set_corner_radius_all(12)
 	sb.set_border_width_all(3)
-	sb.content_margin_left = 16
-	sb.content_margin_right = 16
-	sb.content_margin_top = 16
-	sb.content_margin_bottom = 16
-
 	if rarity == "rare":
 		sb.bg_color = Color(0.06, 0.07, 0.18, 0.98)
 		sb.border_color = Color(0.8, 0.9, 1.0)
@@ -691,19 +728,19 @@ func _make_card_button(card_id: String, card: Dictionary, clickable: bool) -> Co
 		sb.border_color = col.lerp(Color.WHITE, 0.2)
 		sb.shadow_color = Color(0, 0, 0, 0.3)
 		sb.shadow_size = 8
-
 	card_body.add_theme_stylebox_override("panel", sb)
 
-	# Content
+	# 4. Content: Centered VBox inside the card
 	var v_content := VBoxContainer.new()
-	v_content.add_theme_constant_override("separation", 12)
+	v_content.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT, Control.PRESET_MODE_MINSIZE, 14)
+	v_content.add_theme_constant_override("separation", 10)
 	card_body.add_child(v_content)
 
 	var title := Label.new()
 	title.text = card.name.to_upper()
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	title.add_theme_font_size_override("font_size", 22)
+	title.add_theme_font_size_override("font_size", 18) # Slightly smaller to fit
 	title.add_theme_color_override("font_color", Color.WHITE if rarity != "rare" else Color(1.0, 0.95, 0.8))
 	v_content.add_child(title)
 
@@ -711,20 +748,20 @@ func _make_card_button(card_id: String, card: Dictionary, clickable: bool) -> Co
 	desc.text = card.desc
 	desc.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	desc.add_theme_font_size_override("font_size", 15)
+	desc.add_theme_font_size_override("font_size", 13)
 	desc.add_theme_color_override("font_color", Color(0.9, 0.9, 0.9))
 	v_content.add_child(desc)
 
 	# Mathematical Stat Diffs
 	var stats_vbox := VBoxContainer.new()
-	stats_vbox.add_theme_constant_override("separation", 2)
+	stats_vbox.add_theme_constant_override("separation", 1)
 	v_content.add_child(stats_vbox)
 
 	for diff_line in _get_card_stat_diff(card_id):
 		var slbl := Label.new()
 		slbl.text = diff_line
 		slbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		slbl.add_theme_font_size_override("font_size", 11)
+		slbl.add_theme_font_size_override("font_size", 10)
 		slbl.add_theme_color_override("font_color", Color(0.7, 0.8, 1.0, 0.7))
 		stats_vbox.add_child(slbl)
 
@@ -738,25 +775,22 @@ func _make_card_button(card_id: String, card: Dictionary, clickable: bool) -> Co
 		clip_layer.clip_contents = true
 		card_body.add_child(clip_layer)
 
-		# Shifting gradient "Holo" sweep - use TextureRect with Gradient for soft edges
+		# Shifting gradient "Holo" sweep
 		for i in range(2):
 			var shine := TextureRect.new()
 			var grad := Gradient.new()
 			grad.set_offsets(PackedFloat32Array([0.0, 0.5, 1.0]))
-			# Prismatic holo colors: Transparent -> Soft Tint -> Transparent
 			var tint := Color(0.4, 0.8, 1.0, 0.1) if i == 0 else Color(0.9, 0.5, 1.0, 0.08)
 			grad.set_colors(PackedColorArray([Color(tint.r, tint.g, tint.b, 0), tint, Color(tint.r, tint.g, tint.b, 0)]))
-
 			var tex := GradientTexture2D.new()
 			tex.gradient = grad
 			tex.width = 128
 			tex.height = 1
 			tex.fill_from = Vector2(0, 0)
 			tex.fill_to = Vector2(1, 0)
-
 			shine.texture = tex
 			shine.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-			shine.size = Vector2(240, 700) # Even wider, softer beam
+			shine.size = Vector2(240, 700)
 			shine.rotation = deg_to_rad(20)
 			shine.position = Vector2(-300, -200)
 			shine.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -813,6 +847,7 @@ func _make_card_button(card_id: String, card: Dictionary, clickable: bool) -> Co
 				sb.shadow_size = 25
 				sb.shadow_color.a = 0.4
 		)
+
 	return root
 
 func _get_card_stat_diff(card_id: String) -> Array[String]:
@@ -1028,6 +1063,13 @@ func _build_rematch_overlay() -> void:
 	_rematch_button.pressed.connect(_on_rematch_pressed)
 	vb.add_child(_rematch_button)
 
+	_extend_button = Button.new()
+	_extend_button.text = "5 MORE ROUNDS"
+	_extend_button.custom_minimum_size = Vector2(260, 46)
+	_extend_button.focus_mode = Control.FOCUS_NONE
+	_extend_button.pressed.connect(_on_extend_pressed)
+	vb.add_child(_extend_button)
+
 func _show_rematch_overlay(winner_id: int) -> void:
 	if _rematch_overlay == null:
 		_build_rematch_overlay()
@@ -1089,6 +1131,77 @@ func _build_ghost_overlay() -> void:
 
 	# Move to the background of the HUD so it doesn't affect other UI elements
 	$HUD.move_child(_ghost_overlay, 0)
+
+func _build_retro_filter() -> void:
+	var retro_overlay := ColorRect.new()
+	retro_overlay.name = "RetroFilter"
+	retro_overlay.anchor_right = 1.0
+	retro_overlay.anchor_bottom = 1.0
+	retro_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	var shader := Shader.new()
+	shader.code = "
+		shader_type canvas_item;
+		uniform sampler2D screen_texture : hint_screen_texture, repeat_disable, filter_nearest;
+
+		const float bayer[16] = {
+			0.0/16.0, 8.0/16.0, 2.0/16.0, 10.0/16.0,
+			12.0/16.0, 4.0/16.0, 14.0/16.0, 6.0/16.0,
+			3.0/16.0, 11.0/16.0, 1.0/16.0, 9.0/16.0,
+			15.0/16.0, 7.0/16.0, 13.0/16.0, 5.0/16.0
+		};
+
+		void fragment() {
+			// 1. Lens Distortion (Fish-eye / Visor Curvature)
+			vec2 uv = SCREEN_UV;
+			vec2 centered_uv = uv - 0.5;
+			float dist = length(centered_uv);
+
+			// Zoom in (0.92 factor) to hide distorted dark edges
+			float zoom = 0.92;
+			uv = 0.5 + centered_uv * zoom * (1.0 + 0.15 * dist * dist);
+
+			// 2. Pixelation Factor
+			int p_size = 3;
+			vec2 res = 1.0 / SCREEN_PIXEL_SIZE;
+			uv = floor(uv * res / float(p_size)) / (res / float(p_size));
+
+			// 3. Chromatic Aberration (VHS style)
+			float amount = 0.001 * (dist * dist);
+			float r = texture(screen_texture, uv + vec2(amount, 0.0)).r;
+			float g = texture(screen_texture, uv).g;
+			float b = texture(screen_texture, uv - vec2(amount, 0.0)).b;
+			vec3 color = vec3(r, g, b);
+
+			// 4. Neon Bloom / Light Bleed
+			vec3 bleed = vec3(0.0);
+			vec2 b_offset = SCREEN_PIXEL_SIZE * float(p_size) * 1.5;
+			bleed += texture(screen_texture, uv + vec2(b_offset.x, b_offset.y)).rgb;
+			bleed += texture(screen_texture, uv + vec2(-b_offset.x, b_offset.y)).rgb;
+			bleed += texture(screen_texture, uv + vec2(b_offset.x, -b_offset.y)).rgb;
+			bleed += texture(screen_texture, uv + vec2(-b_offset.x, -b_offset.y)).rgb;
+			color += bleed * 0.15;
+
+			// 5. Ordered Dithering
+			ivec2 p = ivec2(FRAGCOORD.xy / float(p_size));
+			float threshold = bayer[(p.x % 4) * 4 + (p.y % 4)];
+
+			// 6. Color Depth & Vignette
+			float levels = 24.0;
+			float vignette = clamp(1.0 - dist * 1.4, 0.0, 1.0);
+			color = floor(color * levels + threshold) / levels;
+			color *= mix(0.7, 1.0, vignette);
+
+			COLOR.rgb = color;
+			COLOR.a = 1.0;
+		}
+	"
+	var mat := ShaderMaterial.new()
+	mat.shader = shader
+	retro_overlay.material = mat
+
+	$HUD.add_child(retro_overlay)
+	# Add last so it captures all UI rendered before it
 
 func _update_ghost_overlay() -> void:
 	if _ghost_overlay == null:
@@ -1273,16 +1386,95 @@ func _add_stat_comparison(label_text: String, base_val: float, next_val: float, 
 	_stats_content.add_child(Control.new())
 	_stats_content.add_child(Control.new())
 
+func _build_death_overlay() -> void:
+	_death_overlay = ColorRect.new()
+	_death_overlay.name = "DeathOverlay"
+	_death_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_death_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_death_overlay.color = Color(0.8, 0, 0, 0) # Start transparent red
+	$HUD.add_child(_death_overlay)
+	# Place it above the ghost shader (index 0) but still at the back of the HUD
+	$HUD.move_child(_death_overlay, 1)
+
+func show_death_effect(show: bool) -> void:
+	if _death_overlay == null: return
+
+	if _death_overlay.has_meta("tween"):
+		var old_tw: Tween = _death_overlay.get_meta("tween")
+		if old_tw and old_tw.is_valid():
+			old_tw.kill()
+
+	var tw := _death_overlay.create_tween()
+	_death_overlay.set_meta("tween", tw)
+
+	if show:
+		# Rapidly surge to 100% solid red and HOLD it
+		_death_overlay.color.a = 0.6
+		tw.tween_property(_death_overlay, "color", Color(0.65, 0.0, 0.0, 1.0), 0.4).set_trans(Tween.TRANS_SINE)
+	else:
+		# Fade out only when told to (at respawn)
+		tw.tween_property(_death_overlay, "color:a", 0.0, 0.5).set_trans(Tween.TRANS_CUBIC)
+
 func _on_rematch_pressed() -> void:
 	if _rematch_requested:
 		return
 	_rematch_requested = true
 	_rematch_button.text = "REMATCH REQUESTED"
 	_rematch_button.disabled = true
+	_extend_button.disabled = true
 	if multiplayer.is_server():
 		_server_rematch_requested()
 	else:
 		_server_rematch_requested.rpc_id(1)
+
+func _on_extend_pressed() -> void:
+	_extend_button.text = "VOTED TO EXTEND"
+	_extend_button.disabled = true
+	if multiplayer.is_server():
+		_server_extend_vote(multiplayer.get_unique_id())
+	else:
+		_server_extend_vote.rpc_id(1, multiplayer.get_unique_id())
+
+@rpc("any_peer", "call_local", "reliable")
+func _server_extend_vote(player_id: int) -> void:
+	if not multiplayer.is_server():
+		return
+	if state != State.MATCH_OVER:
+		return
+	_extend_votes[player_id] = true
+
+	# Check if everyone has voted to extend
+	var all_voted := true
+	for pid in NetworkManager.players:
+		# Bots always effectively vote 'yes' instantly
+		if pid == BOT_ID:
+			continue
+		if not _extend_votes.get(pid, false):
+			all_voted = false
+			break
+
+	if all_voted:
+		_extend_match()
+
+func _extend_match() -> void:
+	# Increase goal, hide UI, continue match
+	var new_goal := rounds_to_win + 5
+	_set_rounds_to_win.rpc(new_goal)
+	_extend_votes.clear()
+	show_death_effect(false) # Clear blood if match continues
+
+	# Start a normal round pick flow for the loser of the last round	state = State.PICKING_CARD
+	_hide_rematch_overlay.rpc()
+
+	# Find who lost the last round (usually the one who triggered _match_over)
+	# We'll let the person who didn't win pick a card.
+	for pid in NetworkManager.players:
+		if pid != round_winner_id:
+			_begin_card_pick_for_loser(pid)
+
+@rpc("authority", "call_local", "reliable")
+func _set_rounds_to_win(count: int) -> void:
+	rounds_to_win = count
 
 @rpc("any_peer", "call_local", "reliable")
 func _server_rematch_requested() -> void:
@@ -1441,9 +1633,9 @@ func _update_scoreboard() -> void:
 	var lines: Array[String] = ["— ROUNDS —"]
 	for id in NetworkManager.players:
 		var wins := int(round_wins.get(id, 0))
-		var marker := "  ★" if wins >= ROUNDS_TO_WIN else ""
+		var marker := "  ★" if wins >= rounds_to_win else ""
 		var pname := str(NetworkManager.players[id])
-		lines.append("%s  %d/%d%s" % [pname, wins, ROUNDS_TO_WIN, marker])
+		lines.append("%s  %d/%d%s" % [pname, wins, rounds_to_win, marker])
 
 	scoreboard.text = "\n".join(lines)
 
@@ -1498,7 +1690,7 @@ func _refresh_tab_overlay() -> void:
 	header.add_theme_color_override("font_color", Color(1, 0.9, 0.5))
 	_tab_content.add_child(header)
 	var sub := Label.new()
-	sub.text = "first to %d rounds wins" % ROUNDS_TO_WIN
+	sub.text = "first to %d rounds wins" % rounds_to_win
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	sub.add_theme_font_size_override("font_size", 13)
 	sub.add_theme_color_override("font_color", Color(0.65, 0.65, 0.8))
@@ -1520,7 +1712,7 @@ func _tab_player_row(id: int) -> Control:
 	hbox.add_child(nlbl)
 	var wins := int(round_wins.get(id, 0))
 	var score_lbl := Label.new()
-	score_lbl.text = "%d / %d" % [wins, ROUNDS_TO_WIN]
+	score_lbl.text = "%d / %d" % [wins, rounds_to_win]
 	score_lbl.add_theme_font_size_override("font_size", 20)
 	score_lbl.add_theme_color_override("font_color", Color(1, 0.85, 0.4))
 	hbox.add_child(score_lbl)

@@ -5,7 +5,7 @@ extends Control
 # `angle` is relative to the viewer's facing: 0 = forward, +π/2 = right,
 # π = behind, −π/2 = left (clockwise-positive, like compass bearing).
 
-const DURATION := 0.55
+const DURATION := 0.28
 const ARC_HALF_WIDTH := 0.38         # radians (~44° total arc)
 const THICKNESS := 26.0
 const RADIUS_FRAC := 0.42            # fraction of min(width, height)
