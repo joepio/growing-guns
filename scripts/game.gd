@@ -6,6 +6,8 @@ enum State { WAITING, PLAYING, PICKING_CARD, MATCH_OVER }
 
 const ROUNDS_TO_WIN := 3
 const CARDS_PER_PICK := 3
+const SPAWN_CAPSULE_RADIUS := 0.4
+const SPAWN_CAPSULE_HEIGHT := 1.8
 
 @onready var players_root: Node3D = $Players
 @onready var health_label: Label = $HUD/HealthPanel/HealthLabel
@@ -48,9 +50,22 @@ func _ready() -> void:
 			_spawn_player(pid, NetworkManager.players[pid])
 		_maybe_start_match()
 	else:
-		_request_spawn.rpc_id(1, NetworkManager.local_player_name)
+		_client_request_spawn_when_ready()
 
 	_update_scoreboard()
+
+func _client_request_spawn_when_ready() -> void:
+	# The scene change happens before `connected_to_server` fires, so the
+	# client can reach _ready with a peer that isn't fully connected yet.
+	# RPCs sent in that window are dropped silently — wait for the signal.
+	var peer := multiplayer.multiplayer_peer
+	if peer and peer.get_connection_status() == MultiplayerPeer.CONNECTION_CONNECTED:
+		_request_spawn.rpc_id(1, NetworkManager.local_player_name)
+		return
+	multiplayer.connected_to_server.connect(
+		func() -> void: _request_spawn.rpc_id(1, NetworkManager.local_player_name),
+		CONNECT_ONE_SHOT,
+	)
 
 func _process(_delta: float) -> void:
 	if local_player and is_instance_valid(local_player):
@@ -112,7 +127,22 @@ func _random_spawn() -> Vector3:
 	var spawns := get_tree().get_nodes_in_group("spawnpoints")
 	if spawns.is_empty():
 		return Vector3(0, 3, 0)
-	return spawns[randi() % spawns.size()].global_position
+	spawns.shuffle()
+	for spawn in spawns:
+		var pos: Vector3 = spawn.global_position
+		if _spawn_is_clear(pos):
+			return pos
+	return spawns[0].global_position
+
+func _spawn_is_clear(pos: Vector3) -> bool:
+	var shape := CapsuleShape3D.new()
+	shape.radius = SPAWN_CAPSULE_RADIUS
+	shape.height = SPAWN_CAPSULE_HEIGHT
+	var query := PhysicsShapeQueryParameters3D.new()
+	query.shape = shape
+	query.transform = Transform3D(Basis.IDENTITY, pos)
+	query.collision_mask = 1
+	return get_world_3d().direct_space_state.intersect_shape(query, 1).is_empty()
 
 @rpc("authority", "call_local", "reliable")
 func _do_spawn(id: int, pname: String, pos: Vector3) -> void:

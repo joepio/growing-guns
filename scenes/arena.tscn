@@ -348,7 +348,7 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -28, 3, 28)
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 28, 3, -28)
 
 [node name="S5" type="Marker3D" parent="SpawnPoints" groups=["spawnpoints"]]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 14, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 19.25, 0)
 
 [node name="S6" type="Marker3D" parent="SpawnPoints" groups=["spawnpoints"]]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 12, 9, -12)
