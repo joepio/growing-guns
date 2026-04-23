@@ -62,6 +62,7 @@ func _explode() -> void:
 
 @rpc("authority", "call_local", "reliable")
 func _do_vfx() -> void:
+	SFX.explosion()
 	var pos: Vector3 = global_position
 	var scene: Node = get_tree().current_scene
 
