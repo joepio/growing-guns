@@ -1,24 +1,33 @@
 extends Control
 
 @onready var name_input: LineEdit = $Panel/VBox/NameInput
-@onready var addr_input: LineEdit = $Panel/VBox/AddrInput
+@onready var addr_input: LineEdit = $Panel/VBox/HBoxJoin/AddrInput
 @onready var bot_button: Button = $Panel/VBox/BotButton
 @onready var host_button: Button = $Panel/VBox/HostButton
-@onready var join_button: Button = $Panel/VBox/JoinButton
+@onready var join_button: Button = $Panel/VBox/HBoxJoin/JoinButton
+@onready var game_list_vbox: VBoxContainer = $Panel/VBox/ScrollContainer/GameList
 @onready var status_label: Label = $Panel/VBox/Status
 
 func _ready() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-	if bot_button: bot_button.pressed.connect(_on_vs_bot)
-	if host_button: host_button.pressed.connect(_on_host)
-	if join_button: join_button.pressed.connect(_on_join)
+
+	bot_button.pressed.connect(_on_vs_bot)
+	host_button.pressed.connect(_on_host)
+	join_button.pressed.connect(_on_join)
+
 	name_input.text = "Player_%d" % (randi() % 1000)
+
+	# Start listening for local games immediately
+	NetworkManager.game_discovered.connect(_on_games_discovered)
+	NetworkManager.start_discovery()
+
+func _exit_tree() -> void:
+	# Stop discovery if we leave the main menu (though typically we only go to game)
+	NetworkManager.stop_discovery()
 
 func _on_vs_bot() -> void:
 	status_label.text = "Starting solo match..."
 	if NetworkManager.host_game(name_input.text):
-		# We want a bot immediately. We can tell the game controller via a singleton or property.
-		# For now, let's just use a static flag on NetworkManager if we can, or just wait for game start.
 		NetworkManager.set_meta("spawn_bot_on_start", true)
 		_go_to_game()
 
@@ -34,11 +43,36 @@ func _on_join() -> void:
 	var addr := addr_input.text.strip_edges()
 	if addr.is_empty():
 		addr = "127.0.0.1"
+	_do_join(addr)
+
+func _do_join(addr: String) -> void:
 	status_label.text = "Connecting to %s..." % addr
 	if NetworkManager.join_game(addr, name_input.text):
 		_go_to_game()
 	else:
 		status_label.text = "Failed to connect"
+
+func _on_games_discovered(games: Dictionary) -> void:
+	# Clear list
+	for child in game_list_vbox.get_children():
+		child.queue_free()
+
+	if games.is_empty():
+		var lbl := Label.new()
+		lbl.text = "   (searching...)"
+		lbl.add_theme_color_override("font_color", Color(0.5, 0.5, 0.5))
+		lbl.add_theme_font_size_override("font_size", 12)
+		game_list_vbox.add_child(lbl)
+		return
+
+	for addr in games:
+		var game: Dictionary = games[addr]
+		var btn := Button.new()
+		btn.text = "%s's Game (%d/%d) @ %s" % [game.name, game.players, game.max, addr]
+		btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		btn.add_theme_font_size_override("font_size", 13)
+		btn.pressed.connect(_do_join.bind(addr))
+		game_list_vbox.add_child(btn)
 
 func _go_to_game() -> void:
 	get_tree().change_scene_to_file("res://scenes/game.tscn")

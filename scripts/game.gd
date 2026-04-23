@@ -16,7 +16,9 @@ const SPAWN_MIN_SPACING := 8.0   # meters — two fresh spawns must be at least 
 @onready var health_label: Label = $HUD/HealthPanel/HealthLabel
 @onready var scoreboard: Label = $HUD/Scoreboard
 @onready var hitmarker: Control = $HUD/Hitmarker
+@onready var crosshair_label: Label = $HUD/Crosshair
 @onready var damage_indicator: Control = $HUD/DamageIndicator
+@onready var rifle_label: Label = $HUD/AbilityBar/Rifle/Label
 @onready var rifle_bar: ProgressBar = $HUD/AbilityBar/Rifle/Bar
 @onready var grenade_bar: ProgressBar = $HUD/AbilityBar/Grenade/Bar
 @onready var grenade_label: Label = $HUD/AbilityBar/Grenade/Label
@@ -39,6 +41,7 @@ var completed_picks: Dictionary = {}
 var eliminated_players: Dictionary = {}
 var round_winner_id: int = 0
 var local_player: Node3D
+var _custom_crosshair: Control = null
 
 var _pick_timeout_timer: float = 0.0
 var _pick_timeout_active: bool = false
@@ -65,6 +68,19 @@ var _ghost_overlay: Control = null
 var _ghost_label: Label = null
 
 func _ready() -> void:
+	# Hide the static label and set up the dynamic one
+	if crosshair_label: crosshair_label.visible = false
+	_custom_crosshair = Control.new()
+	_custom_crosshair.name = "DynamicCrosshair"
+	_custom_crosshair.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_custom_crosshair.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_custom_crosshair.set_script(load("res://scripts/crosshair.gd"))
+	$HUD.add_child(_custom_crosshair)
+	if crosshair_label: $HUD.move_child(_custom_crosshair, crosshair_label.get_index())
+
+	# Keep the game controller and its UI running when the tree is paused.
+	process_mode = Node.PROCESS_MODE_ALWAYS
+
 	# No menu — bootstrap networking on the fly. First launcher hosts, later
 	# launches fall back to client. Note: Godot 4 installs a default
 	# OfflineMultiplayerPeer so a plain null check isn't enough — we have to
@@ -130,6 +146,10 @@ func _process(delta: float) -> void:
 		_refresh_cooldowns()
 		_update_ghost_overlay()
 
+		# Update crosshair spread
+		if _custom_crosshair:
+			_custom_crosshair.spread = local_player.weapon.spread
+
 	if _pick_timeout_active:
 		_pick_timeout_timer -= delta
 		var sec := int(ceil(_pick_timeout_timer))
@@ -141,7 +161,9 @@ func _process(delta: float) -> void:
 		# Audio feedback in last 3 seconds
 		if sec <= 3 and sec > 0 and sec != _last_pling_sec:
 			_last_pling_sec = sec
-			var pitch := 1.0 + (3 - sec) * 0.3 # Higher pitch as time runs out
+			# Increase by 1 semitone every second
+			var semitones := (3 - sec)
+			var pitch := pow(2.0, float(semitones) / 12.0)
 			SFX.pling(pitch)
 
 		if _pick_timeout_timer <= 0.0:
@@ -174,6 +196,8 @@ func _unhandled_input(event: InputEvent) -> void:
 func _refresh_cooldowns() -> void:
 	var w: Weapon = local_player.weapon
 	if local_player.get("ghost_mode") == true:
+		rifle_label.text = "GHOST"
+		rifle_bar.visible = false
 		rifle_bar.value = 0.0
 		grenade_bar.value = 1.0 - (local_player.grenade_cooldown / local_player.MINE_RELOAD)
 		grenade_label.text = "LMB  MINE"
@@ -182,8 +206,12 @@ func _refresh_cooldowns() -> void:
 		dash_bar.value = (float(local_player.dash_charges) + ghost_charge_progress) / float(local_player.MAX_DASH_CHARGES)
 		return
 	if local_player.reloading:
+		rifle_label.text = "RELOADING…"
+		rifle_bar.visible = true
 		rifle_bar.value = 1.0 - (local_player.rifle_cooldown / max(0.01, w.get_reload_time()))
 	else:
+		rifle_label.text = "AMMO  %d / %d" % [local_player.mag, w.get_mag_size()]
+		rifle_bar.visible = false
 		rifle_bar.value = float(local_player.mag) / float(w.get_mag_size())
 	# The RMB slot hosts multiple specials with different cooldowns. Normalize
 	# against the max cooldown of the equipped special so the bar reads right.
@@ -399,14 +427,16 @@ func report_kill(killer_id: int, victim_id: int) -> void:
 			# Route via authority so server-owned bots receive their own RPC.
 			killer_node.confirm_kill.rpc_id(killer_node.get_multiplayer_authority())
 	var victim_node := players_root.get_node_or_null(str(victim_id))
-	if victim_node:
+	if victim_node and NetworkManager.players.size() >= 3:
 		victim_node.set_ghost_mode.rpc(true)
-	_begin_card_pick_for_loser(victim_id)
 
 	var alive := _alive_player_ids()
 	if alive.size() <= 1:
 		var winner_id := int(alive[0]) if alive.size() == 1 else _fallback_round_winner(victim_id)
 		_end_round(winner_id)
+	else:
+		# Only pick immediately if the round is still going (3+ players)
+		_begin_card_pick_for_loser(victim_id)
 
 func _alive_player_ids() -> Array[int]:
 	var alive: Array[int] = []
@@ -438,6 +468,7 @@ func _end_round(winner_id: int) -> void:
 			var pn := players_root.get_node_or_null(str(pid))
 			if pn:
 				pn.set_frozen.rpc(true)
+				pn.reset_weapon.rpc() # Reset cards immediately when match ends
 		_match_over.rpc(winner_id)
 		return
 	# Freeze the survivor and wait for every eliminated player to finish their pick.
@@ -596,12 +627,26 @@ func _find_button_recursive(node: Node) -> Button:
 func _populate_cards(card_ids: Array, clickable: bool) -> void:
 	for c in pick_row.get_children():
 		c.queue_free()
+
+	var index := 0
 	for raw_id in card_ids:
 		var cid := str(raw_id)
 		var card: Dictionary = CardLibrary.by_id(cid)
 		if card.is_empty():
 			continue
-		pick_row.add_child(_make_card_button(cid, card, clickable))
+
+		var card_node := _make_card_button(cid, card, clickable)
+		pick_row.add_child(card_node)
+
+		# Entry animation: pop up from below
+		var body = card_node.get_child(0).get_child(0) # root -> idle_node -> card_body
+		body.position.y = 400.0
+		body.modulate.a = 0.0
+
+		var tw := body.create_tween().set_parallel(true)
+		tw.tween_property(body, "position:y", 0.0, 0.6).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT).set_delay(index * 0.1)
+		tw.tween_property(body, "modulate:a", 1.0, 0.3).set_delay(index * 0.1)
+		index += 1
 
 func _make_card_button(card_id: String, card: Dictionary, clickable: bool) -> Control:
 	var rarity: String = str(card.get("rarity", "common"))
@@ -669,20 +714,33 @@ func _make_card_button(card_id: String, card: Dictionary, clickable: bool) -> Co
 	if rarity == "rare":
 		card_body.clip_contents = true
 
-		# Shifting gradient "Holo" sweep
+		# Shifting gradient "Holo" sweep - use TextureRect with Gradient for soft edges
 		for i in range(2):
-			var shine := ColorRect.new()
-			shine.size = Vector2(60, 500)
-			shine.rotation = deg_to_rad(35)
-			shine.position = Vector2(-150, -100)
-			# Cyan/Magenta holo colors
-			shine.color = Color(0.5, 0.9, 1.0, 0.12) if i == 0 else Color(1.0, 0.5, 0.9, 0.08)
+			var shine := TextureRect.new()
+			var grad := Gradient.new()
+			grad.set_offsets(PackedFloat32Array([0.0, 0.5, 1.0]))
+			# Prismatic holo colors: Transparent -> Tinted White -> Transparent
+			var tint := Color(0.5, 0.9, 1.0, 0.15) if i == 0 else Color(1.0, 0.6, 0.9, 0.1)
+			grad.set_colors(PackedColorArray([Color(tint.r, tint.g, tint.b, 0), tint, Color(tint.r, tint.g, tint.b, 0)]))
+
+			var tex := GradientTexture2D.new()
+			tex.gradient = grad
+			tex.width = 128
+			tex.height = 1
+			tex.fill_from = Vector2(0, 0)
+			tex.fill_to = Vector2(1, 0)
+
+			shine.texture = tex
+			shine.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			shine.size = Vector2(160, 600) # Wider, softer beam
+			shine.rotation = deg_to_rad(25)
+			shine.position = Vector2(-250, -150)
 			shine.mouse_filter = Control.MOUSE_FILTER_IGNORE
 			card_body.add_child(shine)
 
 			var tw_shine := shine.create_tween().set_loops()
-			tw_shine.tween_property(shine, "position:x", 400.0, 2.0 + (i * 0.5)).set_delay(0.5 + (i * 1.2))
-			tw_shine.tween_property(shine, "position:x", -150.0, 0.0)
+			tw_shine.tween_property(shine, "position:x", 450.0, 2.5 + (i * 0.8)).set_delay(0.2 + (i * 1.5))
+			tw_shine.tween_property(shine, "position:x", -250.0, 0.0)
 
 		# Pulsing border color
 		var tw_border := card_body.create_tween().set_loops()
@@ -698,7 +756,7 @@ func _make_card_button(card_id: String, card: Dictionary, clickable: bool) -> Co
 	card_body.add_child(btn)
 
 	if clickable:
-		btn.pressed.connect(func() -> void: _on_card_button(card_id))
+		btn.pressed.connect(func() -> void: _on_card_button(card_id, root))
 
 		# Idle Float (bobbing)
 		var idle_tw := idle_node.create_tween().set_loops()
@@ -736,21 +794,45 @@ func _on_pick_timeout() -> void:
 	if not pick_overlay.visible:
 		return
 
-	# Pick first available card
+	# Pick first available card and find its wrapper for animation
 	var card_id := ""
+	var wrapper: Control = null
 	if not pending_pick_cards.is_empty():
 		card_id = str(pending_pick_cards[0])
+		if pick_row.get_child_count() > 0:
+			wrapper = pick_row.get_child(0)
 
 	if card_id != "":
-		_on_card_button(card_id)
+		_on_card_button(card_id, wrapper)
 
-func _on_card_button(card_id: String) -> void:
+func _on_card_button(card_id: String, picked_wrapper: Control = null) -> void:
 	_pick_timeout_active = false
+	_set_card_buttons_disabled(true)
+
+	if picked_wrapper:
+		# Selection animation
+		var picked_body = picked_wrapper.get_child(0).get_child(0) # root -> idle -> body
+
+		# Move other cards away
+		for other in pick_row.get_children():
+			if other == picked_wrapper: continue
+			var other_body = other.get_child(0).get_child(0)
+			var tw_other := other_body.create_tween().set_parallel(true)
+			tw_other.tween_property(other_body, "scale", Vector2(0.5, 0.5), 0.4).set_trans(Tween.TRANS_CUBIC)
+			tw_other.tween_property(other_body, "modulate:a", 0.0, 0.3)
+
+		# Animate picked card
+		var tw_pick := picked_body.create_tween().set_parallel(true)
+		tw_pick.tween_property(picked_body, "scale", Vector2(1.5, 1.5), 0.5).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		tw_pick.tween_property(picked_body, "position:y", -100.0, 0.5).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		tw_pick.tween_property(picked_body, "rotation_degrees", 0.0, 0.3)
+
+		await get_tree().create_timer(0.6).timeout
+
 	if multiplayer.is_server():
 		_server_card_picked(card_id)
 	else:
 		_server_card_picked.rpc_id(1, card_id)
-
 @rpc("any_peer", "call_local", "reliable")
 func _server_card_picked(card_id: String) -> void:
 	if not multiplayer.is_server():
@@ -785,6 +867,7 @@ func _announce(text: String, duration: float) -> void:
 
 @rpc("authority", "call_local", "reliable")
 func _match_over(winner_id: int) -> void:
+	_hide_card_pick() # Ensure picker is gone
 	var winner_name: String = NetworkManager.players.get(winner_id, "Player")
 	var is_me := winner_id == multiplayer.get_unique_id()
 	round_banner.text = "YOU WIN THE MATCH" if is_me else "%s WINS THE MATCH" % winner_name
@@ -889,6 +972,7 @@ func _build_ghost_overlay() -> void:
 	mat.shader = spirit_shader
 	veil.material = mat
 	_ghost_overlay.add_child(veil)
+
 	_ghost_label = Label.new()
 	_ghost_label.text = "GHOST MODE"
 	_ghost_label.anchor_left = 0.5
@@ -904,11 +988,15 @@ func _build_ghost_overlay() -> void:
 	_ghost_label.add_theme_color_override("font_color", Color(0.78, 0.95, 1.0, 0.72))
 	_ghost_overlay.add_child(_ghost_label)
 
+	# Move to the background of the HUD so it doesn't affect other UI elements
+	$HUD.move_child(_ghost_overlay, 0)
+
 func _update_ghost_overlay() -> void:
 	if _ghost_overlay == null:
 		return
-	var show: bool = local_player != null and is_instance_valid(local_player) and local_player.get("ghost_mode") == true
-	_ghost_overlay.visible = show
+	var is_ghost: bool = local_player != null and is_instance_valid(local_player) and local_player.get("ghost_mode") == true
+	var picking: bool = pick_overlay != null and pick_overlay.visible
+	_ghost_overlay.visible = is_ghost and not picking
 
 func _on_rematch_pressed() -> void:
 	if _rematch_requested:
@@ -972,6 +1060,8 @@ func is_any_modal_open() -> bool:
 		return true
 	if _pause_menu and _pause_menu.visible:
 		return true
+	if _tab_root and _tab_root.visible:
+		return true
 	return false
 
 # -------------------- PAUSE MENU (ESC) --------------------
@@ -982,7 +1072,12 @@ func _toggle_pause_menu() -> void:
 	_pause_menu.visible = not _pause_menu.visible
 	if _pause_menu.visible:
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+		# Pause the world if this is a solo match (local player + bots only).
+		if NetworkManager.players.size() <= 1:
+			get_tree().paused = true
 	else:
+		# Unpause if we were paused.
+		get_tree().paused = false
 		# Don't recapture if another modal (card pick, match over) is up.
 		if not (pick_overlay and pick_overlay.visible) and state != State.MATCH_OVER:
 			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
@@ -1045,6 +1140,7 @@ func _build_pause_menu() -> void:
 	_pause_menu.visible = false
 
 func _leave_to_main_menu() -> void:
+	get_tree().paused = false
 	NetworkManager.leave_game()
 	get_tree().change_scene_to_file("res://scenes/main.tscn")
 

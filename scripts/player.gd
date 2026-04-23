@@ -1,10 +1,10 @@
 extends CharacterBody3D
 
 # --- Movement ---
-const WALK_SPEED := 11.0
-const AIR_ACCEL := 80.0
-const GROUND_ACCEL := 120.0
-const FRICTION := 10.0
+const WALK_SPEED := 14.0
+const AIR_ACCEL := 70.0
+const GROUND_ACCEL := 100.0
+const FRICTION := 8.0
 const JUMP_VELOCITY := 9.0
 const DOUBLE_JUMP_VELOCITY := 8.5
 const WALL_JUMP_V := 10.5
@@ -16,6 +16,10 @@ const MAX_DASH_CHARGES := 3
 const DASH_RECHARGE_TIME := 3.0
 const GRAVITY := 30.0
 const MOUSE_SENS := 0.0022
+
+# --- View Feel ---
+const TILT_MAX_DEG := 2.5
+const TILT_SPEED := 6.0
 
 # --- Combat ---
 const MAX_HEALTH := 100
@@ -85,6 +89,7 @@ var _remote_has_target := false
 # Camera / gun feel — updated by fire, decayed per frame.
 var look_pitch := 0.0
 var recoil_pitch := 0.0
+var tilt_z := 0.0
 var muzzle_kick_z := 0.0
 var shake_amt := 0.0
 var melee_offset := Vector3.ZERO
@@ -96,6 +101,8 @@ var reload_offset: Vector3 = Vector3.ZERO
 var _reload_tween: Tween = null
 var _reload_audio: Node = null
 var _camera_rest_pos: Vector3
+var _landing_bump_y: float = 0.0
+var _was_on_floor: bool = true
 var _melee_tween: Tween = null
 var _body_materials: Dictionary = {}
 
@@ -162,6 +169,7 @@ func _process(delta: float) -> void:
 	if is_multiplayer_authority():
 		var target_fov := 30.0 if is_zooming else 75.0
 		camera.fov = lerp(camera.fov, target_fov, delta * 12.0)
+		camera.rotation.z = lerp_angle(camera.rotation.z, deg_to_rad(tilt_z), delta * TILT_SPEED)
 
 func _interpolate_remote_state(delta: float) -> void:
 	if not _remote_has_target:
@@ -288,10 +296,12 @@ func _physics_process(delta: float) -> void:
 	recoil_pitch = lerp(recoil_pitch, 0.0, delta * 9.0)
 	muzzle_kick_z = lerp(muzzle_kick_z, 0.0, delta * 14.0)
 	shake_amt = lerp(shake_amt, 0.0, delta * 14.0)
+	_landing_bump_y = lerp(_landing_bump_y, 0.0, delta * 10.0) # Smooth recovery
+
 	camera.rotation.x = look_pitch + recoil_pitch
 	muzzle.position = _muzzle_rest_pos + Vector3(0.0, 0.0, muzzle_kick_z) + melee_offset + reload_offset
 	# Height scales with body_scale so the viewpoint follows the taller head.
-	var cam_y: float = _camera_rest_pos.y * maxf(0.1, weapon.body_scale)
+	var cam_y: float = (_camera_rest_pos.y * maxf(0.1, weapon.body_scale)) - _landing_bump_y
 	camera.position = Vector3(
 		_camera_rest_pos.x + randf_range(-1.0, 1.0) * shake_amt,
 		cam_y + randf_range(-1.0, 1.0) * shake_amt,
@@ -302,9 +312,17 @@ func _physics_process(delta: float) -> void:
 	if not is_on_floor():
 		velocity.y -= GRAVITY * delta
 	else:
+		# Detect landing
+		if not _was_on_floor:
+			var impact_vel := absf(velocity.y)
+			# Scale bump by impact velocity (e.g. 10m/s -> 0.2m dip)
+			_landing_bump_y = clampf(impact_vel * 0.02, 0.0, 0.4)
+
 		# Default: 1 ground jump + 1 air double-jump = 2 total.
 		# ACROBAT and similar cards extend this via weapon.extra_jumps.
 		jumps_left = 2 + weapon.extra_jumps
+
+	_was_on_floor = is_on_floor()
 
 	# --- Jump / wall-jump / double-jump ---
 	# Wall-jump takes priority over double-jump so you can chain WJ → WJ → dash → WJ
@@ -339,6 +357,9 @@ func _physics_process(delta: float) -> void:
 		if not ghost_mode: SFX.dash(global_position)
 
 	# --- Movement ---
+	var input_x := Input.get_axis("move_right", "move_left")
+	tilt_z = input_x * TILT_MAX_DEG
+
 	var wish_dir := _input_vector()
 	var current_walk_speed := WALK_SPEED * weapon.move_speed_mult
 	var target_vel := wish_dir * current_walk_speed
@@ -367,11 +388,12 @@ func _physics_process(delta: float) -> void:
 	# --- Combat actions ---
 	# Default is semi-auto (click per shot). The UZI card flips weapon.full_auto
 	# so holding LMB fires continuously until the mag runs out.
-	var fire_input := Input.is_action_pressed("shoot") if weapon.full_auto \
-		else Input.is_action_just_pressed("shoot")
+	var can_fire := Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
+	var fire_input := (Input.is_action_pressed("shoot") if weapon.full_auto \
+		else Input.is_action_just_pressed("shoot")) and can_fire
 	if ghost_mode:
 		fire_input = false
-		if Input.is_action_just_pressed("shoot") and grenade_cooldown <= 0.0:
+		if Input.is_action_just_pressed("shoot") and grenade_cooldown <= 0.0 and can_fire:
 			grenade_cooldown = MINE_RELOAD
 			_place_mine()
 	if fire_input and not reloading and mag > 0 and rifle_cooldown <= 0.0:
@@ -380,9 +402,9 @@ func _physics_process(delta: float) -> void:
 		_fire_rifle()
 		if mag <= 0:
 			_start_reload()
-	if Input.is_action_just_pressed("reload") and not ghost_mode:
+	if Input.is_action_just_pressed("reload") and not ghost_mode and can_fire:
 		_start_reload()
-	if Input.is_action_just_pressed("shoot_grenade") and not ghost_mode:
+	if Input.is_action_just_pressed("shoot_grenade") and not ghost_mode and can_fire:
 		if weapon.special == Weapon.SPECIAL_ZOOM:
 			is_zooming = !is_zooming
 		elif grenade_cooldown <= 0.0:
@@ -390,7 +412,7 @@ func _physics_process(delta: float) -> void:
 
 	if weapon.special != Weapon.SPECIAL_ZOOM:
 		is_zooming = false # Auto-cancel zoom if weapon special changes (e.g. card reset)
-	if Input.is_action_just_pressed("melee") and melee_cooldown <= 0.0 and not ghost_mode:
+	if Input.is_action_just_pressed("melee") and melee_cooldown <= 0.0 and not ghost_mode and can_fire:
 		melee_cooldown = MELEE_RELOAD
 		_swing_melee()
 
@@ -1664,19 +1686,40 @@ func _bot_shoot() -> void:
 		return
 	var from := global_position + Vector3.UP * 0.7
 	var to: Vector3 = _bot_target.global_position + Vector3.UP * 0.4
-	var dir := (to - from).normalized()
-	# Farther targets are harder to hit — spread grows with distance so the bot
-	# is threatening up close and mostly plinking from across the map.
-	var dist: float = from.distance_to(to)
-	var dist_mult: float = 1.0 + clampf((dist - BOT_FOLLOW_DIST) / 10.0, 0.0, 3.0)
-	var spread: float = BOT_SPREAD * dist_mult
+	var dist := from.distance_to(to)
+
+	# --- Target Leading (Projectiles) ---
+	# To be "realistic", the bot should try to lead the target based on its velocity.
+	# We'll add some intentional error to this leading so it's not perfect.
+	var target_vel := Vector3.ZERO
+	if "velocity" in _bot_target:
+		target_vel = _bot_target.velocity
+
+	var bullet_speed := weapon.get_bullet_speed()
+	var time_to_hit := dist / maxf(bullet_speed, 1.0)
+
+	# Lead the target, but with a bit of "reaction lag" error (0.8x to 1.1x scaling)
+	var lead_multiplier := randf_range(0.85, 1.05)
+	var predicted_pos := to + target_vel * time_to_hit * lead_multiplier
+
+	var dir := (predicted_pos - from).normalized()
+
+	# --- Refined Spread ---
+	# Lower base spread, but it scales more naturally.
+	# Humans are better at close range but not 100% perfect.
+	var base_spread := 0.015 # ~0.85 degrees
+	var dist_factor := clampf(dist / 40.0, 0.0, 2.0)
+	var spread := base_spread + (BOT_SPREAD * 0.5 * dist_factor)
+
 	# Every so often the bot whiffs harder — keeps it from feeling laser-accurate.
 	if randf() < BOT_MISS_CHANCE:
-		spread *= randf_range(2.5, 5.0)
+		spread *= randf_range(2.0, 4.0)
+
 	var yaw := randf_range(-spread, spread)
 	var pitch := randf_range(-spread, spread)
 	dir = dir.rotated(Vector3.UP, yaw)
 	var right := Vector3.UP.cross(dir)
 	if right.length_squared() > 0.0001:
 		dir = dir.rotated(right.normalized(), pitch)
+
 	_rifle_fired.rpc(from, dir.normalized(), player_id)
