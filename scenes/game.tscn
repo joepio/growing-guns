@@ -1,0 +1,275 @@
+[gd_scene load_steps=4 format=3 uid="uid://b0game001"]
+
+[ext_resource type="Script" path="res://scripts/game.gd" id="1_game"]
+[ext_resource type="PackedScene" uid="uid://b0arena01" path="res://scenes/arena.tscn" id="2_arena"]
+
+[sub_resource type="StyleBoxFlat" id="Style_HP"]
+bg_color = Color(0, 0, 0, 0.55)
+border_width_left = 2
+border_width_top = 2
+border_width_right = 2
+border_width_bottom = 2
+border_color = Color(1, 0.2, 0.3, 0.8)
+corner_radius_top_left = 4
+corner_radius_top_right = 4
+corner_radius_bottom_right = 4
+corner_radius_bottom_left = 4
+
+[node name="Game" type="Node3D"]
+script = ExtResource("1_game")
+
+[node name="Arena" parent="." instance=ExtResource("2_arena")]
+
+[node name="Players" type="Node3D" parent="."]
+
+[node name="HUD" type="CanvasLayer" parent="."]
+
+[node name="Crosshair" type="Label" parent="HUD"]
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -10.0
+offset_top = -14.0
+offset_right = 10.0
+offset_bottom = 14.0
+grow_horizontal = 2
+grow_vertical = 2
+text = "+"
+horizontal_alignment = 1
+vertical_alignment = 1
+theme_override_colors/font_color = Color(1, 0.9, 0.2, 1)
+theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
+theme_override_constants/outline_size = 4
+theme_override_font_sizes/font_size = 28
+
+[node name="Hitmarker" type="Label" parent="HUD"]
+visible = false
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -16.0
+offset_top = -18.0
+offset_right = 16.0
+offset_bottom = 18.0
+grow_horizontal = 2
+grow_vertical = 2
+text = "X"
+horizontal_alignment = 1
+vertical_alignment = 1
+theme_override_colors/font_color = Color(1, 0.3, 0.3, 1)
+theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
+theme_override_constants/outline_size = 4
+theme_override_font_sizes/font_size = 32
+
+[node name="HitmarkerTimer" type="Timer" parent="HUD"]
+wait_time = 0.15
+one_shot = true
+
+[node name="HealthPanel" type="PanelContainer" parent="HUD"]
+anchors_preset = 2
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = 20.0
+offset_top = -60.0
+offset_right = 200.0
+offset_bottom = -20.0
+grow_vertical = 0
+theme_override_styles/panel = SubResource("Style_HP")
+
+[node name="HealthLabel" type="Label" parent="HUD/HealthPanel"]
+layout_mode = 2
+text = "HP  100"
+horizontal_alignment = 1
+vertical_alignment = 1
+theme_override_colors/font_color = Color(1, 0.3, 0.3, 1)
+theme_override_font_sizes/font_size = 28
+
+[node name="AbilityBar" type="HBoxContainer" parent="HUD"]
+anchors_preset = 7
+anchor_left = 0.5
+anchor_top = 1.0
+anchor_right = 0.5
+anchor_bottom = 1.0
+offset_left = -260.0
+offset_top = -70.0
+offset_right = 260.0
+offset_bottom = -20.0
+grow_horizontal = 2
+grow_vertical = 0
+theme_override_constants/separation = 14
+
+[node name="Rifle" type="VBoxContainer" parent="HUD/AbilityBar"]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="Label" type="Label" parent="HUD/AbilityBar/Rifle"]
+layout_mode = 2
+text = "LMB  RIFLE"
+horizontal_alignment = 1
+theme_override_colors/font_color = Color(1, 0.9, 0.5, 1)
+theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
+theme_override_constants/outline_size = 3
+theme_override_font_sizes/font_size = 14
+
+[node name="Bar" type="ProgressBar" parent="HUD/AbilityBar/Rifle"]
+custom_minimum_size = Vector2(0, 10)
+layout_mode = 2
+max_value = 1.0
+step = 0.01
+value = 1.0
+show_percentage = false
+
+[node name="Grenade" type="VBoxContainer" parent="HUD/AbilityBar"]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="Label" type="Label" parent="HUD/AbilityBar/Grenade"]
+layout_mode = 2
+text = "RMB  GRENADE"
+horizontal_alignment = 1
+theme_override_colors/font_color = Color(0.7, 1, 0.4, 1)
+theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
+theme_override_constants/outline_size = 3
+theme_override_font_sizes/font_size = 14
+
+[node name="Bar" type="ProgressBar" parent="HUD/AbilityBar/Grenade"]
+custom_minimum_size = Vector2(0, 10)
+layout_mode = 2
+max_value = 1.0
+step = 0.01
+value = 1.0
+show_percentage = false
+
+[node name="Dash" type="VBoxContainer" parent="HUD/AbilityBar"]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="Label" type="Label" parent="HUD/AbilityBar/Dash"]
+layout_mode = 2
+text = "SHIFT  DASH"
+horizontal_alignment = 1
+theme_override_colors/font_color = Color(0.6, 0.9, 1, 1)
+theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
+theme_override_constants/outline_size = 3
+theme_override_font_sizes/font_size = 14
+
+[node name="Bar" type="ProgressBar" parent="HUD/AbilityBar/Dash"]
+custom_minimum_size = Vector2(0, 10)
+layout_mode = 2
+max_value = 1.0
+step = 0.01
+value = 1.0
+show_percentage = false
+
+[node name="Melee" type="VBoxContainer" parent="HUD/AbilityBar"]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="Label" type="Label" parent="HUD/AbilityBar/Melee"]
+layout_mode = 2
+text = "F  MELEE"
+horizontal_alignment = 1
+theme_override_colors/font_color = Color(1, 0.4, 0.9, 1)
+theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
+theme_override_constants/outline_size = 3
+theme_override_font_sizes/font_size = 14
+
+[node name="Bar" type="ProgressBar" parent="HUD/AbilityBar/Melee"]
+custom_minimum_size = Vector2(0, 10)
+layout_mode = 2
+max_value = 1.0
+step = 0.01
+value = 1.0
+show_percentage = false
+
+[node name="Scoreboard" type="Label" parent="HUD"]
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -260.0
+offset_top = 20.0
+offset_right = -20.0
+offset_bottom = 220.0
+grow_horizontal = 0
+text = "— ROUNDS —"
+theme_override_colors/font_color = Color(1, 0.8, 0.4, 1)
+theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
+theme_override_constants/outline_size = 4
+theme_override_font_sizes/font_size = 18
+
+[node name="RoundBanner" type="Label" parent="HUD"]
+visible = false
+anchors_preset = 5
+anchor_left = 0.5
+anchor_right = 0.5
+offset_left = -320.0
+offset_top = 70.0
+offset_right = 320.0
+offset_bottom = 160.0
+grow_horizontal = 2
+text = "ROUND 1"
+horizontal_alignment = 1
+vertical_alignment = 1
+theme_override_colors/font_color = Color(1, 0.95, 0.5, 1)
+theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
+theme_override_constants/outline_size = 6
+theme_override_font_sizes/font_size = 56
+
+[node name="BannerTimer" type="Timer" parent="HUD"]
+wait_time = 1.4
+one_shot = true
+
+[node name="CardPickOverlay" type="Control" parent="HUD"]
+visible = false
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 0
+
+[node name="Background" type="ColorRect" parent="HUD/CardPickOverlay"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+color = Color(0, 0, 0, 0.72)
+
+[node name="Center" type="CenterContainer" parent="HUD/CardPickOverlay"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 1
+
+[node name="VBox" type="VBoxContainer" parent="HUD/CardPickOverlay/Center"]
+layout_mode = 2
+theme_override_constants/separation = 18
+alignment = 1
+
+[node name="Title" type="Label" parent="HUD/CardPickOverlay/Center/VBox"]
+layout_mode = 2
+text = "PICK A CARD"
+horizontal_alignment = 1
+theme_override_colors/font_color = Color(1, 0.95, 0.5, 1)
+theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
+theme_override_constants/outline_size = 5
+theme_override_font_sizes/font_size = 46
+
+[node name="Subtitle" type="Label" parent="HUD/CardPickOverlay/Center/VBox"]
+layout_mode = 2
+text = "you lost the round — choose an upgrade"
+horizontal_alignment = 1
+theme_override_colors/font_color = Color(0.8, 0.8, 0.9, 1)
+theme_override_font_sizes/font_size = 18
+
+[node name="CardRow" type="HBoxContainer" parent="HUD/CardPickOverlay/Center/VBox"]
+layout_mode = 2
+theme_override_constants/separation = 22
+alignment = 1
