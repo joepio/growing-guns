@@ -16,7 +16,7 @@ static func all() -> Array:
 		{
 			"id": "dmg_up",
 			"name": "DAMAGE",
-			"desc": "+50% damage",
+			"desc": "",
 			"color": Color(1.0, 0.25, 0.25),
 			"apply": func(w: Weapon) -> void:
 				w.damage_mult *= 1.5
@@ -26,7 +26,7 @@ static func all() -> Array:
 		{
 			"id": "healthy",
 			"name": "HEALTHY",
-			"desc": "+35 max HP",
+			"desc": "",
 			"color": Color(0.45, 1.0, 0.55),
 			"apply": func(w: Weapon) -> void:
 				w.max_hp_bonus += 35,
@@ -34,7 +34,7 @@ static func all() -> Array:
 		{
 			"id": "steady_hands",
 			"name": "STEADY HANDS",
-			"desc": "+35% accuracy",
+			"desc": "",
 			"color": Color(0.65, 0.9, 1.0),
 			"apply": func(w: Weapon) -> void:
 				w.spread *= 0.65,
@@ -42,7 +42,7 @@ static func all() -> Array:
 		{
 			"id": "sneakers",
 			"name": "SNEAKERS",
-			"desc": "+15% movement speed",
+			"desc": "",
 			"color": Color(0.65, 1.0, 0.85),
 			"apply": func(w: Weapon) -> void:
 				w.move_speed_mult *= 1.15,
@@ -50,7 +50,7 @@ static func all() -> Array:
 		{
 			"id": "rapid_fire",
 			"name": "RAPID FIRE",
-			"desc": "+60% fire rate",
+			"desc": "",
 			"color": Color(1.0, 0.8, 0.2),
 			"apply": func(w: Weapon) -> void:
 				w.fire_rate_mult *= 1.6,
@@ -58,7 +58,7 @@ static func all() -> Array:
 		{
 			"id": "big_mag",
 			"name": "BIG MAG",
-			"desc": "+20 ammo",
+			"desc": "",
 			"color": Color(0.3, 0.8, 1.0),
 			"apply": func(w: Weapon) -> void:
 				w.mag_size_bonus += 20,
@@ -66,7 +66,7 @@ static func all() -> Array:
 		{
 			"id": "quick_reload",
 			"name": "QUICK RELOAD",
-			"desc": "2× reload speed",
+			"desc": "",
 			"color": Color(0.3, 1.0, 0.6),
 			"apply": func(w: Weapon) -> void:
 				w.reload_mult *= 2.0,
@@ -74,7 +74,7 @@ static func all() -> Array:
 		{
 			"id": "piercing",
 			"name": "PIERCING",
-			"desc": "Bullets pierce +1 target",
+			"desc": "Bullets pass through targets",
 			"color": Color(0.5, 0.85, 1.0),
 			"apply": func(w: Weapon) -> void:
 				w.pierce_count += 1
@@ -83,7 +83,7 @@ static func all() -> Array:
 		{
 			"id": "ricochet",
 			"name": "RICOCHET",
-			"desc": "Bullets bounce +2 times",
+			"desc": "Bullets bounce off walls",
 			"color": Color(1.0, 0.65, 0.25),
 			"apply": func(w: Weapon) -> void:
 				w.ricochet_count += 2,
@@ -91,16 +91,17 @@ static func all() -> Array:
 		{
 				"id": "shotgun",
 				"name": "SHOTGUN",
-				"desc": "+2 extra projectiles, slower bullets, adds spread",
+				"desc": "Multi-projectile burst",
 				"color": Color(1.0, 0.5, 0.75),
 				"apply": func(w: Weapon) -> void:
 						w.extra_projectiles += 2
+						w.mag_size_bonus -= 5
 						w.bullet_speed_mult *= 0.75
 						w.spread = max(w.spread, deg_to_rad(2.0)) + deg_to_rad(2.0),
 		},		{
 			"id": "lifesteal",
 			"name": "LIFESTEAL",
-			"desc": "Heal 25% of damage dealt",
+			"desc": "",
 			"color": Color(0.8, 0.2, 0.85),
 			"apply": func(w: Weapon) -> void:
 				w.lifesteal += 0.25
@@ -109,7 +110,7 @@ static func all() -> Array:
 		{
 			"id": "explosive",
 			"name": "EXPLOSIVE ROUNDS",
-			"desc": "Bullets explode. Stacks: bigger radius + more damage",
+			"desc": "Bullets explode on impact",
 			"rarity": "rare",
 			"color": Color(1.0, 0.4, 0.1),
 			"apply": func(w: Weapon) -> void:
@@ -126,7 +127,7 @@ static func all() -> Array:
 		{
 			"id": "precision",
 			"name": "PRECISION",
-			"desc": "2× headshot multiplier",
+			"desc": "",
 			"color": Color(0.9, 0.9, 1.0),
 			"apply": func(w: Weapon) -> void:
 				w.headshot_mult *= 2.0,
@@ -134,7 +135,7 @@ static func all() -> Array:
 		{
 				"id": "heavy_rounds",
 				"name": "HEAVY ROUNDS",
-				"desc": "+100% damage, slower projectiles, -30% fire rate",
+				"desc": "Powerful but slow projectiles",
 				"rarity": "rare",
 				"color": Color(0.7, 0.4, 0.2),
 				"apply": func(w: Weapon) -> void:
@@ -147,7 +148,7 @@ static func all() -> Array:
 		{
 				"id": "sniper",
 				"name": "SNIPER",
-				"desc": "×3 dmg, hypnotic bullets, accurate, RMB: Zoom (no cooldown)",
+				"desc": "Railgun-like shots with RMB Zoom",
 				"rarity": "rare",
 				"color": Color(0.55, 0.85, 1.0),
 				"apply": func(w: Weapon) -> void:
@@ -163,20 +164,19 @@ static func all() -> Array:
 		},		{
 				"id": "uzi",
 				"name": "UZI",
-				"desc": "Full-auto, ×3 fire rate, +20 ammo, slower bullets, more spread",
+				"desc": "High-volume automatic fire",
 				"rarity": "rare",
 				"color": Color(1.0, 0.65, 0.25),
 				"apply": func(w: Weapon) -> void:
 						w.full_auto = true
 						w.fire_rate_mult *= 3.0
-						w.bullet_speed_mult *= 0.85
 						w.mag_size_bonus += 20
 						w.spread += deg_to_rad(2.5)
 						w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.55, 0.15), 0.5),
 		},		{
 			"id": "homing",
 			"name": "HOMING",
-			"desc": "Bullets lazily curve toward enemies, but travel slower",
+			"desc": "Bullets lazily curve toward enemies",
 			"rarity": "rare",
 			"color": Color(0.7, 1.0, 0.55),
 			"apply": func(w: Weapon) -> void:
@@ -190,7 +190,7 @@ static func all() -> Array:
 		{
 			"id": "haymaker",
 			"name": "HAYMAKER",
-			"desc": "Huge bullets, hurts",
+			"desc": "Enormous bullets with massive kick",
 			"rarity": "rare",
 			"color": Color(0.65, 0.85, 1.0),
 			"apply": func(w: Weapon) -> void:
@@ -202,7 +202,7 @@ static func all() -> Array:
 		{
 			"id": "big_head",
 			"name": "BIG HEAD",
-			"desc": "+80% damage, but your head is huge — easier to headshot",
+			"desc": "Easier to land headshots, but easier to be headshotted",
 			"color": Color(0.95, 0.55, 0.9),
 			"apply": func(w: Weapon) -> void:
 				w.damage_mult *= 1.8
@@ -213,7 +213,7 @@ static func all() -> Array:
 		{
 			"id": "chonky",
 			"name": "CHONKY",
-			"desc": "+75 max HP, but your body is bigger and easier to hit",
+			"desc": "Higher durability, but a larger target",
 			"color": Color(0.55, 0.9, 0.55),
 			"apply": func(w: Weapon) -> void:
 				w.max_hp_bonus += 75
@@ -222,7 +222,7 @@ static func all() -> Array:
 		{
 			"id": "acrobat",
 			"name": "ACROBAT",
-			"desc": "+2 extra air-jumps",
+			"desc": "Jump like a ninja",
 			"color": Color(0.5, 0.9, 1.0),
 			"apply": func(w: Weapon) -> void:
 				w.extra_jumps += 2,
@@ -230,7 +230,7 @@ static func all() -> Array:
 		{
 			"id": "quick_recharge",
 			"name": "QUICK RECHARGE",
-			"desc": "-15% special cooldown",
+			"desc": "",
 			"color": Color(0.85, 0.55, 1.0),
 			"apply": func(w: Weapon) -> void:
 				w.special_cooldown_mult *= 0.85,
@@ -238,7 +238,7 @@ static func all() -> Array:
 		{
 			"id": "teleport",
 			"name": "TELEPORT",
-			"desc": "RMB: teleport where you aim (2s cooldown)",
+			"desc": "RMB: teleport where you aim",
 			"color": Color(0.75, 0.35, 1.0),
 			"apply": func(w: Weapon) -> void:
 				w.special = Weapon.SPECIAL_TELEPORT,
@@ -246,7 +246,7 @@ static func all() -> Array:
 		{
 			"id": "shield",
 			"name": "SHIELD",
-			"desc": "RMB: 2s invulnerability bubble (8s cooldown)",
+			"desc": "RMB: 2s invulnerability bubble",
 			"rarity": "rare",
 			"color": Color(0.4, 0.8, 1.0),
 			"apply": func(w: Weapon) -> void:
@@ -255,7 +255,7 @@ static func all() -> Array:
 		{
 			"id": "invisible",
 			"name": "INVISIBLE",
-			"desc": "RMB: vanish for 4s (10s cooldown)",
+			"desc": "RMB: vanish for 4 seconds",
 			"rarity": "rare",
 			"color": Color(0.55, 1.0, 0.9),
 			"apply": func(w: Weapon) -> void:
@@ -264,12 +264,28 @@ static func all() -> Array:
 		{
 			"id": "cleaver",
 			"name": "CLEAVER",
-			"desc": "+200% melee damage, longer reach",
+			"desc": "Massive melee slash with longer reach",
 			"rarity": "rare",
 			"color": Color(0.8, 0.4, 0.9),
 			"apply": func(w: Weapon) -> void:
 				w.melee_damage_mult *= 3.0
 				w.melee_scale *= 1.8,
+		},
+		{
+			"id": "bazooka",
+			"name": "BAZOOKA",
+			"desc": "RMB: Single-shot massive explosion",
+			"rarity": "rare",
+			"color": Color(1.0, 0.25, 0.0),
+			"apply": func(w: Weapon) -> void:
+				w.damage_mult *= 5.0
+				w.mag_size_bonus = 1 - int(Weapon.BASE_MAG_SIZE) # Force to 1
+				w.reload_mult *= 0.3
+				w.bullet_speed_mult *= 0.45
+				w.bullet_scale *= 2.5
+				w.explosive_radius += 8.5
+				w.explosive_damage += 150.0
+				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.1, 0.0), 0.8),
 		},
 	]
 static func by_id(id: String) -> Dictionary:

@@ -42,6 +42,8 @@ var eliminated_players: Dictionary = {}
 var round_winner_id: int = 0
 var local_player: Node3D
 var _custom_crosshair: Control = null
+var _stats_panel: Control = null
+var _stats_content: GridContainer = null
 
 var _pick_timeout_timer: float = 0.0
 var _pick_timeout_active: bool = false
@@ -100,6 +102,7 @@ func _ready() -> void:
 	_build_rematch_overlay()
 	_build_ghost_overlay()
 	_build_tab_overlay()
+	_build_stats_panel()
 
 	if multiplayer.is_server():
 		multiplayer.peer_disconnected.connect(_on_peer_disconnected)
@@ -592,6 +595,8 @@ func _show_card_pick(loser_id: int, card_ids: Array) -> void:
 		return
 	# Loser: full overlay + cursor + card buttons.
 	pick_overlay.visible = true
+	_stats_panel.visible = true
+	_refresh_stats_panel()
 	pick_title.text = "PICK A CARD"
 	pick_subtitle.text = "you lost the round — choose an upgrade (8s left)"
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
@@ -710,17 +715,36 @@ func _make_card_button(card_id: String, card: Dictionary, clickable: bool) -> Co
 	desc.add_theme_color_override("font_color", Color(0.9, 0.9, 0.9))
 	v_content.add_child(desc)
 
+	# Mathematical Stat Diffs
+	var stats_vbox := VBoxContainer.new()
+	stats_vbox.add_theme_constant_override("separation", 2)
+	v_content.add_child(stats_vbox)
+
+	for diff_line in _get_card_stat_diff(card_id):
+		var slbl := Label.new()
+		slbl.text = diff_line
+		slbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		slbl.add_theme_font_size_override("font_size", 11)
+		slbl.add_theme_color_override("font_color", Color(0.7, 0.8, 1.0, 0.7))
+		stats_vbox.add_child(slbl)
+
 	# Holographic effects for rare
 	if rarity == "rare":
-		card_body.clip_contents = true
+		# Create an internal clipping layer so the outer shadow/glow isn't cut off
+		var clip_layer := Control.new()
+		clip_layer.name = "HoloClip"
+		clip_layer.set_anchors_preset(Control.PRESET_FULL_RECT)
+		clip_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		clip_layer.clip_contents = true
+		card_body.add_child(clip_layer)
 
 		# Shifting gradient "Holo" sweep - use TextureRect with Gradient for soft edges
 		for i in range(2):
 			var shine := TextureRect.new()
 			var grad := Gradient.new()
 			grad.set_offsets(PackedFloat32Array([0.0, 0.5, 1.0]))
-			# Prismatic holo colors: Transparent -> Tinted White -> Transparent
-			var tint := Color(0.5, 0.9, 1.0, 0.15) if i == 0 else Color(1.0, 0.6, 0.9, 0.1)
+			# Prismatic holo colors: Transparent -> Soft Tint -> Transparent
+			var tint := Color(0.4, 0.8, 1.0, 0.1) if i == 0 else Color(0.9, 0.5, 1.0, 0.08)
 			grad.set_colors(PackedColorArray([Color(tint.r, tint.g, tint.b, 0), tint, Color(tint.r, tint.g, tint.b, 0)]))
 
 			var tex := GradientTexture2D.new()
@@ -732,20 +756,20 @@ func _make_card_button(card_id: String, card: Dictionary, clickable: bool) -> Co
 
 			shine.texture = tex
 			shine.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-			shine.size = Vector2(160, 600) # Wider, softer beam
-			shine.rotation = deg_to_rad(25)
-			shine.position = Vector2(-250, -150)
+			shine.size = Vector2(240, 700) # Even wider, softer beam
+			shine.rotation = deg_to_rad(20)
+			shine.position = Vector2(-300, -200)
 			shine.mouse_filter = Control.MOUSE_FILTER_IGNORE
-			card_body.add_child(shine)
+			clip_layer.add_child(shine)
 
 			var tw_shine := shine.create_tween().set_loops()
-			tw_shine.tween_property(shine, "position:x", 450.0, 2.5 + (i * 0.8)).set_delay(0.2 + (i * 1.5))
-			tw_shine.tween_property(shine, "position:x", -250.0, 0.0)
+			tw_shine.tween_property(shine, "position:x", 500.0, 3.0 + (i * 0.5)).set_delay(0.2 + (i * 1.8))
+			tw_shine.tween_property(shine, "position:x", -300.0, 0.0)
 
 		# Pulsing border color
 		var tw_border := card_body.create_tween().set_loops()
-		tw_border.tween_property(sb, "border_color", Color(0.6, 0.95, 1.0), 1.5)
-		tw_border.tween_property(sb, "border_color", Color(0.95, 0.7, 1.0), 1.5)
+		tw_border.tween_property(sb, "border_color", Color(0.7, 0.9, 1.0), 1.8)
+		tw_border.tween_property(sb, "border_color", Color(0.9, 0.7, 1.0), 1.8)
 
 	# Clickable overlay
 	var btn := Button.new()
@@ -769,6 +793,7 @@ func _make_card_button(card_id: String, card: Dictionary, clickable: bool) -> Co
 
 		# Hover logic
 		btn.mouse_entered.connect(func() -> void:
+			_refresh_stats_panel(card_id) # Show projection
 			var tw := card_body.create_tween().set_parallel(true)
 			tw.tween_property(card_body, "scale", Vector2(1.12, 1.12), 0.2).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 			tw.tween_property(card_body, "rotation_degrees", 0.0, 0.15).set_trans(Tween.TRANS_CUBIC)
@@ -779,6 +804,7 @@ func _make_card_button(card_id: String, card: Dictionary, clickable: bool) -> Co
 		)
 
 		btn.mouse_exited.connect(func() -> void:
+			_refresh_stats_panel() # Reset to current
 			var tw := card_body.create_tween().set_parallel(true)
 			tw.tween_property(card_body, "scale", Vector2.ONE, 0.25).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
 			tw.tween_property(card_body, "rotation_degrees", base_rot, 0.2).set_trans(Tween.TRANS_CUBIC)
@@ -787,8 +813,80 @@ func _make_card_button(card_id: String, card: Dictionary, clickable: bool) -> Co
 				sb.shadow_size = 25
 				sb.shadow_color.a = 0.4
 		)
-
 	return root
+
+func _get_card_stat_diff(card_id: String) -> Array[String]:
+	var out: Array[String] = []
+	if local_player == null or not is_instance_valid(local_player):
+		return out
+
+	var card := CardLibrary.by_id(card_id)
+	if card.is_empty():
+		return out
+
+	# Clone current weapon to simulate the change
+	var base_w: Weapon = local_player.weapon
+	var next_w: Weapon = base_w.duplicate()
+	card.apply.call(next_w)
+
+	# Percent diffs
+	if abs(base_w.damage_mult - next_w.damage_mult) > 0.001:
+		var d = (next_w.damage_mult / base_w.damage_mult - 1.0) * 100.0
+		out.append("%+d%% Damage" % int(round(d)))
+
+	if abs(base_w.fire_rate_mult - next_w.fire_rate_mult) > 0.001:
+		var d = (next_w.fire_rate_mult / base_w.fire_rate_mult - 1.0) * 100.0
+		out.append("%+d%% Fire Rate" % int(round(d)))
+
+	if base_w.mag_size_bonus != next_w.mag_size_bonus:
+		out.append("%+d Ammo Capacity" % (next_w.mag_size_bonus - base_w.mag_size_bonus))
+
+	if abs(base_w.reload_mult - next_w.reload_mult) > 0.001:
+		var d = (next_w.reload_mult / base_w.reload_mult - 1.0) * 100.0
+		out.append("%+d%% Reload Speed" % int(round(d)))
+
+	if base_w.extra_projectiles != next_w.extra_projectiles:
+		out.append("%+d Projectiles" % (next_w.extra_projectiles - base_w.extra_projectiles))
+
+	if base_w.pierce_count != next_w.pierce_count:
+		out.append("%+d Pierce" % (next_w.pierce_count - base_w.pierce_count))
+
+	if base_w.ricochet_count != next_w.ricochet_count:
+		out.append("%+d Bounces" % (next_w.ricochet_count - base_w.ricochet_count))
+
+	if abs(base_w.move_speed_mult - next_w.move_speed_mult) > 0.001:
+		var d = (next_w.move_speed_mult / base_w.move_speed_mult - 1.0) * 100.0
+		out.append("%+d%% Move Speed" % int(round(d)))
+
+	if next_w.bullet_speed_mult > base_w.bullet_speed_mult * 1.1:
+		out.append("Faster Projectiles")
+	elif next_w.bullet_speed_mult < base_w.bullet_speed_mult * 0.9:
+		out.append("Slower Projectiles")
+
+	if next_w.spread < base_w.spread * 0.5:
+		out.append("Huge Accuracy Boost")
+	elif next_w.spread < base_w.spread:
+		out.append("Accuracy Up")
+	elif next_w.spread > base_w.spread:
+		out.append("Spread Increased")
+
+	if next_w.explosive_radius > base_w.explosive_radius:
+		out.append("Explosive Payload")
+
+	if next_w.lifesteal > base_w.lifesteal:
+		out.append("+%.0f%% Lifesteal" % ((next_w.lifesteal - base_w.lifesteal) * 100.0))
+
+	if base_w.max_hp_bonus != next_w.max_hp_bonus:
+		out.append("%+d Max HP" % (next_w.max_hp_bonus - base_w.max_hp_bonus))
+
+	if base_w.extra_jumps != next_w.extra_jumps:
+		out.append("%+d Extra Jumps" % (next_w.extra_jumps - base_w.extra_jumps))
+
+	if abs(base_w.get_headshot_mult() - next_w.get_headshot_mult()) > 0.01:
+		out.append("%.1fx Headshot Mult" % next_w.get_headshot_mult())
+
+	return out
+
 func _on_pick_timeout() -> void:
 	_pick_timeout_active = false
 	if not pick_overlay.visible:
@@ -852,6 +950,7 @@ func _server_card_picked(card_id: String) -> void:
 @rpc("authority", "call_local", "reliable")
 func _hide_card_pick() -> void:
 	pick_overlay.visible = false
+	if _stats_panel: _stats_panel.visible = false
 	for c in pick_row.get_children():
 		c.queue_free()
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
@@ -997,6 +1096,182 @@ func _update_ghost_overlay() -> void:
 	var is_ghost: bool = local_player != null and is_instance_valid(local_player) and local_player.get("ghost_mode") == true
 	var picking: bool = pick_overlay != null and pick_overlay.visible
 	_ghost_overlay.visible = is_ghost and not picking
+
+func _build_stats_panel() -> void:
+	_stats_panel = PanelContainer.new()
+	_stats_panel.custom_minimum_size = Vector2(600, 0)
+	_stats_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_stats_panel.visible = false
+
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.05, 0.05, 0.08, 0.98) # Dark solid background
+	sb.set_border_width_all(2)
+	sb.border_color = Color(0.4, 0.8, 1.0, 0.6)
+	sb.set_corner_radius_all(8)
+	sb.content_margin_left = 24
+	sb.content_margin_right = 24
+	sb.content_margin_top = 14
+	sb.content_margin_bottom = 14
+	_stats_panel.add_theme_stylebox_override("panel", sb)
+
+	_stats_content = GridContainer.new()
+	_stats_content.columns = 6 # label, old, arrow, new, spacer, ...
+	_stats_content.add_theme_constant_override("h_separation", 10)
+	_stats_content.add_theme_constant_override("v_separation", 6)
+	_stats_panel.add_child(_stats_content)
+
+	# Add to the HUD at a fixed bottom position
+	_stats_panel.anchor_left = 0.5
+	_stats_panel.anchor_right = 0.5
+	_stats_panel.anchor_top = 1.0
+	_stats_panel.anchor_bottom = 1.0
+	_stats_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	_stats_panel.offset_left = -300.0
+	_stats_panel.offset_right = 300.0
+	_stats_panel.offset_bottom = -20.0
+	# Remove fixed offset_top to allow dynamic height
+
+	pick_overlay.add_child(_stats_panel)
+func _refresh_stats_panel(projected_card_id: String = "") -> void:
+	if local_player == null or not is_instance_valid(local_player):
+		return
+
+	if projected_card_id == "" or pick_overlay == null or not pick_overlay.visible:
+		_animate_stats_panel(false)
+		return
+
+	var card := CardLibrary.by_id(projected_card_id)
+	if card.is_empty():
+		_animate_stats_panel(false)
+		return
+
+	# Clear and rebuild content before showing
+	for c in _stats_content.get_children():
+		c.queue_free()
+
+	var base_w: Weapon = local_player.weapon
+	var next_w := base_w.duplicate()
+	card.apply.call(next_w)
+
+	_add_stat_comparison("DAMAGE", base_w.get_damage(), next_w.get_damage(), true)
+	_add_stat_comparison("FIRE RATE", 1.0/base_w.get_fire_interval(), 1.0/next_w.get_fire_interval(), true)
+	_add_stat_comparison("AMMO", base_w.get_mag_size(), next_w.get_mag_size(), true)
+	_add_stat_comparison("RELOAD", base_w.get_reload_time(), next_w.get_reload_time(), false)
+	_add_stat_comparison("ACCURACY", rad_to_deg(base_w.spread), rad_to_deg(next_w.spread), false)
+	_add_stat_comparison("MOVEMENT", base_w.move_speed_mult, next_w.move_speed_mult, true)
+	_add_stat_comparison("BOUNCES", base_w.ricochet_count, next_w.ricochet_count, true)
+	_add_stat_comparison("PIERCE", base_w.pierce_count, next_w.pierce_count, true)
+	_add_stat_comparison("MAX HP", 100.0 + base_w.max_hp_bonus, 100.0 + next_w.max_hp_bonus, true)
+	_add_stat_comparison("JUMPS", 2.0 + base_w.extra_jumps, 2.0 + next_w.extra_jumps, true)
+	_add_stat_comparison("PROJ SPD", base_w.bullet_speed_mult, next_w.bullet_speed_mult, true)
+	_add_stat_comparison("EXPLOSION", base_w.explosive_radius, next_w.explosive_radius, true)
+	_add_stat_comparison("KNOCKBACK", base_w.knockback, next_w.knockback, true)
+
+	# Special Cooldown (calculated based on equipped special)
+	var base_cd: float = _get_base_special_cd(base_w.special) * base_w.special_cooldown_mult
+	var next_cd: float = _get_base_special_cd(next_w.special) * next_w.special_cooldown_mult
+	_add_stat_comparison("SPECIAL CD", base_cd, next_cd, false)
+
+	if base_w.special != next_w.special:
+		_add_text_comparison("SPECIAL", base_w.special.to_upper(), next_w.special.to_upper(), Color(0.4, 0.8, 1.0))
+
+	_animate_stats_panel(true)
+
+var _stats_tween: Tween = null
+func _animate_stats_panel(show: bool) -> void:
+	if _stats_panel == null: return
+
+	if _stats_tween and _stats_tween.is_valid():
+		_stats_tween.kill()
+
+	if show:
+		_stats_panel.visible = true
+		_stats_tween = create_tween().set_parallel(true)
+		_stats_tween.tween_property(_stats_panel, "modulate:a", 1.0, 0.25).set_trans(Tween.TRANS_CUBIC)
+		_stats_tween.tween_property(_stats_panel, "offset_top", -120.0, 0.3).from(-80.0).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	else:
+		_stats_tween = create_tween().set_parallel(true)
+		_stats_tween.tween_property(_stats_panel, "modulate:a", 0.0, 0.2).set_trans(Tween.TRANS_CUBIC)
+		_stats_tween.tween_property(_stats_panel, "offset_top", -80.0, 0.2).set_trans(Tween.TRANS_CUBIC)
+		_stats_tween.chain().tween_callback(func(): _stats_panel.visible = false)
+
+func _get_base_special_cd(special_id: String) -> float:
+	match special_id:
+		Weapon.SPECIAL_TELEPORT: return 2.0
+		Weapon.SPECIAL_SHIELD:   return 8.0
+		Weapon.SPECIAL_INVISIBLE: return 10.0
+		_: return 3.0 # Grenade baseline
+
+func _add_text_comparison(label_text: String, old_val: String, next_val: String, tint: Color) -> void:
+	# 1. Stat Label
+	var l := Label.new()
+	l.text = label_text
+	l.add_theme_font_size_override("font_size", 12)
+	l.add_theme_color_override("font_color", Color(0.6, 0.6, 0.7))
+	_stats_content.add_child(l)
+
+	# 2. Old Value
+	var v_old := Label.new()
+	v_old.text = old_val
+	v_old.add_theme_font_size_override("font_size", 13)
+	v_old.add_theme_color_override("font_color", Color.WHITE)
+	_stats_content.add_child(v_old)
+
+	# 3. Arrow
+	var arr := Label.new()
+	arr.text = ">>"
+	arr.add_theme_font_size_override("font_size", 11)
+	arr.add_theme_color_override("font_color", Color(0.4, 0.4, 0.5))
+	_stats_content.add_child(arr)
+
+	# 4. New Value
+	var v_new := Label.new()
+	v_new.text = next_val
+	v_new.add_theme_color_override("font_color", tint)
+	v_new.add_theme_font_size_override("font_size", 14)
+	_stats_content.add_child(v_new)
+
+	# Spacers
+	_stats_content.add_child(Control.new())
+	_stats_content.add_child(Control.new())
+
+func _add_stat_comparison(label_text: String, base_val: float, next_val: float, higher_is_better: bool) -> void:
+	var diff := next_val - base_val
+	if abs(diff) < 0.001:
+		return
+
+	# 1. Stat Label (Grey)
+	var l := Label.new()
+	l.text = label_text
+	l.add_theme_font_size_override("font_size", 12)
+	l.add_theme_color_override("font_color", Color(0.6, 0.6, 0.7))
+	_stats_content.add_child(l)
+
+	# 2. Old Value (White)
+	var v_old := Label.new()
+	v_old.text = "%.1f" % base_val
+	v_old.add_theme_font_size_override("font_size", 13)
+	v_old.add_theme_color_override("font_color", Color.WHITE)
+	_stats_content.add_child(v_old)
+
+	# 3. Arrow (Neutral)
+	var arr := Label.new()
+	arr.text = ">>"
+	arr.add_theme_font_size_override("font_size", 11)
+	arr.add_theme_color_override("font_color", Color(0.4, 0.4, 0.5))
+	_stats_content.add_child(arr)
+
+	# 4. New Value (Red/Green)
+	var v_new := Label.new()
+	v_new.text = "%.1f" % next_val
+	var is_better := (diff > 0.001 and higher_is_better) or (diff < -0.001 and not higher_is_better)
+	v_new.add_theme_color_override("font_color", Color(0.4, 1.0, 0.4) if is_better else Color(1.0, 0.4, 0.4))
+	v_new.add_theme_font_size_override("font_size", 14)
+	_stats_content.add_child(v_new)
+
+	# Spacers for GridContainer columns (6 columns total)
+	_stats_content.add_child(Control.new())
+	_stats_content.add_child(Control.new())
 
 func _on_rematch_pressed() -> void:
 	if _rematch_requested:
