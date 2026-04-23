@@ -80,9 +80,27 @@ func _explode() -> void:
 		var hit := space.intersect_ray(q)
 		if not hit.is_empty():
 			continue
+
 		var falloff: float = clamp(1.0 - (dist / RADIUS), 0.0, 1.0)
 		var dmg: int = int(lerp(float(MIN_DAMAGE), float(MAX_DAMAGE), falloff))
-		p.take_damage.rpc_id(p.get_multiplayer_authority(), dmg, shooter_id)
+
+		# Self-damage reduction
+		if p.player_id == shooter_id:
+			dmg = int(dmg * 0.4)
+
+		if dmg > 0:
+			p.take_damage.rpc_id(p.get_multiplayer_authority(), dmg, shooter_id)
+
+		# Grenade Knockback
+		var kb_force: float = 18.0 # Stronger base for heavy grenades
+		var dir: Vector3 = (p.global_position - global_position)
+		if dir.length_squared() > 0.001:
+			dir = dir.normalized()
+		else:
+			dir = Vector3.UP
+
+		var impulse: Vector3 = (dir * kb_force * falloff) + (Vector3.UP * kb_force * 0.4 * falloff)
+		p.apply_knockback.rpc_id(p.get_multiplayer_authority(), impulse)
 	_do_vfx.rpc()
 
 @rpc("authority", "call_local", "reliable")

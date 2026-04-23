@@ -479,26 +479,31 @@ func _apply_bullet_splash(pos: Vector3, radius: float, damage: float, shooter_id
 		q.collision_mask = 1
 		if not get_world_3d().direct_space_state.intersect_ray(q).is_empty():
 			continue
-		if p.player_id == shooter_id:
-			continue
+
 		var falloff: float = clamp(1.0 - dist / radius, 0.0, 1.0)
 		var dmg: int = int(damage * falloff)
+
+		# Self-damage reduction (50%) but keep full knockback
+		if p.player_id == shooter_id:
+			dmg = int(dmg * 0.5)
+
 		if dmg > 0:
 			p.take_damage.rpc_id(p.get_multiplayer_authority(), dmg, shooter_id)
-			# Splash pushes outward from the blast, scaled by falloff + the
-			# shooter's knockback stat so HAYMAKER explosions really fling.
-			var shooter := get_parent().get_node_or_null(str(shooter_id))
-			var kb: float = Weapon.BASE_KNOCKBACK
-			if shooter and shooter.get("weapon") != null:
-				kb = shooter.weapon.knockback
-			if kb > 0.0:
-				var dir: Vector3 = (p.global_position - pos)
-				if dir.length_squared() > 0.001:
-					dir = dir.normalized()
-				else:
-					dir = Vector3.UP
-				var impulse: Vector3 = dir * kb * falloff + Vector3.UP * kb * 0.35 * falloff
-				p.apply_knockback.rpc_id(p.get_multiplayer_authority(), impulse)
+
+		# Explosion Knockback
+		var shooter := get_parent().get_node_or_null(str(shooter_id))
+		var kb_mult: float = 12.0 # High base for explosions
+		var weapon_kb: float = shooter.weapon.knockback if shooter and shooter.get("weapon") != null else 1.0
+
+		var dir: Vector3 = (p.global_position - pos)
+		if dir.length_squared() > 0.001:
+			dir = dir.normalized()
+		else:
+			dir = Vector3.UP
+
+		# Violent outward push + upward lift
+		var impulse: Vector3 = (dir * kb_mult * weapon_kb * falloff) + (Vector3.UP * kb_mult * 0.5 * falloff)
+		p.apply_knockback.rpc_id(p.get_multiplayer_authority(), impulse)
 
 func _player_from_hit_collider(collider: Node) -> Node:
 	if collider == null:
