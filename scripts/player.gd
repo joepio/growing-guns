@@ -165,6 +165,7 @@ func _physics_process(delta: float) -> void:
 		if is_on_floor():
 			velocity.y = JUMP_VELOCITY
 			jumps_left = 1
+			SFX.jump()
 		elif is_on_wall() and wall_jump_cooldown <= 0.0:
 			var n := get_wall_normal()
 			velocity.y = WALL_JUMP_V
@@ -172,9 +173,11 @@ func _physics_process(delta: float) -> void:
 			velocity.z += n.z * WALL_JUMP_H
 			wall_jump_cooldown = WALL_JUMP_COOLDOWN
 			jumps_left = 1  # wall-jump refreshes a double-jump charge
+			SFX.jump()
 		elif jumps_left > 0:
 			velocity.y = DOUBLE_JUMP_VELOCITY
 			jumps_left -= 1
+			SFX.jump()
 
 	# --- Dash ---
 	if Input.is_action_just_pressed("dash") and dash_charges > 0:
@@ -184,6 +187,7 @@ func _physics_process(delta: float) -> void:
 		dash_dir = input_dir.normalized()
 		dash_timer = DASH_TIME
 		dash_charges -= 1
+		SFX.dash()
 
 	# --- Movement ---
 	var wish_dir := _input_vector()
@@ -255,6 +259,7 @@ func _fire_rifle() -> void:
 
 @rpc("any_peer", "call_local", "reliable")
 func _rifle_fired(origin: Vector3, dir: Vector3, shooter_id: int) -> void:
+	SFX.shot()
 	var shooter_node := get_parent().get_node_or_null(str(shooter_id))
 	var w: Weapon = shooter_node.weapon if shooter_node else Weapon.new()
 	var is_server := multiplayer.is_server()
@@ -486,6 +491,7 @@ func _request_grenade(origin: Vector3, dir: Vector3) -> void:
 
 @rpc("any_peer", "call_local", "reliable")
 func _spawn_grenade(origin: Vector3, dir: Vector3, shooter: int, uname: String) -> void:
+	SFX.grenade_launch()
 	# Only the server may authorize grenade spawns.
 	var sender := multiplayer.get_remote_sender_id()
 	if sender != 0 and sender != 1:
@@ -508,6 +514,7 @@ func _swing_melee() -> void:
 
 @rpc("any_peer", "call_local", "reliable")
 func _melee_swung(origin: Vector3, dir: Vector3, attacker_id: int) -> void:
+	SFX.melee()
 	# Gun swing + blade trail play on every peer.
 	_animate_gun_slash()
 	_spawn_slice_trail(origin, dir)
@@ -621,6 +628,7 @@ func _apply_damage(amount: int, from_id: int) -> void:
 	health = max(0, health - amount)
 	if from_id != player_id:
 		_notify_damage_source(from_id)
+		SFX.hit_received()
 	if health <= 0:
 		died.emit(from_id)
 		_report_death.rpc_id(1, from_id)

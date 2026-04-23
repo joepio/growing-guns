@@ -360,6 +360,10 @@ func _broadcast_scores(scores: Dictionary) -> void:
 
 func show_hitmarker(kind: String) -> void:
 	hitmarker.flash(kind)
+	if kind == "kill":
+		SFX.kill_confirm()
+	else:
+		SFX.hitmarker(kind)
 
 func show_damage_direction(from_pos: Vector3) -> void:
 	if not local_player or not is_instance_valid(local_player):
