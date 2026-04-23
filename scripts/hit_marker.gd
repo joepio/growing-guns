@@ -45,7 +45,7 @@ func flash(kind: String = "body") -> void:
 	_alpha = 1.0
 	_spread = 0.7
 	var tw := create_tween().set_parallel(true)
-	tw.tween_property(self, "_alpha", 0.0, 0.32) \
+	tw.tween_property(self, "_alpha", 0.0, 0.16) \
 		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
-	tw.tween_property(self, "_spread", 1.35, 0.25) \
+	tw.tween_property(self, "_spread", 1.35, 0.13) \
 		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)

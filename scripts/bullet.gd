@@ -142,7 +142,10 @@ func _handle_collision(result: Dictionary) -> void:
 				shooter_node._hit_confirm.rpc_id(shooter_node.get_multiplayer_authority(), true, 0)
 
 		if weapon_stats.explosive_radius > 0.0:
-			shooter_node.call("_apply_bullet_splash", hit_pos, weapon_stats.explosive_radius, weapon_stats.explosive_damage, shooter_id)
+			# Nudge the splash origin off the impact surface so the LoS raycast
+			# doesn't immediately self-intersect the wall we just hit.
+			var splash_pos: Vector3 = hit_pos + normal * 0.1
+			shooter_node.call("_apply_bullet_splash", splash_pos, weapon_stats.explosive_radius, weapon_stats.explosive_damage, shooter_id)
 
 	# Pierce / Ricochet logic
 	if hit_player and pierce_left > 0:

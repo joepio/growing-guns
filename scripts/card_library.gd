@@ -283,8 +283,8 @@ static func all() -> Array:
 				w.reload_mult *= 0.3
 				w.bullet_speed_mult *= 0.45
 				w.bullet_scale *= 2.5
-				w.explosive_radius += 8.5
-				w.explosive_damage += 150.0
+				w.explosive_radius += 16.0
+				w.explosive_damage += 200.0
 				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.1, 0.0), 0.8),
 		},
 	]

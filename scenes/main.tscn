@@ -2,19 +2,52 @@
 
 [ext_resource type="Script" uid="uid://bvlcwa5kvdtp2" path="res://scripts/main_menu.gd" id="1_menu"]
 
-[sub_resource type="StyleBoxFlat" id="Style_1"]
-bg_color = Color(0.08, 0.02, 0.08, 0.9)
+[sub_resource type="StyleBoxFlat" id="Style_Panel"]
+bg_color = Color(0.04, 0.04, 0.07, 0.94)
 border_width_left = 2
 border_width_top = 2
 border_width_right = 2
 border_width_bottom = 2
-border_color = Color(1, 0.2, 0.3, 1)
-corner_radius_top_left = 8
-corner_radius_top_right = 8
-corner_radius_bottom_right = 8
-corner_radius_bottom_left = 8
+border_color = Color(0.4, 0.8, 1.0, 0.8)
+corner_radius_top_left = 12
+corner_radius_top_right = 12
+corner_radius_bottom_right = 12
+corner_radius_bottom_left = 12
+shadow_color = Color(0.3, 0.6, 1.0, 0.2)
+shadow_size = 20
 
-[node name="MainMenu" type="Control" unique_id=1760365584]
+[sub_resource type="StyleBoxFlat" id="Style_Input"]
+bg_color = Color(0.08, 0.08, 0.12, 1)
+border_width_bottom = 2
+border_color = Color(1, 0.8, 0.4, 0.6)
+content_margin_left = 12
+content_margin_right = 12
+
+[sub_resource type="StyleBoxFlat" id="Style_Button"]
+bg_color = Color(0.12, 0.14, 0.22, 1)
+border_width_left = 1
+border_width_top = 1
+border_width_right = 1
+border_width_bottom = 1
+border_color = Color(0.4, 0.8, 1.0, 0.4)
+corner_radius_top_left = 4
+corner_radius_top_right = 4
+corner_radius_bottom_right = 4
+corner_radius_bottom_left = 4
+
+[sub_resource type="StyleBoxFlat" id="Style_Button_Hover"]
+bg_color = Color(0.2, 0.25, 0.4, 1)
+border_width_left = 2
+border_width_top = 2
+border_width_right = 2
+border_width_bottom = 2
+border_color = Color(0.6, 0.9, 1.0, 1)
+corner_radius_top_left = 4
+corner_radius_top_right = 4
+corner_radius_bottom_right = 4
+corner_radius_bottom_left = 4
+
+[node name="MainMenu" type="Control"]
 layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0
@@ -23,131 +56,154 @@ grow_horizontal = 2
 grow_vertical = 2
 script = ExtResource("1_menu")
 
-[node name="Background" type="ColorRect" parent="." unique_id=1334316516]
+[node name="Background" type="ColorRect" parent="."]
 layout_mode = 1
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
-color = Color(0.05, 0.01, 0.08, 1)
+color = Color(0.02, 0.02, 0.04, 1)
 
-[node name="Title" type="Label" parent="." unique_id=929315831]
-layout_mode = 1
-anchors_preset = 5
-anchor_left = 0.5
-anchor_right = 0.5
-offset_left = -220.0
-offset_top = 40.0
-offset_right = 220.0
-offset_bottom = 140.0
-grow_horizontal = 2
-theme_override_colors/font_color = Color(1, 0.2, 0.3, 1)
-theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
-theme_override_constants/outline_size = 8
-theme_override_font_sizes/font_size = 64
-text = "JUMPSHOOT"
-horizontal_alignment = 1
-vertical_alignment = 1
-
-[node name="Subtitle" type="Label" parent="." unique_id=1933619471]
-layout_mode = 1
-anchors_preset = 5
-anchor_left = 0.5
-anchor_right = 0.5
-offset_left = -220.0
-offset_top = 140.0
-offset_right = 220.0
-offset_bottom = 170.0
-grow_horizontal = 2
-theme_override_colors/font_color = Color(1, 0.6, 0.2, 1)
-theme_override_font_sizes/font_size = 16
-text = "WASD · SPACE · SHIFT dash · LMB rifle · RMB grenade · F melee"
-horizontal_alignment = 1
-
-[node name="Panel" type="PanelContainer" parent="." unique_id=2096109255]
+[node name="Container" type="VBoxContainer" parent="."]
 layout_mode = 1
 anchors_preset = 8
 anchor_left = 0.5
 anchor_top = 0.5
 anchor_right = 0.5
 anchor_bottom = 0.5
-offset_left = -240.0
-offset_top = -180.0
-offset_right = 240.0
-offset_bottom = 240.0
+offset_left = -260.0
+offset_top = -280.0
+offset_right = 260.0
+offset_bottom = 280.0
 grow_horizontal = 2
 grow_vertical = 2
-theme_override_styles/panel = SubResource("Style_1")
+theme_override_constants/separation = 20
+alignment = 1
 
-[node name="VBox" type="VBoxContainer" parent="Panel" unique_id=549687302]
+[node name="Header" type="VBoxContainer" parent="Container"]
+layout_mode = 2
+theme_override_constants/separation = -10
+
+[node name="Title" type="Label" parent="Container/Header"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_colors/font_outline_color = Color(1, 0.2, 0.35, 1)
+theme_override_constants/outline_size = 14
+theme_override_font_sizes/font_size = 72
+text = "JUMPSHOOT"
+horizontal_alignment = 1
+
+[node name="Panel" type="PanelContainer" parent="Container"]
+layout_mode = 2
+size_flags_vertical = 3
+theme_override_styles/panel = SubResource("Style_Panel")
+
+[node name="Margin" type="MarginContainer" parent="Container/Panel"]
+layout_mode = 2
+theme_override_constants/margin_left = 24
+theme_override_constants/margin_top = 20
+theme_override_constants/margin_right = 24
+theme_override_constants/margin_bottom = 20
+
+[node name="VBox" type="VBoxContainer" parent="Container/Panel/Margin"]
+layout_mode = 2
+theme_override_constants/separation = 12
+
+[node name="NameSection" type="VBoxContainer" parent="Container/Panel/Margin/VBox"]
+layout_mode = 2
+theme_override_constants/separation = 4
+
+[node name="NameLabel" type="Label" parent="Container/Panel/Margin/VBox/NameSection"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 0.85, 0.4, 1)
+theme_override_font_sizes/font_size = 12
+text = "OPERATOR IDENTIFICATION"
+
+[node name="NameInput" type="LineEdit" parent="Container/Panel/Margin/VBox/NameSection"]
+layout_mode = 2
+theme_override_styles/normal = SubResource("Style_Input")
+placeholder_text = "Enter callsign..."
+
+[node name="HSeparator" type="HSeparator" parent="Container/Panel/Margin/VBox"]
+modulate = Color(1, 1, 1, 0.1)
+layout_mode = 2
+
+[node name="MainActions" type="VBoxContainer" parent="Container/Panel/Margin/VBox"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="BotButton" type="Button" parent="Container/Panel/Margin/VBox/MainActions"]
+custom_minimum_size = Vector2(0, 44)
+layout_mode = 2
+theme_override_styles/hover = SubResource("Style_Button_Hover")
+theme_override_styles/pressed = SubResource("Style_Button")
+theme_override_styles/normal = SubResource("Style_Button")
+text = "TRAINING (VS BOT)"
+
+[node name="HostButton" type="Button" parent="Container/Panel/Margin/VBox/MainActions"]
+custom_minimum_size = Vector2(0, 44)
+layout_mode = 2
+theme_override_styles/hover = SubResource("Style_Button_Hover")
+theme_override_styles/pressed = SubResource("Style_Button")
+theme_override_styles/normal = SubResource("Style_Button")
+text = "ESTABLISH NODE (HOST)"
+
+[node name="HSeparator2" type="HSeparator" parent="Container/Panel/Margin/VBox"]
+modulate = Color(1, 1, 1, 0.1)
+layout_mode = 2
+
+[node name="JoinSection" type="VBoxContainer" parent="Container/Panel/Margin/VBox"]
+layout_mode = 2
+theme_override_constants/separation = 6
+
+[node name="HBoxJoin" type="HBoxContainer" parent="Container/Panel/Margin/VBox/JoinSection"]
 layout_mode = 2
 theme_override_constants/separation = 10
 
-[node name="NameLabel" type="Label" parent="Panel/VBox" unique_id=1394129134]
-layout_mode = 2
-theme_override_colors/font_color = Color(1, 0.9, 0.9, 1)
-text = "Your Name:"
-
-[node name="NameInput" type="LineEdit" parent="Panel/VBox" unique_id=289054224]
-layout_mode = 2
-placeholder_text = "Enter name..."
-
-[node name="HSeparator" type="HSeparator" parent="Panel/VBox" unique_id=652535047]
-layout_mode = 2
-
-[node name="BotButton" type="Button" parent="Panel/VBox" unique_id=2074064213]
-custom_minimum_size = Vector2(0, 44)
-layout_mode = 2
-text = "VS BOT"
-
-[node name="HostButton" type="Button" parent="Panel/VBox" unique_id=24855203]
-custom_minimum_size = Vector2(0, 44)
-layout_mode = 2
-text = "HOST MATCH"
-
-[node name="HSeparator2" type="HSeparator" parent="Panel/VBox" unique_id=494789313]
-layout_mode = 2
-
-[node name="JoinIPLabel" type="Label" parent="Panel/VBox" unique_id=1048703386]
-layout_mode = 2
-theme_override_colors/font_color = Color(0.7, 0.7, 0.8, 1)
-theme_override_font_sizes/font_size = 14
-text = "Direct Join by IP:"
-
-[node name="HBoxJoin" type="HBoxContainer" parent="Panel/VBox" unique_id=554552808]
-layout_mode = 2
-
-[node name="AddrInput" type="LineEdit" parent="Panel/VBox/HBoxJoin" unique_id=148003731]
+[node name="AddrInput" type="LineEdit" parent="Container/Panel/Margin/VBox/JoinSection/HBoxJoin"]
 layout_mode = 2
 size_flags_horizontal = 3
+theme_override_styles/normal = SubResource("Style_Input")
 text = "127.0.0.1"
-placeholder_text = "Server IP"
+placeholder_text = "Target IP"
 
-[node name="JoinButton" type="Button" parent="Panel/VBox/HBoxJoin" unique_id=1244332451]
+[node name="JoinButton" type="Button" parent="Container/Panel/Margin/VBox/JoinSection/HBoxJoin"]
 custom_minimum_size = Vector2(80, 0)
 layout_mode = 2
+theme_override_styles/hover = SubResource("Style_Button_Hover")
+theme_override_styles/pressed = SubResource("Style_Button")
+theme_override_styles/normal = SubResource("Style_Button")
 text = "JOIN"
 
-[node name="HSeparator3" type="HSeparator" parent="Panel/VBox" unique_id=1529607208]
+[node name="LocalGamesLabel" type="Label" parent="Container/Panel/Margin/VBox"]
 layout_mode = 2
+theme_override_colors/font_color = Color(1, 0.4, 0.8, 0.8)
+theme_override_font_sizes/font_size = 11
+text = "DISCOVERED NODES"
 
-[node name="LocalGamesLabel" type="Label" parent="Panel/VBox" unique_id=809544244]
-layout_mode = 2
-theme_override_colors/font_color = Color(0.4, 0.8, 1, 1)
-theme_override_font_sizes/font_size = 14
-text = "Local Games Found:"
-
-[node name="ScrollContainer" type="ScrollContainer" parent="Panel/VBox" unique_id=1164932453]
+[node name="ScrollContainer" type="ScrollContainer" parent="Container/Panel/Margin/VBox"]
 layout_mode = 2
 size_flags_vertical = 3
+theme_override_styles/panel = SubResource("Style_Input")
 horizontal_scroll_mode = 0
 
-[node name="GameList" type="VBoxContainer" parent="Panel/VBox/ScrollContainer" unique_id=1994051847]
+[node name="GameList" type="VBoxContainer" parent="Container/Panel/Margin/VBox/ScrollContainer"]
 layout_mode = 2
 size_flags_horizontal = 3
+theme_override_constants/separation = 2
 
-[node name="Status" type="Label" parent="Panel/VBox" unique_id=508578898]
+[node name="Status" type="Label" parent="Container/Panel/Margin/VBox"]
+custom_minimum_size = Vector2(0, 20)
 layout_mode = 2
 theme_override_colors/font_color = Color(1, 0.6, 0.3, 1)
+theme_override_font_sizes/font_size = 12
+horizontal_alignment = 1
+vertical_alignment = 1
+
+[node name="Footer" type="Label" parent="Container"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.4, 0.8, 1, 0.6)
+theme_override_font_sizes/font_size = 12
+text = "WASD MOVE · SPACE JUMP · SHIFT DASH · LMB FIRE · RMB SPECIAL · F MELEE"
 horizontal_alignment = 1

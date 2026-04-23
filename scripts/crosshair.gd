@@ -1,7 +1,7 @@
 extends Control
 
 var spread: float = 0.0
-var color: Color = Color(1.0, 0.9, 0.2, 0.6) # Lower opacity yellow
+var color: Color = Color(1.2, 1.0, 0.4, 0.9) # HDR-ish yellow, higher opacity
 var line_width: float = 1.5
 var line_length: float = 8.0
 var base_gap: float = 4.0

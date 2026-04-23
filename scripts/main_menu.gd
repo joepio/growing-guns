@@ -1,10 +1,10 @@
 extends Control
 
-@onready var name_input: LineEdit = $Panel/VBox/NameInput
-@onready var addr_input: LineEdit = $Panel/VBox/HBoxJoin/AddrInput
-@onready var bot_button: Button = $Panel/VBox/BotButton
-@onready var host_button: Button = $Panel/VBox/HostButton
-@onready var join_button: Button = $Panel/VBox/HBoxJoin/JoinButton
+@onready var name_input: LineEdit = $Panel/VBox/NameSection/NameInput
+@onready var addr_input: LineEdit = $Panel/VBox/JoinSection/HBoxJoin/AddrInput
+@onready var bot_button: Button = $Panel/VBox/MainActions/BotButton
+@onready var host_button: Button = $Panel/VBox/MainActions/HostButton
+@onready var join_button: Button = $Panel/VBox/JoinSection/HBoxJoin/JoinButton
 @onready var game_list_vbox: VBoxContainer = $Panel/VBox/ScrollContainer/GameList
 @onready var status_label: Label = $Panel/VBox/Status
 
@@ -68,9 +68,17 @@ func _on_games_discovered(games: Dictionary) -> void:
 	for addr in games:
 		var game: Dictionary = games[addr]
 		var btn := Button.new()
-		btn.text = "%s's Game (%d/%d) @ %s" % [game.name, game.players, game.max, addr]
+		btn.text = " JOIN: %s (%d/%d) @ %s" % [game.name, game.players, game.max, addr]
 		btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
-		btn.add_theme_font_size_override("font_size", 13)
+		btn.custom_minimum_size = Vector2(0, 36)
+		btn.add_theme_font_size_override("font_size", 12)
+		btn.add_theme_color_override("font_hover_color", Color(0.6, 0.9, 1.0))
+
+		# Reuse the established button styles
+		btn.add_theme_stylebox_override("normal", load("res://scenes/main.tscn::Style_Button"))
+		btn.add_theme_stylebox_override("hover", load("res://scenes/main.tscn::Style_Button_Hover"))
+		btn.add_theme_stylebox_override("pressed", load("res://scenes/main.tscn::Style_Button"))
+
 		btn.pressed.connect(_do_join.bind(addr))
 		game_list_vbox.add_child(btn)
 
