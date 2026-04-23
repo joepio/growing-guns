@@ -170,6 +170,22 @@ static func all() -> Array:
 			"apply": func(w: Weapon) -> void:
 				w.extra_jumps += 2,
 		},
+		{
+			"id": "teleport",
+			"name": "TELEPORT",
+			"desc": "RMB: teleport where you aim (2s cooldown)",
+			"color": Color(0.75, 0.35, 1.0),
+			"apply": func(w: Weapon) -> void:
+				w.special = Weapon.SPECIAL_TELEPORT,
+		},
+		{
+			"id": "shield",
+			"name": "SHIELD",
+			"desc": "RMB: 2s invulnerability bubble (8s cooldown)",
+			"color": Color(0.4, 0.8, 1.0),
+			"apply": func(w: Weapon) -> void:
+				w.special = Weapon.SPECIAL_SHIELD,
+		},
 	]
 
 static func by_id(id: String) -> Dictionary:

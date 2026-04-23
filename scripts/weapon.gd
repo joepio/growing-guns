@@ -16,6 +16,11 @@ const BASE_HEADSHOT_MULT := 2.0
 const BASE_SPREAD := 0.008                # radians — ~0.46°, noticeable at range
 const BASE_BULLET_COLOR := Color(1.0, 0.9, 0.3)
 
+# --- Special ability (RMB). Cards swap which one is equipped. ---
+const SPECIAL_GRENADE := "grenade"
+const SPECIAL_TELEPORT := "teleport"
+const SPECIAL_SHIELD := "shield"
+
 # --- Multiplicative modifiers (cards multiply) ---
 var damage_mult: float = 1.0
 var fire_rate_mult: float = 1.0        # >1 = faster
@@ -44,6 +49,9 @@ var head_scale: float = 1.0            # visual + head hitbox
 var body_scale: float = 1.0            # visual + torso/legs hitbox
 var max_hp_bonus: int = 0              # flat HP added on top of Player.MAX_HEALTH
 var extra_jumps: int = 0               # additional air-jumps beyond the default double-jump
+
+# --- Special / RMB slot ---
+var special: String = SPECIAL_GRENADE
 
 # --- Tracking ---
 var applied_cards: Array[String] = []
@@ -87,4 +95,5 @@ func reset() -> void:
 	body_scale = 1.0
 	max_hp_bonus = 0
 	extra_jumps = 0
+	special = SPECIAL_GRENADE
 	applied_cards.clear()
