@@ -35,6 +35,10 @@ const MELEE_BACKSTAB := 9999  # guaranteed kill
 @onready var camera: Camera3D = $Camera
 @onready var muzzle: Node3D = $Camera/Muzzle
 @onready var body_model: Node3D = $BodyModel
+@onready var head_mesh: MeshInstance3D = $BodyModel/Head
+@onready var head_hitbox: Area3D = $HeadHitbox
+@onready var torso_hitbox: Area3D = $TorsoHitbox
+@onready var legs_hitbox: Area3D = $LegsHitbox
 @onready var name_label: Label3D = $NameLabel
 @onready var gun_body: MeshInstance3D = $Camera/Muzzle/GunMesh
 var gun_barrel: MeshInstance3D = null
@@ -78,9 +82,17 @@ const BOT_SHOOT_INTERVAL := 0.7
 const BOT_FOLLOW_DIST := 7.0
 const BOT_ROT_SPEED := 6.0
 const BOT_SPREAD := 0.055                # ~3.15° — miss-prone but threatening
+const BOT_MISS_CHANCE := 0.3             # fraction of shots that get huge extra spread
+const BOT_JUMP_CHANCE := 0.025           # per physics tick, when on floor
+const BOT_DASH_CHANCE := 0.018           # per physics tick, when charge available
 
 var _bot_target: Node3D = null
 var _bot_shoot_cooldown: float = 0.0
+var _bot_strafe_timer: float = 0.0
+var _bot_strafe_side: float = 0.0        # -1 left, 0 none, +1 right
+var _bot_approach: float = 1.0           # -1 retreat, 0 hold, +1 chase
+var _bot_jump_cooldown: float = 0.0
+var _bot_dash_cooldown: float = 0.0
 
 var health: int = MAX_HEALTH
 
@@ -97,6 +109,7 @@ func _ready() -> void:
 	_camera_rest_pos = camera.position
 	_setup_gun_visuals()
 	_update_gun_visuals()
+	_update_body_scale()
 	_refresh_authority_view()
 	add_to_group("players")
 
@@ -188,7 +201,9 @@ func _physics_process(delta: float) -> void:
 	if not is_on_floor():
 		velocity.y -= GRAVITY * delta
 	else:
-		jumps_left = 2
+		# Default: 1 ground jump + 1 air double-jump = 2 total.
+		# ACROBAT and similar cards extend this via weapon.extra_jumps.
+		jumps_left = 2 + weapon.extra_jumps
 
 	# --- Jump / wall-jump / double-jump ---
 	# Wall-jump takes priority over double-jump so you can chain WJ → WJ → dash → WJ
@@ -197,20 +212,20 @@ func _physics_process(delta: float) -> void:
 	if Input.is_action_just_pressed("jump"):
 		if is_on_floor():
 			velocity.y = JUMP_VELOCITY
-			jumps_left = 1
-			SFX.jump()
+			jumps_left = 1 + weapon.extra_jumps
+			SFX.jump(global_position)
 		elif is_on_wall() and wall_jump_cooldown <= 0.0:
 			var n := get_wall_normal()
 			velocity.y = WALL_JUMP_V
 			velocity.x += n.x * WALL_JUMP_H
 			velocity.z += n.z * WALL_JUMP_H
 			wall_jump_cooldown = WALL_JUMP_COOLDOWN
-			jumps_left = 1  # wall-jump refreshes a double-jump charge
-			SFX.jump()
+			jumps_left = 1 + weapon.extra_jumps  # wall-jump refreshes all air-jumps
+			SFX.jump(global_position)
 		elif jumps_left > 0:
 			velocity.y = DOUBLE_JUMP_VELOCITY
 			jumps_left -= 1
-			SFX.jump()
+			SFX.jump(global_position)
 
 	# --- Dash ---
 	if Input.is_action_just_pressed("dash") and dash_charges > 0:
@@ -220,7 +235,7 @@ func _physics_process(delta: float) -> void:
 		dash_dir = input_dir.normalized()
 		dash_timer = DASH_TIME
 		dash_charges -= 1
-		SFX.dash()
+		SFX.dash(global_position)
 
 	# --- Movement ---
 	var wish_dir := _input_vector()
@@ -297,7 +312,7 @@ func _fire_rifle() -> void:
 func _rifle_fired(origin: Vector3, dir: Vector3, shooter_id: int) -> void:
 	var shooter_node := get_parent().get_node_or_null(str(shooter_id))
 	var w: Weapon = shooter_node.weapon if shooter_node else Weapon.new()
-	SFX.shot(w)
+	SFX.shot(w, origin)
 	var is_server := multiplayer.is_server()
 	var space := get_world_3d().direct_space_state
 
@@ -488,7 +503,7 @@ func _spawn_bullet_blast(pos: Vector3, radius: float, color: Color) -> void:
 
 	# 4) Big blasts play the full explosion SFX; smaller impacts stay visual.
 	if radius >= 3.5:
-		SFX.explosion()
+		SFX.explosion(pos)
 
 func _spawn_muzzle_flash(color: Color = Color(1.0, 0.88, 0.45), scale_f: float = 1.0) -> void:
 	# Bright emissive sphere + point light at the barrel tip; both fade out quickly.
@@ -638,7 +653,7 @@ func _request_grenade(origin: Vector3, dir: Vector3) -> void:
 
 @rpc("any_peer", "call_local", "reliable")
 func _spawn_grenade(origin: Vector3, dir: Vector3, shooter: int, uname: String) -> void:
-	SFX.grenade_launch()
+	SFX.grenade_launch(origin)
 	# Only the server may authorize grenade spawns.
 	var sender := multiplayer.get_remote_sender_id()
 	if sender != 0 and sender != 1:
@@ -661,7 +676,7 @@ func _swing_melee() -> void:
 
 @rpc("any_peer", "call_local", "reliable")
 func _melee_swung(origin: Vector3, dir: Vector3, attacker_id: int) -> void:
-	SFX.melee()
+	SFX.melee(origin)
 	# Gun swing + blade trail play on every peer.
 	_animate_gun_slash()
 	_spawn_slice_trail(origin, dir)
@@ -814,7 +829,7 @@ func server_respawn(pos: Vector3) -> void:
 		return
 	global_position = pos
 	velocity = Vector3.ZERO
-	health = MAX_HEALTH
+	health = MAX_HEALTH + weapon.max_hp_bonus
 	rifle_cooldown = 0.0
 	grenade_cooldown = 0.0
 	melee_cooldown = 0.0
@@ -823,7 +838,7 @@ func server_respawn(pos: Vector3) -> void:
 	reloading = false
 	dash_charges = MAX_DASH_CHARGES
 	dash_timer = 0.0
-	jumps_left = 2
+	jumps_left = 2 + weapon.extra_jumps
 	# Push the teleport to every peer immediately so they don't see us at the
 	# old position for a frame while waiting for the next _physics_process.
 	_broadcast_state.rpc(global_position, rotation.y)
@@ -865,7 +880,7 @@ func heal(amount: int) -> void:
 		return
 	if not is_multiplayer_authority():
 		return
-	health = min(MAX_HEALTH, health + amount)
+	health = min(MAX_HEALTH + weapon.max_hp_bonus, health + amount)
 
 # -------------------- CARDS (ROUNDS-style) --------------------
 
@@ -881,7 +896,11 @@ func apply_card(card_id: String) -> void:
 	weapon.applied_cards.append(card_id)
 	# If the mag cap grew, refill up to the new cap immediately.
 	mag = min(weapon.get_mag_size(), max(mag, weapon.get_mag_size() if weapon.applied_cards.size() == 1 else mag))
+	# Top up HP if the card just raised the cap.
+	if is_multiplayer_authority():
+		health = max(health, MAX_HEALTH + weapon.max_hp_bonus)
 	_update_gun_visuals()
+	_update_body_scale()
 
 @rpc("any_peer", "call_local", "reliable")
 func reset_weapon() -> void:
@@ -890,6 +909,7 @@ func reset_weapon() -> void:
 	reloading = false
 	rifle_cooldown = 0.0
 	_update_gun_visuals()
+	_update_body_scale()
 
 # -------------------- GUN VISUALS --------------------
 
@@ -940,6 +960,25 @@ func _update_gun_visuals() -> void:
 	gun_magazine.transform = Transform3D(Basis.IDENTITY,
 		Vector3(0, -body_h * 0.5 - mag_h * 0.5, body_front_z + body_d * 0.35))
 
+func _update_body_scale() -> void:
+	# BodyModel holds the visual mesh parts; hitboxes are siblings under the
+	# Player root. We scale visuals + hitboxes independently so the displayed
+	# head/body and the physics areas stay in agreement.
+	if body_model == null or head_mesh == null:
+		return
+	var bs: float = maxf(0.1, weapon.body_scale)
+	var hs: float = maxf(0.1, weapon.head_scale)
+	body_model.scale = Vector3.ONE * bs
+	# Body-model scaling already magnifies the head; counter-scale so head
+	# ends up at exactly `head_scale` relative to the player root.
+	head_mesh.scale = Vector3.ONE * (hs / bs)
+	if head_hitbox:
+		head_hitbox.scale = Vector3.ONE * hs
+	if torso_hitbox:
+		torso_hitbox.scale = Vector3.ONE * bs
+	if legs_hitbox:
+		legs_hitbox.scale = Vector3.ONE * bs
+
 # -------------------- BOT AI --------------------
 
 func _bot_physics(delta: float) -> void:
@@ -947,6 +986,17 @@ func _bot_physics(delta: float) -> void:
 		velocity = Vector3.ZERO
 		return
 	_bot_shoot_cooldown = maxf(0.0, _bot_shoot_cooldown - delta)
+	_bot_jump_cooldown = maxf(0.0, _bot_jump_cooldown - delta)
+	_bot_dash_cooldown = maxf(0.0, _bot_dash_cooldown - delta)
+
+	# Dash charges tick back up the same as for real players.
+	if dash_charges < MAX_DASH_CHARGES:
+		dash_recharge_timer += delta
+		if dash_recharge_timer >= DASH_RECHARGE_TIME:
+			dash_charges += 1
+			dash_recharge_timer = 0.0
+	else:
+		dash_recharge_timer = 0.0
 
 	# Gravity
 	if not is_on_floor():
@@ -970,14 +1020,50 @@ func _bot_physics(delta: float) -> void:
 		var target_yaw := atan2(-flat.x, -flat.z)
 		rotation.y = lerp_angle(rotation.y, target_yaw, delta * BOT_ROT_SPEED)
 
-	# Chase until within follow distance, then hold and shoot.
-	if dist > BOT_FOLLOW_DIST:
-		var dir := flat.normalized()
-		velocity.x = dir.x * BOT_MOVE_SPEED
-		velocity.z = dir.z * BOT_MOVE_SPEED
-	else:
-		velocity.x = move_toward(velocity.x, 0.0, BOT_MOVE_SPEED * 4.0 * delta)
-		velocity.z = move_toward(velocity.z, 0.0, BOT_MOVE_SPEED * 4.0 * delta)
+	# Re-roll the movement intent every so often so the bot weaves instead of
+	# marching in a straight line. Values are blended with a forced
+	# approach/retreat if it drifts way off the follow distance.
+	_bot_strafe_timer -= delta
+	if _bot_strafe_timer <= 0.0:
+		_bot_strafe_timer = randf_range(0.5, 1.6)
+		_bot_strafe_side = [-1.0, -0.7, 0.0, 0.7, 1.0].pick_random()
+		_bot_approach = [-0.6, 0.0, 0.0, 0.6, 1.0].pick_random()
+
+	var fwd_dir: Vector3 = flat.normalized() if dist > 0.01 else -global_transform.basis.z
+	var right_dir := Vector3(-fwd_dir.z, 0.0, fwd_dir.x)
+	var chase: float = _bot_approach
+	if dist > BOT_FOLLOW_DIST * 1.8:
+		chase = 1.0          # too far — close the gap
+	elif dist < BOT_FOLLOW_DIST * 0.45:
+		chase = -0.7         # too close — back off
+	var move_dir: Vector3 = fwd_dir * chase + right_dir * _bot_strafe_side
+	if move_dir.length() > 1.0:
+		move_dir = move_dir.normalized()
+	velocity.x = move_dir.x * BOT_MOVE_SPEED
+	velocity.z = move_dir.z * BOT_MOVE_SPEED
+
+	# Occasional hop — keeps the bot moving vertically, harder to track.
+	if is_on_floor() and _bot_jump_cooldown <= 0.0 and randf() < BOT_JUMP_CHANCE:
+		velocity.y = JUMP_VELOCITY
+		_bot_jump_cooldown = randf_range(1.2, 3.0)
+		SFX.jump(global_position)
+
+	# Occasional dash — usually in the current move direction, sometimes sideways.
+	if dash_timer <= 0.0 and dash_charges > 0 and _bot_dash_cooldown <= 0.0 \
+			and randf() < BOT_DASH_CHANCE:
+		var wish: Vector3 = move_dir if move_dir.length_squared() > 0.01 else fwd_dir
+		dash_dir = wish.normalized()
+		dash_timer = DASH_TIME
+		dash_charges -= 1
+		_bot_dash_cooldown = randf_range(2.5, 5.5)
+		SFX.dash(global_position)
+
+	# Apply dash override if one is active (same formula as the player path).
+	if dash_timer > 0.0:
+		dash_timer -= delta
+		velocity.x = dash_dir.x * DASH_SPEED
+		velocity.z = dash_dir.z * DASH_SPEED
+		velocity.y = max(velocity.y, 0.0)
 
 	move_and_slide()
 	_maybe_broadcast_state()
@@ -1016,8 +1102,16 @@ func _bot_shoot() -> void:
 	var from := global_position + Vector3.UP * 0.7
 	var to: Vector3 = _bot_target.global_position + Vector3.UP * 0.4
 	var dir := (to - from).normalized()
-	var yaw := randf_range(-BOT_SPREAD, BOT_SPREAD)
-	var pitch := randf_range(-BOT_SPREAD, BOT_SPREAD)
+	# Farther targets are harder to hit — spread grows with distance so the bot
+	# is threatening up close and mostly plinking from across the map.
+	var dist: float = from.distance_to(to)
+	var dist_mult: float = 1.0 + clampf((dist - BOT_FOLLOW_DIST) / 10.0, 0.0, 3.0)
+	var spread: float = BOT_SPREAD * dist_mult
+	# Every so often the bot whiffs harder — keeps it from feeling laser-accurate.
+	if randf() < BOT_MISS_CHANCE:
+		spread *= randf_range(2.5, 5.0)
+	var yaw := randf_range(-spread, spread)
+	var pitch := randf_range(-spread, spread)
 	dir = dir.rotated(Vector3.UP, yaw)
 	var right := Vector3.UP.cross(dir)
 	if right.length_squared() > 0.0001:

@@ -142,6 +142,34 @@ static func all() -> Array:
 				w.spread += deg_to_rad(2.5)
 				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.55, 0.15), 0.5),
 		},
+		{
+			"id": "big_head",
+			"name": "BIG HEAD",
+			"desc": "+80% damage, but your head is huge — easier to headshot",
+			"color": Color(0.95, 0.55, 0.9),
+			"apply": func(w: Weapon) -> void:
+				w.damage_mult *= 1.8
+				w.head_scale *= 1.8
+				w.bullet_scale *= 1.15
+				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.5, 0.85), 0.3),
+		},
+		{
+			"id": "chonky",
+			"name": "CHONKY",
+			"desc": "+75 max HP, but your body is bigger and easier to hit",
+			"color": Color(0.55, 0.9, 0.55),
+			"apply": func(w: Weapon) -> void:
+				w.max_hp_bonus += 75
+				w.body_scale *= 1.5,
+		},
+		{
+			"id": "acrobat",
+			"name": "ACROBAT",
+			"desc": "+2 extra air-jumps",
+			"color": Color(0.5, 0.9, 1.0),
+			"apply": func(w: Weapon) -> void:
+				w.extra_jumps += 2,
+		},
 	]
 
 static func by_id(id: String) -> Dictionary:
