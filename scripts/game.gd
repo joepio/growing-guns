@@ -10,6 +10,7 @@ const SPAWN_CAPSULE_RADIUS := 0.4
 const SPAWN_CAPSULE_HEIGHT := 1.8
 const BOT_ID := 9999
 const BOT_NAME := "BOT"
+const SPAWN_MIN_SPACING := 8.0   # meters — two fresh spawns must be at least this far apart
 
 @onready var players_root: Node3D = $Players
 @onready var health_label: Label = $HUD/HealthPanel/HealthLabel
@@ -152,19 +153,42 @@ func _request_spawn(pname: String) -> void:
 	_maybe_start_match()
 
 func _spawn_player(id: int, pname: String) -> void:
-	var pos := _random_spawn()
+	# Avoid dropping a new player on top of anyone already in the arena.
+	var pos := _random_spawn(_current_player_positions())
 	_do_spawn.rpc(id, pname, pos)
 
-func _random_spawn() -> Vector3:
+func _current_player_positions() -> Array[Vector3]:
+	var out: Array[Vector3] = []
+	for child in players_root.get_children():
+		if child is Node3D:
+			out.append((child as Node3D).global_position)
+	return out
+
+func _random_spawn(avoid: Array[Vector3] = []) -> Vector3:
 	var spawns := get_tree().get_nodes_in_group("spawnpoints")
 	if spawns.is_empty():
 		return Vector3(0, 3, 0)
 	spawns.shuffle()
+	# Prefer a spawn that's clear of geometry AND far from every used spawn.
 	for spawn in spawns:
 		var pos: Vector3 = spawn.global_position
-		if _spawn_is_clear(pos):
-			return pos
+		if not _spawn_is_clear(pos):
+			continue
+		if _too_close_to_any(pos, avoid):
+			continue
+		return pos
+	# Fallback 1: relax spacing but still require physics clearance.
+	for spawn in spawns:
+		if _spawn_is_clear(spawn.global_position):
+			return spawn.global_position
 	return spawns[0].global_position
+
+func _too_close_to_any(pos: Vector3, others: Array[Vector3]) -> bool:
+	var min_sq := SPAWN_MIN_SPACING * SPAWN_MIN_SPACING
+	for o in others:
+		if pos.distance_squared_to(o) < min_sq:
+			return true
+	return false
 
 func _spawn_is_clear(pos: Vector3) -> bool:
 	var shape := CapsuleShape3D.new()
@@ -209,7 +233,7 @@ func _maybe_spawn_bot() -> void:
 	NetworkManager.players[BOT_ID] = BOT_NAME
 	round_wins[BOT_ID] = 0
 	NetworkManager.player_list_changed.emit()
-	_do_spawn.rpc(BOT_ID, BOT_NAME, _random_spawn(), true)
+	_do_spawn.rpc(BOT_ID, BOT_NAME, _random_spawn(_current_player_positions()), true)
 	_broadcast_scores.rpc(round_wins)
 	_maybe_start_match()
 
@@ -241,11 +265,15 @@ func _maybe_start_match() -> void:
 
 func _start_round_now() -> void:
 	# Respawn everyone, reset HP + cooldowns, unfreeze, announce.
+	# Track already-assigned spawn positions so nobody lands on top of another.
+	var used: Array[Vector3] = []
 	for pid in NetworkManager.players:
 		var p := players_root.get_node_or_null(str(pid))
 		if not p:
 			continue
-		p.server_respawn.rpc_id(p.get_multiplayer_authority(), _random_spawn())
+		var pos := _random_spawn(used)
+		used.append(pos)
+		p.server_respawn.rpc_id(p.get_multiplayer_authority(), pos)
 		p.set_frozen.rpc(false)
 	_announce.rpc("ROUND %d" % current_round, 1.4)
 

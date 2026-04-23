@@ -553,14 +553,19 @@ func confirm_kill() -> void:
 	if g and g.has_method("show_hitmarker"):
 		g.show_hitmarker("kill")
 
-func _spawn_impact(pos: Vector3, color: Color = Color(1.0, 0.9, 0.3), scale_f: float = 1.0) -> void:
+func _spawn_impact(pos: Vector3, color: Color = Color(1.0, 0.9, 0.3), scale_f: float = 1.0, dmg_ratio: float = 1.0) -> void:
 	var scene := get_tree().current_scene
+	# Heavier guns leave a bigger crater of dust + a brighter spark, and once
+	# damage is very high we add a second "heat flash" — as if the slug is
+	# hot enough to burn the ground it lands in.
+	var sz: float = scale_f * sqrt(dmg_ratio)
+	var spark_boost: float = lerpf(1.0, 2.5, clampf((dmg_ratio - 1.0) / 4.0, 0.0, 1.0))
 
 	# Brief colored point light — the hit "spark".
 	var light := OmniLight3D.new()
 	light.light_color = color
-	light.light_energy = 3.5 * scale_f
-	light.omni_range = 2.2 * scale_f
+	light.light_energy = 3.5 * scale_f * spark_boost
+	light.omni_range = 2.2 * sz
 	light.position = pos
 	scene.add_child(light)
 	var ltw := light.create_tween()
@@ -568,12 +573,26 @@ func _spawn_impact(pos: Vector3, color: Color = Color(1.0, 0.9, 0.3), scale_f: f
 		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
 	ltw.tween_callback(light.queue_free)
 
+	# Heat flash: a very brief, almost-white burst for high-damage hits.
+	if dmg_ratio > 1.8:
+		var heat := OmniLight3D.new()
+		heat.light_color = Color(1.0, 0.88, 0.65)
+		heat.light_energy = 6.0 + 3.0 * dmg_ratio
+		heat.omni_range = 1.4 + 0.45 * dmg_ratio
+		heat.position = pos
+		scene.add_child(heat)
+		var htw := heat.create_tween()
+		htw.tween_property(heat, "light_energy", 0.0, 0.08) \
+			.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+		htw.tween_callback(heat.queue_free)
+
 	# A handful of dust particles scattering outward and falling.
-	for i in 5:
+	var dust_count: int = int(round(5.0 * sqrt(dmg_ratio)))
+	for i in dust_count:
 		var dust := MeshInstance3D.new()
 		var m := SphereMesh.new()
-		m.radius = 0.035 * scale_f
-		m.height = 0.07 * scale_f
+		m.radius = 0.035 * sz
+		m.height = 0.07 * sz
 		m.radial_segments = 6
 		m.rings = 3
 		dust.mesh = m
@@ -589,7 +608,7 @@ func _spawn_impact(pos: Vector3, color: Color = Color(1.0, 0.9, 0.3), scale_f: f
 			randf_range(0.1, 1.0),
 			randf_range(-1.0, 1.0),
 		).normalized()
-		var end := pos + dir * randf_range(0.25, 0.7) * scale_f
+		var end := pos + dir * randf_range(0.25, 0.7) * sz
 		var tw := dust.create_tween().set_parallel(true)
 		tw.tween_property(dust, "position", end, 0.35) \
 			.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
