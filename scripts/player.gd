@@ -209,8 +209,11 @@ func _physics_process(delta: float) -> void:
 	_maybe_broadcast_state()
 
 	# --- Combat actions ---
-	# Full-auto rifle: hold LMB, fires every fire-interval until mag is empty.
-	if Input.is_action_pressed("shoot") and not reloading and mag > 0 and rifle_cooldown <= 0.0:
+	# Default is semi-auto (click per shot). The UZI card flips weapon.full_auto
+	# so holding LMB fires continuously until the mag runs out.
+	var fire_input := Input.is_action_pressed("shoot") if weapon.full_auto \
+		else Input.is_action_just_pressed("shoot")
+	if fire_input and not reloading and mag > 0 and rifle_cooldown <= 0.0:
 		rifle_cooldown = weapon.get_fire_interval()
 		mag -= 1
 		_fire_rifle()
@@ -259,9 +262,9 @@ func _fire_rifle() -> void:
 
 @rpc("any_peer", "call_local", "reliable")
 func _rifle_fired(origin: Vector3, dir: Vector3, shooter_id: int) -> void:
-	SFX.shot()
 	var shooter_node := get_parent().get_node_or_null(str(shooter_id))
 	var w: Weapon = shooter_node.weapon if shooter_node else Weapon.new()
+	SFX.shot(w)
 	var is_server := multiplayer.is_server()
 	var space := get_world_3d().direct_space_state
 

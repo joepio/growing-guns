@@ -6,11 +6,15 @@ extends Resource
 # means: add a field here, add a getter if derived, add a card that sets it.
 
 # --- Immutable base (the "unmodified" gun) ---
-const BASE_DAMAGE := 12.0
-const BASE_FIRE_INTERVAL := 0.07
-const BASE_MAG_SIZE := 30
+# Default is a semi-auto mid-damage rifle with a small non-zero spread — you
+# can't just hold LMB, and long-range snap-headshots aren't free. Cards push
+# the weapon toward sniper (precision) or uzi (spray) archetypes.
+const BASE_DAMAGE := 22.0
+const BASE_FIRE_INTERVAL := 0.22
+const BASE_MAG_SIZE := 10
 const BASE_RELOAD_TIME := 1.2
 const BASE_HEADSHOT_MULT := 2.0
+const BASE_SPREAD := 0.008                # radians — ~0.46°, noticeable at range
 const BASE_BULLET_COLOR := Color(1.0, 0.9, 0.3)
 
 # --- Multiplicative modifiers (cards multiply) ---
@@ -26,7 +30,8 @@ var pierce_count: int = 0              # extra players a ray can pass through
 var ricochet_count: int = 0            # wall bounces
 
 # --- Behaviour knobs ---
-var spread: float = 0.0                # radians; random yaw+pitch offset per shot
+var spread: float = BASE_SPREAD        # radians; random yaw+pitch offset per shot
+var full_auto: bool = false            # whether holding LMB auto-fires
 var lifesteal: float = 0.0             # fraction of damage dealt returned as heal
 var explosive_radius: float = 0.0      # per-bullet splash radius (m)
 var explosive_damage: float = 0.0      # max damage at epicenter
@@ -66,7 +71,8 @@ func reset() -> void:
 	extra_projectiles = 0
 	pierce_count = 0
 	ricochet_count = 0
-	spread = 0.0
+	spread = BASE_SPREAD
+	full_auto = false
 	lifesteal = 0.0
 	explosive_radius = 0.0
 	explosive_damage = 0.0
