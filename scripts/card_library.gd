@@ -111,6 +111,32 @@ static func all() -> Array:
 				w.bullet_scale *= 1.4
 				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.55, 0.2), 0.3),
 		},
+		{
+			"id": "sniper",
+			"name": "SNIPER",
+			"desc": "×3 damage, slower, 3-round mag, pin-point accurate",
+			"color": Color(0.55, 0.85, 1.0),
+			"apply": func(w: Weapon) -> void:
+				w.damage_mult *= 3.0
+				w.fire_rate_mult *= 0.4
+				w.mag_size_bonus -= 7
+				w.spread = 0.0
+				w.headshot_mult *= 1.5
+				w.bullet_scale *= 0.8
+				w.bullet_color = w.bullet_color.lerp(Color(0.55, 0.85, 1.0), 0.6),
+		},
+		{
+			"id": "uzi",
+			"name": "UZI",
+			"desc": "Full-auto, ×3 fire rate, +20 ammo, more spread",
+			"color": Color(1.0, 0.65, 0.25),
+			"apply": func(w: Weapon) -> void:
+				w.full_auto = true
+				w.fire_rate_mult *= 3.0
+				w.mag_size_bonus += 20
+				w.spread += deg_to_rad(2.5)
+				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.55, 0.15), 0.5),
+		},
 	]
 
 static func by_id(id: String) -> Dictionary:

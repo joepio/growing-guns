@@ -32,6 +32,10 @@ var pending_pick_cards: Array = []
 var pending_picker_id: int = 0
 var local_player: Node3D
 
+# --- Dev panel (F1) ---
+var _dev_root: PanelContainer = null
+var _dev_content: VBoxContainer
+
 func _ready() -> void:
 	# No menu — bootstrap networking on the fly. First launcher hosts, later
 	# launches fall back to client. Note: Godot 4 installs a default
@@ -79,7 +83,13 @@ func _process(_delta: float) -> void:
 		_refresh_cooldowns()
 
 func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_F1:
+		_toggle_dev_panel()
+		return
 	if event.is_action_pressed("ui_cancel"):
+		if _dev_root and _dev_root.visible:
+			_toggle_dev_panel()
+			return
 		NetworkManager.leave_game()
 		get_tree().change_scene_to_file("res://scenes/main.tscn")
 
@@ -390,3 +400,160 @@ func _update_scoreboard() -> void:
 		var marker := "  ★" if wins >= ROUNDS_TO_WIN else ""
 		lines.append("%s  %d/%d%s" % [NetworkManager.players[id], wins, ROUNDS_TO_WIN, marker])
 	scoreboard.text = "\n".join(lines)
+
+# -------------------- DEV PANEL (F1) --------------------
+
+func _toggle_dev_panel() -> void:
+	if _dev_root == null:
+		_build_dev_panel()
+	_dev_root.visible = not _dev_root.visible
+	if _dev_root.visible:
+		_refresh_dev_panel()
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	else:
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+func _build_dev_panel() -> void:
+	_dev_root = PanelContainer.new()
+	_dev_root.anchor_left = 0.5
+	_dev_root.anchor_right = 0.5
+	_dev_root.anchor_top = 0.0
+	_dev_root.anchor_bottom = 1.0
+	_dev_root.offset_left = -420.0
+	_dev_root.offset_right = 420.0
+	_dev_root.offset_top = 30.0
+	_dev_root.offset_bottom = -30.0
+	_dev_root.mouse_filter = Control.MOUSE_FILTER_STOP
+	_dev_root.visible = false
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.05, 0.05, 0.08, 0.96)
+	style.set_border_width_all(2)
+	style.border_color = Color(0.4, 0.8, 1.0)
+	style.set_corner_radius_all(6)
+	style.content_margin_left = 16
+	style.content_margin_right = 16
+	style.content_margin_top = 12
+	style.content_margin_bottom = 12
+	_dev_root.add_theme_stylebox_override("panel", style)
+	var scroll := ScrollContainer.new()
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	_dev_root.add_child(scroll)
+	_dev_content = VBoxContainer.new()
+	_dev_content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_dev_content.add_theme_constant_override("separation", 6)
+	scroll.add_child(_dev_content)
+	$HUD.add_child(_dev_root)
+
+func _refresh_dev_panel() -> void:
+	for c in _dev_content.get_children():
+		c.queue_free()
+	_dev_heading("DEV  ·  F1 to close", Color(0.5, 0.9, 1.0), 20)
+	_dev_heading("— WEAPON STATS —", Color(1.0, 0.9, 0.5), 15)
+	if local_player and is_instance_valid(local_player):
+		var w: Weapon = local_player.weapon
+		_dev_stat("damage", "%.1f  (base %.0f × %.2f)" % [w.get_damage(), Weapon.BASE_DAMAGE, w.damage_mult])
+		_dev_stat("fire interval", "%.3fs  (×%.2f)  %s" % [w.get_fire_interval(), w.fire_rate_mult, "FULL-AUTO" if w.full_auto else "semi-auto"])
+		_dev_stat("mag size", "%d  (base %d %+d)" % [w.get_mag_size(), Weapon.BASE_MAG_SIZE, w.mag_size_bonus])
+		_dev_stat("reload time", "%.2fs  (×%.2f)" % [w.get_reload_time(), w.reload_mult])
+		_dev_stat("headshot mult", "×%.2f" % w.get_headshot_mult())
+		_dev_stat("shots / trigger", str(w.get_shots_per_trigger()))
+		_dev_stat("pierce", str(w.pierce_count))
+		_dev_stat("ricochet", str(w.ricochet_count))
+		_dev_stat("spread", "%.4f rad  (%.2f°)" % [w.spread, rad_to_deg(w.spread)])
+		_dev_stat("lifesteal", "%.0f%%" % (w.lifesteal * 100.0))
+		_dev_stat("explosive radius / dmg", "%.1fm  /  %.1f" % [w.explosive_radius, w.explosive_damage])
+		_dev_stat("bullet scale", "%.2f" % w.bullet_scale)
+		_dev_stat("bullet color", "#%s" % w.bullet_color.to_html(false))
+	else:
+		_dev_note("(local player not spawned)")
+	_dev_heading("— APPLIED CARDS —", Color(0.8, 1.0, 0.5), 15)
+	if local_player and is_instance_valid(local_player):
+		var applied: Array = local_player.weapon.applied_cards
+		if applied.is_empty():
+			_dev_note("(none)")
+		else:
+			for card_id in applied:
+				_dev_applied_row(str(card_id))
+	_dev_heading("— ALL CARDS —", Color(1.0, 0.6, 0.9), 15)
+	for card in CardLibrary.all():
+		_dev_available_row(card)
+
+func _dev_heading(text: String, color: Color, font_size: int) -> void:
+	var lbl := Label.new()
+	lbl.text = text
+	lbl.add_theme_color_override("font_color", color)
+	lbl.add_theme_font_size_override("font_size", font_size)
+	_dev_content.add_child(lbl)
+
+func _dev_stat(stat_name: String, value: String) -> void:
+	var hbox := HBoxContainer.new()
+	var n := Label.new()
+	n.text = stat_name
+	n.custom_minimum_size = Vector2(220, 0)
+	n.add_theme_color_override("font_color", Color(0.7, 0.7, 0.85))
+	hbox.add_child(n)
+	var v := Label.new()
+	v.text = value
+	v.add_theme_color_override("font_color", Color(1, 1, 1))
+	hbox.add_child(v)
+	_dev_content.add_child(hbox)
+
+func _dev_note(text: String) -> void:
+	var lbl := Label.new()
+	lbl.text = text
+	lbl.add_theme_color_override("font_color", Color(0.6, 0.6, 0.7))
+	_dev_content.add_child(lbl)
+
+func _dev_applied_row(card_id: String) -> void:
+	var card: Dictionary = CardLibrary.by_id(card_id)
+	var label_text := card_id
+	var col := Color(1, 1, 1)
+	if not card.is_empty():
+		label_text = "%s  —  %s" % [card.name, card.desc]
+		col = card.color
+	var hbox := HBoxContainer.new()
+	var n := Label.new()
+	n.text = label_text
+	n.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	n.add_theme_color_override("font_color", col)
+	hbox.add_child(n)
+	var btn := Button.new()
+	btn.text = "Remove"
+	btn.focus_mode = Control.FOCUS_NONE
+	btn.pressed.connect(_dev_remove_card.bind(card_id))
+	hbox.add_child(btn)
+	_dev_content.add_child(hbox)
+
+func _dev_available_row(card: Dictionary) -> void:
+	var hbox := HBoxContainer.new()
+	var n := Label.new()
+	n.text = "%s  —  %s" % [card.name, card.desc]
+	n.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	n.add_theme_color_override("font_color", card.color)
+	hbox.add_child(n)
+	var btn := Button.new()
+	btn.text = "Apply"
+	btn.focus_mode = Control.FOCUS_NONE
+	btn.pressed.connect(_dev_apply_card.bind(card.id))
+	hbox.add_child(btn)
+	_dev_content.add_child(hbox)
+
+func _dev_apply_card(card_id: String) -> void:
+	if not local_player or not is_instance_valid(local_player):
+		return
+	local_player.apply_card.rpc(card_id)
+	call_deferred("_refresh_dev_panel")
+
+func _dev_remove_card(card_id: String) -> void:
+	# Cards mutate weapon cumulatively and have no inverse — easiest way to
+	# drop one is to reset and reapply every OTHER card in the stack.
+	if not local_player or not is_instance_valid(local_player):
+		return
+	var remaining: Array = local_player.weapon.applied_cards.duplicate()
+	var idx := remaining.find(card_id)
+	if idx >= 0:
+		remaining.remove_at(idx)
+	local_player.reset_weapon.rpc()
+	for c in remaining:
+		local_player.apply_card.rpc(str(c))
+	call_deferred("_refresh_dev_panel")

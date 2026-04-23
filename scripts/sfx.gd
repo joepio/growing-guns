@@ -29,7 +29,7 @@ func _play(samples: PackedVector2Array, volume_db: float = -6.0) -> void:
 
 # -------------------- sounds --------------------
 
-func shot() -> void: _play(_synth_shot(), -4.0)
+func shot(w: Weapon = null) -> void: _play(_synth_shot(w), -4.0)
 func grenade_launch() -> void: _play(_synth_grenade_launch(), -6.0)
 func explosion() -> void: _play(_synth_explosion(), -2.0)
 func hit_received() -> void: _play(_synth_hit_received(), -4.0)
@@ -41,20 +41,38 @@ func hitmarker(kind: String = "body") -> void: _play(_synth_hitmarker(kind), -10
 
 # -------------------- synthesis --------------------
 
-func _synth_shot() -> PackedVector2Array:
-	# White noise burst + brief low thump. Fast decay envelope.
-	var dur := 0.10
+func _synth_shot(w: Weapon = null) -> PackedVector2Array:
+	# Shape the rifle sound around weapon stats:
+	#   damage   → longer tail, deeper + louder bass thump
+	#   accuracy → brighter noise transient + a high-freq click ("crack")
+	#   fire-rate-mult mildly opens up the noise (snappier)
+	var dmg_ratio := 1.0
+	var accuracy := 1.0  # 1.0 = perfectly accurate, 0.0 = fully sprayed
+	if w:
+		dmg_ratio = maxf(1.0, w.get_damage() / Weapon.BASE_DAMAGE)
+		accuracy = clampf(1.0 - w.spread / 0.06, 0.0, 1.0)
+
+	var dur: float = clampf(0.08 + 0.08 * log(dmg_ratio) / log(2.0), 0.08, 0.35)
 	var n := int(dur * MIX_RATE)
 	var out := PackedVector2Array()
 	out.resize(n)
+
+	var bass_freq := clampf(90.0 / sqrt(dmg_ratio), 32.0, 120.0)
+	var bass_decay := clampf(30.0 / dmg_ratio, 6.0, 40.0)
+	var bass_gain: float = lerpf(0.45, 0.95, clampf((dmg_ratio - 1.0) / 3.0, 0.0, 1.0))
+	var noise_brightness: float = lerpf(0.18, 0.55, accuracy)
+	var click_gain := accuracy * 0.3
+
 	var lp := 0.0
 	for i in range(n):
 		var t := float(i) / MIX_RATE
 		var env := pow(clampf(1.0 - t / dur, 0.0, 1.0), 2.5)
 		var noise := randf_range(-1.0, 1.0)
-		lp = lerpf(lp, noise, 0.35)  # simple one-pole lowpass
-		var low := sin(2.0 * PI * 90.0 * t) * exp(-t * 30.0)
-		var s := (lp * 0.75 + low * 0.4) * env * 0.7
+		lp = lerpf(lp, noise, noise_brightness)
+		var low := sin(2.0 * PI * bass_freq * t) * exp(-t * bass_decay)
+		var click := sin(2.0 * PI * 2400.0 * t) * exp(-t * 280.0) * click_gain
+		# tanh soft-clips so loud/layered components stay under ±1.
+		var s := tanh((lp * 0.55 + low * bass_gain + click) * env * 0.85)
 		out[i] = Vector2(s, s)
 	return out
 
