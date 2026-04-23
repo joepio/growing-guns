@@ -269,8 +269,7 @@ func _physics_process(delta: float) -> void:
 			reloading = true
 			rifle_cooldown = weapon.get_reload_time()
 	if Input.is_action_just_pressed("shoot_grenade") and grenade_cooldown <= 0.0:
-		grenade_cooldown = GRENADE_RELOAD
-		_fire_grenade()
+		_use_special()
 	if Input.is_action_just_pressed("melee") and melee_cooldown <= 0.0:
 		melee_cooldown = MELEE_RELOAD
 		_swing_melee()
@@ -630,6 +629,132 @@ func _spawn_impact(pos: Vector3, color: Color = Color(1.0, 0.9, 0.3), scale_f: f
 		tw.tween_property(mat, "albedo_color", Color(0.72, 0.66, 0.55, 0.0), 0.4)
 		tw.chain().tween_callback(dust.queue_free)
 
+# -------------------- SPECIAL (RMB) --------------------
+
+const TELEPORT_RELOAD := 2.0
+const TELEPORT_RANGE := 45.0
+const TELEPORT_OFFSET := 0.8
+const SHIELD_RELOAD := 8.0
+const SHIELD_DURATION := 2.0
+
+var shielded: bool = false
+var _shield_visual: Node3D = null
+
+func _use_special() -> void:
+	match weapon.special:
+		Weapon.SPECIAL_TELEPORT:
+			grenade_cooldown = TELEPORT_RELOAD
+			_use_teleport()
+		Weapon.SPECIAL_SHIELD:
+			grenade_cooldown = SHIELD_RELOAD
+			_use_shield()
+		_:
+			grenade_cooldown = GRENADE_RELOAD
+			_fire_grenade()
+
+# -------------------- TELEPORT --------------------
+
+func _use_teleport() -> void:
+	var origin: Vector3 = camera.global_position
+	var dir: Vector3 = -camera.global_transform.basis.z
+	var space := get_world_3d().direct_space_state
+	var q := PhysicsRayQueryParameters3D.create(origin, origin + dir * TELEPORT_RANGE)
+	q.collision_mask = 1  # world only
+	q.exclude = get_hitbox_rids() if has_method("get_hitbox_rids") else [get_rid()]
+	var result := space.intersect_ray(q)
+	var target: Vector3
+	if result.is_empty():
+		target = origin + dir * TELEPORT_RANGE
+	else:
+		target = result.position + result.normal * TELEPORT_OFFSET
+	var from: Vector3 = global_position
+	_teleport_fx.rpc(from, target)
+	global_position = target
+	velocity = Vector3.ZERO
+	_broadcast_state.rpc(global_position, rotation.y)
+	_last_sync_pos = global_position
+	_last_sync_yaw = rotation.y
+
+@rpc("authority", "call_local", "reliable")
+func _teleport_fx(from_pos: Vector3, to_pos: Vector3) -> void:
+	_spawn_teleport_vfx(from_pos)
+	_spawn_teleport_vfx(to_pos)
+
+func _spawn_teleport_vfx(pos: Vector3) -> void:
+	var scene := get_tree().current_scene
+	var mesh := MeshInstance3D.new()
+	var sphere := SphereMesh.new()
+	sphere.radius = 0.6
+	sphere.height = 1.2
+	mesh.mesh = sphere
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.albedo_color = Color(0.7, 0.3, 1.0, 0.6)
+	mat.emission_enabled = true
+	mat.emission = Color(0.7, 0.3, 1.0)
+	mat.emission_energy_multiplier = 6.0
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mesh.material_override = mat
+	mesh.position = pos
+	scene.add_child(mesh)
+	var tw := mesh.create_tween().set_parallel(true)
+	tw.tween_property(mesh, "scale", Vector3.ONE * 3.0, 0.3)\
+		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+	tw.tween_property(mat, "albedo_color", Color(0.7, 0.3, 1.0, 0.0), 0.35)
+	tw.tween_property(mat, "emission_energy_multiplier", 0.0, 0.35)
+	tw.chain().tween_callback(mesh.queue_free)
+	# Brief purple light
+	var light := OmniLight3D.new()
+	light.light_color = Color(0.7, 0.3, 1.0)
+	light.light_energy = 5.0
+	light.omni_range = 4.0
+	light.position = pos
+	scene.add_child(light)
+	var ltw := light.create_tween()
+	ltw.tween_property(light, "light_energy", 0.0, 0.3)
+	ltw.tween_callback(light.queue_free)
+
+# -------------------- SHIELD --------------------
+
+func _use_shield() -> void:
+	_shield_on.rpc(SHIELD_DURATION)
+
+@rpc("authority", "call_local", "reliable")
+func _shield_on(duration: float) -> void:
+	shielded = true
+	if _shield_visual and is_instance_valid(_shield_visual):
+		_shield_visual.queue_free()
+	var mesh := MeshInstance3D.new()
+	var sphere := SphereMesh.new()
+	sphere.radius = 1.3
+	sphere.height = 2.6
+	mesh.mesh = sphere
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.albedo_color = Color(0.35, 0.75, 1.0, 0.25)
+	mat.emission_enabled = true
+	mat.emission = Color(0.35, 0.75, 1.0)
+	mat.emission_energy_multiplier = 1.6
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mesh.material_override = mat
+	add_child(mesh)
+	_shield_visual = mesh
+	# Fade out over the last 30% of the duration.
+	var fade_start := duration * 0.7
+	var fade_dur := duration - fade_start
+	var tw := mesh.create_tween().set_parallel(true)
+	tw.tween_property(mat, "albedo_color", Color(0.35, 0.75, 1.0, 0.0), fade_dur).set_delay(fade_start)
+	tw.tween_property(mat, "emission_energy_multiplier", 0.0, fade_dur).set_delay(fade_start)
+	get_tree().create_timer(duration).timeout.connect(_end_shield)
+
+func _end_shield() -> void:
+	shielded = false
+	if _shield_visual and is_instance_valid(_shield_visual):
+		_shield_visual.queue_free()
+	_shield_visual = null
+
 # -------------------- GRENADE --------------------
 
 func _fire_grenade() -> void:
@@ -792,6 +917,8 @@ func take_damage(amount: int, from_id: int) -> void:
 func _apply_damage(amount: int, from_id: int) -> void:
 	if frozen or health <= 0:
 		return
+	if shielded:
+		return  # SHIELD special absorbs the hit
 	health = max(0, health - amount)
 	if from_id != player_id and not is_bot:
 		_notify_damage_source(from_id)
@@ -839,6 +966,7 @@ func server_respawn(pos: Vector3) -> void:
 	dash_charges = MAX_DASH_CHARGES
 	dash_timer = 0.0
 	jumps_left = 2 + weapon.extra_jumps
+	_end_shield()
 	# Push the teleport to every peer immediately so they don't see us at the
 	# old position for a frame while waiting for the next _physics_process.
 	_broadcast_state.rpc(global_position, rotation.y)

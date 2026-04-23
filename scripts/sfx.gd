@@ -15,6 +15,10 @@ extends Node
 const MIX_RATE := 44100.0
 const BUS_3D := "SFX3D"
 const NO_POS := Vector3.INF
+# Sounds within this distance of the listener play dry on Master, so your own
+# gun and footsteps don't drown in room tail. Farther sounds go through the
+# reverb-colored 3D bus so distant fights get the "outdoors" echo.
+const DRY_RADIUS := 4.0
 
 func _ready() -> void:
 	_ensure_reverb_bus()
@@ -29,12 +33,19 @@ func _ensure_reverb_bus() -> void:
 	AudioServer.set_bus_name(idx, BUS_3D)
 	AudioServer.set_bus_send(idx, "Master")
 	var reverb := AudioEffectReverb.new()
-	reverb.room_size = 0.55
-	reverb.damping = 0.4
-	reverb.spread = 0.85
-	reverb.wet = 0.22
+	reverb.room_size = 0.45
+	reverb.damping = 0.55
+	reverb.spread = 0.8
+	reverb.wet = 0.10
 	reverb.dry = 1.0
 	AudioServer.add_bus_effect(idx, reverb)
+
+func _listener_position() -> Vector3:
+	var vp := get_viewport()
+	if vp == null:
+		return NO_POS
+	var cam := vp.get_camera_3d()
+	return cam.global_position if cam else NO_POS
 
 # -------------------- dispatch --------------------
 
@@ -59,7 +70,11 @@ func _play(samples: PackedVector2Array, volume_db: float = -6.0, at: Vector3 = N
 		var p := AudioStreamPlayer3D.new()
 		p.stream = stream
 		p.volume_db = volume_db
-		p.bus = BUS_3D
+		# Close-up sounds (your own gun, your own steps) stay dry on Master;
+		# farther sounds pick up the room tail on the reverb bus.
+		var listener := _listener_position()
+		var is_close := listener != NO_POS and listener.distance_to(at) < DRY_RADIUS
+		p.bus = "Master" if is_close else BUS_3D
 		p.unit_size = 10.0
 		p.max_db = 0.0                  # point-blank matches authored volume
 		p.max_distance = 120.0          # hard-clip to silence beyond this

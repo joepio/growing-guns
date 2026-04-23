@@ -19,6 +19,7 @@ const SPAWN_MIN_SPACING := 8.0   # meters — two fresh spawns must be at least 
 @onready var damage_indicator: Control = $HUD/DamageIndicator
 @onready var rifle_bar: ProgressBar = $HUD/AbilityBar/Rifle/Bar
 @onready var grenade_bar: ProgressBar = $HUD/AbilityBar/Grenade/Bar
+@onready var grenade_label: Label = $HUD/AbilityBar/Grenade/Label
 @onready var melee_bar: ProgressBar = $HUD/AbilityBar/Melee/Bar
 @onready var dash_bar: ProgressBar = $HUD/AbilityBar/Dash/Bar
 @onready var round_banner: Label = $HUD/RoundBanner
@@ -109,7 +110,14 @@ func _refresh_cooldowns() -> void:
 		rifle_bar.value = 1.0 - (local_player.rifle_cooldown / max(0.01, w.get_reload_time()))
 	else:
 		rifle_bar.value = float(local_player.mag) / float(w.get_mag_size())
-	grenade_bar.value = 1.0 - (local_player.grenade_cooldown / local_player.GRENADE_RELOAD)
+	# The RMB slot hosts multiple specials with different cooldowns. Normalize
+	# against the max cooldown of the equipped special so the bar reads right.
+	var special_max: float = local_player.GRENADE_RELOAD
+	match w.special:
+		Weapon.SPECIAL_TELEPORT: special_max = local_player.TELEPORT_RELOAD
+		Weapon.SPECIAL_SHIELD:   special_max = local_player.SHIELD_RELOAD
+	grenade_bar.value = 1.0 - (local_player.grenade_cooldown / special_max)
+	grenade_label.text = "RMB  %s" % w.special.to_upper()
 	melee_bar.value = 1.0 - (local_player.melee_cooldown / local_player.MELEE_RELOAD)
 	var charge_progress: float = local_player.dash_recharge_timer / local_player.DASH_RECHARGE_TIME
 	dash_bar.value = (float(local_player.dash_charges) + charge_progress) / float(local_player.MAX_DASH_CHARGES)

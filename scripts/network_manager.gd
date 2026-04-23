@@ -37,6 +37,18 @@ func join_game(address: String, player_name: String) -> bool:
 	return true
 
 func auto_connect(player_name: String) -> bool:
+	for arg in OS.get_cmdline_user_args():
+		if arg == "--host":
+			print("[auto_connect] forced HOST via --host")
+			return host_game(player_name)
+		if arg.begins_with("--join="):
+			var address := arg.trim_prefix("--join=").strip_edges()
+			if address.is_empty():
+				push_error("Auto-connect: --join requires an address")
+				return false
+			print("[auto_connect] forced JOIN to %s via --join" % address)
+			return join_game(address, player_name)
+
 	# First peer to launch binds the port and becomes host; later launches
 	# fail to bind and fall back to connecting to that host.
 	local_player_name = player_name
