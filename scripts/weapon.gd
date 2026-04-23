@@ -7,7 +7,7 @@ extends Resource
 
 # --- Immutable base (the "unmodified" gun) ---
 # Default is a semi-auto mid-damage pistol with a small non-zero spread — you
-# can't just hold LMB, and long-range snap-headshots aren't free. 
+# can't just hold LMB, and long-range snap-headshots aren't free.
 const BASE_DAMAGE := 22.0
 const BASE_FIRE_INTERVAL := 0.22
 const BASE_MAG_SIZE := 5
@@ -21,6 +21,7 @@ const SPECIAL_GRENADE := "grenade"
 const SPECIAL_TELEPORT := "teleport"
 const SPECIAL_SHIELD := "shield"
 const SPECIAL_INVISIBLE := "invisible"
+const SPECIAL_ZOOM := "zoom"
 
 # --- Multiplicative modifiers (cards multiply) ---
 var damage_mult: float = 1.0
@@ -41,10 +42,16 @@ var lifesteal: float = 0.0             # fraction of damage dealt returned as he
 var explosive_radius: float = 0.0      # per-bullet splash radius (m)
 var explosive_damage: float = 0.0      # max damage at epicenter
 var move_speed_mult: float = 1.0       # scales walk/air movement
-var knockback: float = 0.0             # impulse applied on bullet hit
+const BASE_KNOCKBACK := 3.0            # every shot gives a light nudge
+var knockback: float = BASE_KNOCKBACK   # impulse applied on bullet hit
+var special_cooldown_mult: float = 1.0 # <1 = special recharges faster
+var melee_damage_mult: float = 1.0     # scales melee damage
+var melee_scale: float = 1.0           # scales melee animation and range
+var homing: float = 0.0                # degrees-per-second steering toward closest forward target
 
 # --- Visuals ---
 var bullet_color: Color = BASE_BULLET_COLOR
+var bullet_speed_mult: float = 1.0       # scales projectile travel speed
 var bullet_scale: float = 1.0          # scales tracer brightness + muzzle flash
 
 # --- Player-body modifiers (cards can grow head/torso for tradeoff builds) ---
@@ -61,44 +68,55 @@ var applied_cards: Array[String] = []
 
 # --- Derived getters --- (never read the raw fields in gameplay code)
 func get_damage() -> float:
-	return BASE_DAMAGE * damage_mult
+		return BASE_DAMAGE * damage_mult
 
 func get_fire_interval() -> float:
-	return BASE_FIRE_INTERVAL / max(0.01, fire_rate_mult)
+		return BASE_FIRE_INTERVAL / max(0.01, fire_rate_mult)
 
 func get_mag_size() -> int:
-	return max(1, BASE_MAG_SIZE + mag_size_bonus)
+		return max(1, BASE_MAG_SIZE + mag_size_bonus)
 
 func get_reload_time() -> float:
-	return BASE_RELOAD_TIME / max(0.01, reload_mult)
+		return BASE_RELOAD_TIME / max(0.01, reload_mult)
 
 func get_headshot_mult() -> float:
-	return BASE_HEADSHOT_MULT * headshot_mult
+		return BASE_HEADSHOT_MULT * headshot_mult
 
 func get_shots_per_trigger() -> int:
-	return 1 + extra_projectiles
+		return 1 + extra_projectiles
+
+func get_bullet_speed() -> float:
+		return 165.0 * bullet_speed_mult
+
+func get_melee_damage() -> int:
+	return int(50.0 * melee_damage_mult)
 
 func reset() -> void:
-	damage_mult = 1.0
-	fire_rate_mult = 1.0
-	reload_mult = 1.0
-	headshot_mult = 1.0
-	mag_size_bonus = 0
-	extra_projectiles = 0
-	pierce_count = 0
-	ricochet_count = 0
-	spread = BASE_SPREAD
-	full_auto = false
-	lifesteal = 0.0
-	explosive_radius = 0.0
-	explosive_damage = 0.0
-	move_speed_mult = 1.0
-	knockback = 0.0
-	bullet_color = BASE_BULLET_COLOR
-	bullet_scale = 1.0
-	head_scale = 1.0
-	body_scale = 1.0
-	max_hp_bonus = 0
-	extra_jumps = 0
-	special = SPECIAL_GRENADE
-	applied_cards.clear()
+		damage_mult = 1.0
+		fire_rate_mult = 1.0
+		reload_mult = 1.0
+		headshot_mult = 1.0
+		mag_size_bonus = 0
+		extra_projectiles = 0
+		pierce_count = 0
+		ricochet_count = 0
+		spread = BASE_SPREAD
+		full_auto = false
+		lifesteal = 0.0
+		explosive_radius = 0.0
+		explosive_damage = 0.0
+		move_speed_mult = 1.0
+		bullet_speed_mult = 1.0
+		knockback = BASE_KNOCKBACK
+		special_cooldown_mult = 1.0
+		melee_damage_mult = 1.0
+		melee_scale = 1.0
+		homing = 0.0
+		bullet_color = BASE_BULLET_COLOR
+		bullet_scale = 1.0
+		head_scale = 1.0
+		body_scale = 1.0
+		max_hp_bonus = 0
+		extra_jumps = 0
+		special = SPECIAL_GRENADE
+		applied_cards.clear()
