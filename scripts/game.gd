@@ -4,10 +4,12 @@ const PLAYER_SCENE := preload("res://scenes/player.tscn")
 
 enum State { WAITING, PLAYING, PICKING_CARD, MATCH_OVER }
 
-const ROUNDS_TO_WIN := 3
+const ROUNDS_TO_WIN := 5
 const CARDS_PER_PICK := 3
 const SPAWN_CAPSULE_RADIUS := 0.4
 const SPAWN_CAPSULE_HEIGHT := 1.8
+const BOT_ID := 9999
+const BOT_NAME := "BOT"
 
 @onready var players_root: Node3D = $Players
 @onready var health_label: Label = $HUD/HealthPanel/HealthLabel
@@ -59,7 +61,14 @@ func _ready() -> void:
 			round_wins[pid] = 0
 			_spawn_player(pid, NetworkManager.players[pid])
 		_maybe_start_match()
+		# SP fallback: if nobody else has joined yet, give us a bot to fight.
+		_maybe_spawn_bot.call_deferred()
 	else:
+		# Instantly show the client state — makes it obvious when you thought
+		# you were solo but actually joined an orphan on port 27015.
+		round_banner.text = "CONNECTING TO HOST…"
+		round_banner.visible = true
+		banner_timer.stop()
 		_client_request_spawn_when_ready()
 
 	_update_scoreboard()
@@ -129,6 +138,8 @@ func _request_spawn(pname: String) -> void:
 	var sender := multiplayer.get_remote_sender_id()
 	if sender == 0:
 		sender = 1
+	# A real peer is joining — boot the SP bot if one is around.
+	_despawn_bot_if_any()
 	NetworkManager.players[sender] = pname
 	if not round_wins.has(sender):
 		round_wins[sender] = 0
@@ -166,12 +177,13 @@ func _spawn_is_clear(pos: Vector3) -> bool:
 	return get_world_3d().direct_space_state.intersect_shape(query, 1).is_empty()
 
 @rpc("authority", "call_local", "reliable")
-func _do_spawn(id: int, pname: String, pos: Vector3) -> void:
+func _do_spawn(id: int, pname: String, pos: Vector3, bot: bool = false) -> void:
 	if players_root.has_node(str(id)):
 		return
 	var p := PLAYER_SCENE.instantiate()
 	p.name = str(id)
 	p.player_id = id
+	p.is_bot = bot
 	p.player_name = pname
 	players_root.add_child(p, true)
 	# global_position must be set after add_child — it requires being in-tree.
@@ -184,6 +196,34 @@ func _despawn(id: int) -> void:
 	var node := players_root.get_node_or_null(str(id))
 	if node:
 		node.queue_free()
+
+# -------------------- SINGLE-PLAYER BOT --------------------
+
+func _maybe_spawn_bot() -> void:
+	if not multiplayer.is_server():
+		return
+	if NetworkManager.players.size() >= 2:
+		return
+	if players_root.has_node(str(BOT_ID)):
+		return
+	NetworkManager.players[BOT_ID] = BOT_NAME
+	round_wins[BOT_ID] = 0
+	NetworkManager.player_list_changed.emit()
+	_do_spawn.rpc(BOT_ID, BOT_NAME, _random_spawn(), true)
+	_broadcast_scores.rpc(round_wins)
+	_maybe_start_match()
+
+func _despawn_bot_if_any() -> void:
+	if not players_root.has_node(str(BOT_ID)):
+		return
+	_despawn.rpc(BOT_ID)
+	NetworkManager.players.erase(BOT_ID)
+	round_wins.erase(BOT_ID)
+	NetworkManager.player_list_changed.emit()
+	_broadcast_scores.rpc(round_wins)
+	if state == State.PICKING_CARD:
+		_hide_card_pick.rpc()
+	state = State.WAITING
 
 # -------------------- ROUND FLOW --------------------
 
@@ -205,7 +245,7 @@ func _start_round_now() -> void:
 		var p := players_root.get_node_or_null(str(pid))
 		if not p:
 			continue
-		p.server_respawn.rpc_id(pid, _random_spawn())
+		p.server_respawn.rpc_id(p.get_multiplayer_authority(), _random_spawn())
 		p.set_frozen.rpc(false)
 	_announce.rpc("ROUND %d" % current_round, 1.4)
 
@@ -226,7 +266,8 @@ func report_kill(killer_id: int, victim_id: int) -> void:
 	if killer_id != 0 and killer_id != victim_id:
 		var killer_node := players_root.get_node_or_null(str(killer_id))
 		if killer_node:
-			killer_node.confirm_kill.rpc_id(killer_id)
+			# Route via authority so server-owned bots receive their own RPC.
+			killer_node.confirm_kill.rpc_id(killer_node.get_multiplayer_authority())
 	_end_round(killer_id, victim_id)
 
 func _end_round(winner_id: int, loser_id: int) -> void:
@@ -242,15 +283,36 @@ func _end_round(winner_id: int, loser_id: int) -> void:
 				pn.set_frozen.rpc(true)
 		_match_over.rpc(winner_id)
 		return
-	# Freeze all, prompt loser to pick a card.
+	# Freeze only the loser (they're picking the card); the winner keeps
+	# moving so they can celebrate / jump on the body while they wait.
 	state = State.PICKING_CARD
 	pending_picker_id = loser_id
 	pending_pick_cards = CardLibrary.random_ids(CARDS_PER_PICK)
-	for pid in NetworkManager.players:
-		var p := players_root.get_node_or_null(str(pid))
-		if p:
-			p.set_frozen.rpc(true)
+	var loser_node := players_root.get_node_or_null(str(loser_id))
+	if loser_node:
+		loser_node.set_frozen.rpc(true)
 	_show_card_pick.rpc(loser_id, pending_pick_cards)
+	# The bot can't pick for itself — auto-pick a random card after a beat.
+	if loser_id == BOT_ID:
+		_bot_auto_pick.call_deferred()
+
+func _bot_auto_pick() -> void:
+	await get_tree().create_timer(1.2).timeout
+	if state != State.PICKING_CARD or pending_picker_id != BOT_ID:
+		return
+	if pending_pick_cards.is_empty():
+		return
+	var pick: String = str(pending_pick_cards[randi() % pending_pick_cards.size()])
+	_finalize_card_pick(pick)
+
+func _finalize_card_pick(card_id: String) -> void:
+	var p := players_root.get_node_or_null(str(pending_picker_id))
+	if p:
+		p.apply_card.rpc(card_id)
+	_hide_card_pick.rpc()
+	current_round += 1
+	state = State.PLAYING
+	_start_round_now()
 
 # -------------------- CARD PICK UI --------------------
 
@@ -330,13 +392,7 @@ func _server_card_picked(card_id: String) -> void:
 		return
 	if not pending_pick_cards.has(card_id):
 		return
-	var p := players_root.get_node_or_null(str(pending_picker_id))
-	if p:
-		p.apply_card.rpc(card_id)
-	_hide_card_pick.rpc()
-	current_round += 1
-	state = State.PLAYING
-	_start_round_now()
+	_finalize_card_pick(card_id)
 
 @rpc("authority", "call_local", "reliable")
 func _hide_card_pick() -> void:
@@ -368,12 +424,21 @@ func _broadcast_scores(scores: Dictionary) -> void:
 	round_wins = scores
 	_update_scoreboard()
 
-func show_hitmarker(kind: String) -> void:
+func show_hitmarker(kind: String, dmg: int = 0) -> void:
 	hitmarker.flash(kind)
 	if kind == "kill":
 		SFX.kill_confirm()
 	else:
-		SFX.hitmarker(kind)
+		SFX.hitmarker(kind, dmg)
+
+func is_any_modal_open() -> bool:
+	# Used by Player._unhandled_input to avoid recapturing the mouse when a
+	# UI overlay (card pick, dev panel) is visible.
+	if pick_overlay and pick_overlay.visible:
+		return true
+	if _dev_root and _dev_root.visible:
+		return true
+	return false
 
 func show_damage_direction(from_pos: Vector3) -> void:
 	if not local_player or not is_instance_valid(local_player):

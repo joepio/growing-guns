@@ -57,7 +57,7 @@ func _explode() -> void:
 			continue
 		var falloff: float = clamp(1.0 - (dist / RADIUS), 0.0, 1.0)
 		var dmg: int = int(lerp(float(MIN_DAMAGE), float(MAX_DAMAGE), falloff))
-		p.take_damage.rpc_id(p.player_id, dmg, shooter_id)
+		p.take_damage.rpc_id(p.get_multiplayer_authority(), dmg, shooter_id)
 	_do_vfx.rpc()
 
 @rpc("authority", "call_local", "reliable")

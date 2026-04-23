@@ -1,12 +1,8 @@
-[gd_scene load_steps=11 format=3 uid="uid://b0player01"]
+[gd_scene load_steps=18 format=3 uid="uid://b0player01"]
 
 [ext_resource type="Script" path="res://scripts/player.gd" id="1_player"]
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_1"]
-radius = 0.4
-height = 1.8
-
-[sub_resource type="CapsuleMesh" id="CapsuleMesh_1"]
 radius = 0.4
 height = 1.8
 
@@ -15,6 +11,40 @@ albedo_color = Color(0.9, 0.15, 0.2, 1)
 metallic = 0.0
 roughness = 0.8
 shading_mode = 1
+
+[sub_resource type="StandardMaterial3D" id="Material_Head"]
+albedo_color = Color(1, 0.55, 0.35, 1)
+metallic = 0.0
+roughness = 0.75
+shading_mode = 1
+
+[sub_resource type="StandardMaterial3D" id="Material_Limbs"]
+albedo_color = Color(0.55, 0.08, 0.16, 1)
+metallic = 0.0
+roughness = 0.85
+shading_mode = 1
+
+[sub_resource type="BoxMesh" id="BoxMesh_Torso"]
+size = Vector3(0.58, 0.82, 0.34)
+
+[sub_resource type="BoxMesh" id="BoxMesh_Leg"]
+size = Vector3(0.18, 0.7, 0.22)
+
+[sub_resource type="BoxMesh" id="BoxMesh_Arm"]
+size = Vector3(0.15, 0.72, 0.16)
+
+[sub_resource type="SphereMesh" id="SphereMesh_Head"]
+radius = 0.28
+height = 0.56
+
+[sub_resource type="BoxShape3D" id="Shape_Torso"]
+size = Vector3(0.72, 0.9, 0.5)
+
+[sub_resource type="BoxShape3D" id="Shape_Legs"]
+size = Vector3(0.65, 0.78, 0.44)
+
+[sub_resource type="SphereShape3D" id="Shape_Head"]
+radius = 0.32
 
 [sub_resource type="BoxMesh" id="BoxMesh_Gun"]
 size = Vector3(0.15, 0.15, 0.5)
@@ -41,16 +71,68 @@ outline_size = 4
 outline_color = Color(0, 0, 0, 1)
 
 [node name="Player" type="CharacterBody3D" groups=["players"]]
-collision_layer = 2
+collision_layer = 0
 collision_mask = 1
 script = ExtResource("1_player")
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="."]
 shape = SubResource("CapsuleShape3D_1")
 
-[node name="Mesh" type="MeshInstance3D" parent="."]
-mesh = SubResource("CapsuleMesh_1")
+[node name="BodyModel" type="Node3D" parent="."]
+
+[node name="Torso" type="MeshInstance3D" parent="BodyModel"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.12, 0)
+mesh = SubResource("BoxMesh_Torso")
 material_override = SubResource("Material_Body")
+
+[node name="Head" type="MeshInstance3D" parent="BodyModel"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.86, 0)
+mesh = SubResource("SphereMesh_Head")
+material_override = SubResource("Material_Head")
+
+[node name="LeftLeg" type="MeshInstance3D" parent="BodyModel"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.15, -0.55, 0)
+mesh = SubResource("BoxMesh_Leg")
+material_override = SubResource("Material_Limbs")
+
+[node name="RightLeg" type="MeshInstance3D" parent="BodyModel"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.15, -0.55, 0)
+mesh = SubResource("BoxMesh_Leg")
+material_override = SubResource("Material_Limbs")
+
+[node name="LeftArm" type="MeshInstance3D" parent="BodyModel"]
+transform = Transform3D(1, 0, 0, 0, 0.965926, -0.258819, 0, 0.258819, 0.965926, -0.42, 0.12, -0.02)
+mesh = SubResource("BoxMesh_Arm")
+material_override = SubResource("Material_Limbs")
+
+[node name="RightArm" type="MeshInstance3D" parent="BodyModel"]
+transform = Transform3D(1, 0, 0, 0, 0.965926, 0.258819, 0, -0.258819, 0.965926, 0.42, 0.12, -0.02)
+mesh = SubResource("BoxMesh_Arm")
+material_override = SubResource("Material_Limbs")
+
+[node name="HeadHitbox" type="Area3D" parent="." groups=["player_hitboxes", "player_head_hitboxes"]]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.86, 0)
+collision_layer = 2
+collision_mask = 0
+
+[node name="Shape" type="CollisionShape3D" parent="HeadHitbox"]
+shape = SubResource("Shape_Head")
+
+[node name="TorsoHitbox" type="Area3D" parent="." groups=["player_hitboxes"]]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.12, 0)
+collision_layer = 2
+collision_mask = 0
+
+[node name="Shape" type="CollisionShape3D" parent="TorsoHitbox"]
+shape = SubResource("Shape_Torso")
+
+[node name="LegsHitbox" type="Area3D" parent="." groups=["player_hitboxes"]]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.55, 0)
+collision_layer = 2
+collision_mask = 0
+
+[node name="Shape" type="CollisionShape3D" parent="LegsHitbox"]
+shape = SubResource("Shape_Legs")
 
 [node name="Camera" type="Camera3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.7, 0)
