@@ -3,40 +3,87 @@ extends Node
 # Procedural SFX. Every sound is generated fresh into a short
 # AudioStreamGenerator buffer and played one-shot. No samples on disk.
 #
-# Public API: SFX.shot(), SFX.explosion(), SFX.hit_received(), SFX.kill_confirm(),
-# SFX.hitmarker(kind), SFX.melee(), SFX.jump(), SFX.dash(), SFX.grenade_launch().
+# World sounds take an optional `at: Vector3` — when supplied, the sound
+# plays through an AudioStreamPlayer3D on a reverb bus, so distance,
+# stereo panning, and environment tail come "for free" from Godot's 3D
+# audio pipeline. Pass Vector3.INF (or omit) for a plain 2D/UI sound.
+#
+# Public API: SFX.shot(w, at?), SFX.explosion(at?), SFX.melee(at?),
+# SFX.grenade_launch(at?), SFX.jump(at?), SFX.dash(at?),
+# SFX.hit_received(), SFX.kill_confirm(), SFX.hitmarker(kind, dmg).
 
 const MIX_RATE := 44100.0
+const BUS_3D := "SFX3D"
+const NO_POS := Vector3.INF
+
+func _ready() -> void:
+	_ensure_reverb_bus()
+
+func _ensure_reverb_bus() -> void:
+	# Set up once. Project file has no bus layout, so create a dedicated
+	# reverb-colored bus for 3D sounds; UI sounds keep the dry Master bus.
+	if AudioServer.get_bus_index(BUS_3D) >= 0:
+		return
+	var idx := AudioServer.bus_count
+	AudioServer.add_bus(idx)
+	AudioServer.set_bus_name(idx, BUS_3D)
+	AudioServer.set_bus_send(idx, "Master")
+	var reverb := AudioEffectReverb.new()
+	reverb.room_size = 0.55
+	reverb.damping = 0.4
+	reverb.spread = 0.85
+	reverb.wet = 0.22
+	reverb.dry = 1.0
+	AudioServer.add_bus_effect(idx, reverb)
 
 # -------------------- dispatch --------------------
 
-func _play(samples: PackedVector2Array, volume_db: float = -6.0) -> void:
+func _play(samples: PackedVector2Array, volume_db: float = -6.0, at: Vector3 = NO_POS) -> void:
 	if samples.is_empty():
 		return
 	var duration := float(samples.size()) / MIX_RATE
 	var stream := AudioStreamGenerator.new()
 	stream.mix_rate = MIX_RATE
 	stream.buffer_length = duration + 0.05
-	var player := AudioStreamPlayer.new()
-	player.stream = stream
-	player.volume_db = volume_db
-	add_child(player)
-	player.play()
-	var pb := player.get_stream_playback() as AudioStreamGeneratorPlayback
+	var pb: AudioStreamGeneratorPlayback
+	var freer: Node
+	if at == NO_POS:
+		var p := AudioStreamPlayer.new()
+		p.stream = stream
+		p.volume_db = volume_db
+		add_child(p)
+		p.play()
+		pb = p.get_stream_playback() as AudioStreamGeneratorPlayback
+		freer = p
+	else:
+		var p := AudioStreamPlayer3D.new()
+		p.stream = stream
+		p.volume_db = volume_db
+		p.bus = BUS_3D
+		p.unit_size = 10.0
+		p.max_db = 0.0                  # point-blank matches authored volume
+		p.max_distance = 120.0          # hard-clip to silence beyond this
+		p.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
+		add_child(p)
+		p.global_position = at
+		p.play()
+		pb = p.get_stream_playback() as AudioStreamGeneratorPlayback
+		freer = p
 	if pb:
 		pb.push_buffer(samples)
-	get_tree().create_timer(duration + 0.15).timeout.connect(player.queue_free)
+	get_tree().create_timer(duration + 0.15).timeout.connect(freer.queue_free)
 
 # -------------------- sounds --------------------
 
-func shot(w: Weapon = null) -> void: _play(_synth_shot(w), randf_range(-5.5, -2.5))
-func grenade_launch() -> void: _play(_synth_grenade_launch(), -6.0)
-func explosion() -> void: _play(_synth_explosion(), -2.0)
+func shot(w: Weapon = null, at: Vector3 = NO_POS) -> void:
+	_play(_synth_shot(w), randf_range(-5.5, -2.5), at)
+func grenade_launch(at: Vector3 = NO_POS) -> void: _play(_synth_grenade_launch(), -6.0, at)
+func explosion(at: Vector3 = NO_POS) -> void: _play(_synth_explosion(), -2.0, at)
+func melee(at: Vector3 = NO_POS) -> void: _play(_synth_melee(), -6.0, at)
+func jump(at: Vector3 = NO_POS) -> void: _play(_synth_jump(), -12.0, at)
+func dash(at: Vector3 = NO_POS) -> void: _play(_synth_dash(), -10.0, at)
 func hit_received() -> void: _play(_synth_hit_received(), -4.0)
 func kill_confirm() -> void: _play(_synth_kill_confirm(), -6.0)
-func melee() -> void: _play(_synth_melee(), -6.0)
-func jump() -> void: _play(_synth_jump(), -12.0)
-func dash() -> void: _play(_synth_dash(), -10.0)
 func hitmarker(kind: String = "body", dmg: int = 0) -> void:
 	# Scale pitch down and volume up with damage — heavy guns land with a
 	# bassy thunk, baseline pistol keeps the sharp "tink".

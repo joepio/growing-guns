@@ -39,6 +39,12 @@ var explosive_damage: float = 0.0      # max damage at epicenter
 var bullet_color: Color = BASE_BULLET_COLOR
 var bullet_scale: float = 1.0          # scales tracer brightness + muzzle flash
 
+# --- Player-body modifiers (cards can grow head/torso for tradeoff builds) ---
+var head_scale: float = 1.0            # visual + head hitbox
+var body_scale: float = 1.0            # visual + torso/legs hitbox
+var max_hp_bonus: int = 0              # flat HP added on top of Player.MAX_HEALTH
+var extra_jumps: int = 0               # additional air-jumps beyond the default double-jump
+
 # --- Tracking ---
 var applied_cards: Array[String] = []
 
@@ -77,4 +83,8 @@ func reset() -> void:
 	explosive_damage = 0.0
 	bullet_color = BASE_BULLET_COLOR
 	bullet_scale = 1.0
+	head_scale = 1.0
+	body_scale = 1.0
+	max_hp_bonus = 0
+	extra_jumps = 0
 	applied_cards.clear()
