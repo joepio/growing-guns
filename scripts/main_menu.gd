@@ -1,15 +1,16 @@
 extends Control
 
-@onready var name_input: LineEdit = $Panel/VBox/NameSection/NameInput
-@onready var addr_input: LineEdit = $Panel/VBox/JoinSection/HBoxJoin/AddrInput
-@onready var bot_button: Button = $Panel/VBox/MainActions/BotButton
-@onready var host_button: Button = $Panel/VBox/MainActions/HostButton
-@onready var join_button: Button = $Panel/VBox/JoinSection/HBoxJoin/JoinButton
-@onready var game_list_vbox: VBoxContainer = $Panel/VBox/ScrollContainer/GameList
-@onready var status_label: Label = $Panel/VBox/Status
+@onready var name_input: LineEdit = $Container/Panel/Margin/VBox/NameSection/NameInput
+@onready var addr_input: LineEdit = $Container/Panel/Margin/VBox/JoinSection/HBoxJoin/AddrInput
+@onready var bot_button: Button = $Container/Panel/Margin/VBox/MainActions/BotButton
+@onready var host_button: Button = $Container/Panel/Margin/VBox/MainActions/HostButton
+@onready var join_button: Button = $Container/Panel/Margin/VBox/JoinSection/HBoxJoin/JoinButton
+@onready var game_list_vbox: VBoxContainer = $Container/Panel/Margin/VBox/ScrollContainer/GameList
+@onready var status_label: Label = $Container/Panel/Margin/VBox/Status
 
 func _ready() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	_build_retro_filter()
 
 	bot_button.pressed.connect(_on_vs_bot)
 	host_button.pressed.connect(_on_host)
@@ -20,6 +21,66 @@ func _ready() -> void:
 	# Start listening for local games immediately
 	NetworkManager.game_discovered.connect(_on_games_discovered)
 	NetworkManager.start_discovery()
+
+func _build_retro_filter() -> void:
+	var retro_overlay := ColorRect.new()
+	retro_overlay.name = "RetroFilter"
+	retro_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	retro_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	var shader := Shader.new()
+	shader.code = "
+		shader_type canvas_item;
+		uniform sampler2D screen_texture : hint_screen_texture, repeat_disable, filter_nearest;
+
+		const float bayer[16] = {
+			0.0/16.0, 8.0/16.0, 2.0/16.0, 10.0/16.0,
+			12.0/16.0, 4.0/16.0, 14.0/16.0, 6.0/16.0,
+			3.0/16.0, 11.0/16.0, 1.0/16.0, 9.0/16.0,
+			15.0/16.0, 7.0/16.0, 13.0/16.0, 5.0/16.0
+		};
+
+		void fragment() {
+			vec2 uv = SCREEN_UV;
+			vec2 centered_uv = uv - 0.5;
+			float dist = length(centered_uv);
+			float zoom = 0.92;
+			uv = 0.5 + centered_uv * zoom * (1.0 + 0.15 * dist * dist);
+
+			int p_size = 3;
+			vec2 res = 1.0 / SCREEN_PIXEL_SIZE;
+			uv = floor(uv * res / float(p_size)) / (res / float(p_size));
+
+			float amount = 0.001 * (dist * dist);
+			float r = texture(screen_texture, uv + vec2(amount, 0.0)).r;
+			float g = texture(screen_texture, uv).g;
+			float b = texture(screen_texture, uv - vec2(amount, 0.0)).b;
+			vec3 color = vec3(r, g, b);
+
+			vec3 bleed = vec3(0.0);
+			vec2 b_offset = SCREEN_PIXEL_SIZE * float(p_size) * 1.5;
+			bleed += texture(screen_texture, uv + vec2(b_offset.x, b_offset.y)).rgb;
+			bleed += texture(screen_texture, uv + vec2(-b_offset.x, b_offset.y)).rgb;
+			bleed += texture(screen_texture, uv + vec2(b_offset.x, -b_offset.y)).rgb;
+			bleed += texture(screen_texture, uv + vec2(-b_offset.x, -b_offset.y)).rgb;
+			color += bleed * 0.15;
+
+			ivec2 p = ivec2(FRAGCOORD.xy / float(p_size));
+			float threshold = bayer[(p.x % 4) * 4 + (p.y % 4)];
+
+			float levels = 24.0;
+			float vignette = clamp(1.0 - dist * 1.4, 0.0, 1.0);
+			color = floor(color * levels + threshold) / levels;
+			color *= mix(0.7, 1.0, vignette);
+
+			COLOR.rgb = color;
+			COLOR.a = 1.0;
+		}
+	"
+	var mat := ShaderMaterial.new()
+	mat.shader = shader
+	retro_overlay.material = mat
+	add_child(retro_overlay)
 
 func _exit_tree() -> void:
 	# Stop discovery if we leave the main menu (though typically we only go to game)
