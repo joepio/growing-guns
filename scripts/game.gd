@@ -13,6 +13,7 @@ const SPAWN_CAPSULE_HEIGHT := 1.8
 @onready var health_label: Label = $HUD/HealthPanel/HealthLabel
 @onready var scoreboard: Label = $HUD/Scoreboard
 @onready var hitmarker: Control = $HUD/Hitmarker
+@onready var damage_indicator: Control = $HUD/DamageIndicator
 @onready var rifle_bar: ProgressBar = $HUD/AbilityBar/Rifle/Bar
 @onready var grenade_bar: ProgressBar = $HUD/AbilityBar/Grenade/Bar
 @onready var melee_bar: ProgressBar = $HUD/AbilityBar/Melee/Bar
@@ -359,6 +360,24 @@ func _broadcast_scores(scores: Dictionary) -> void:
 
 func show_hitmarker(kind: String) -> void:
 	hitmarker.flash(kind)
+
+func show_damage_direction(from_pos: Vector3) -> void:
+	if not local_player or not is_instance_valid(local_player):
+		return
+	var delta: Vector3 = from_pos - local_player.global_position
+	delta.y = 0.0
+	if delta.length_squared() < 0.0001:
+		return
+	# Rotate the horizontal world vector into the player's local frame using
+	# only their yaw (camera pitch doesn't affect damage direction).
+	var yaw: float = local_player.rotation.y
+	var c := cos(yaw)
+	var s := sin(yaw)
+	var local_x := c * delta.x - s * delta.z
+	var local_z := s * delta.x + c * delta.z
+	# Forward in local space is -Z. Angle convention: 0 forward, +π/2 right.
+	var angle := atan2(local_x, -local_z)
+	damage_indicator.flash(angle)
 
 func _update_scoreboard() -> void:
 	var lines: Array[String] = ["— ROUNDS —"]
