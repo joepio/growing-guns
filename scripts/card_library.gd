@@ -323,6 +323,7 @@ static func all() -> Array:
 				w.bullet_scale = 2.5
 				w.explosive_radius = 16.0
 				w.explosive_damage = 200.0
+				w.bullet_drop = 3.0  # rocket thrust mostly cancels gravity
 				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.1, 0.0), 0.8),
 		},
 	]
