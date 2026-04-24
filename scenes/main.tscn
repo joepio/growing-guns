@@ -205,5 +205,5 @@ vertical_alignment = 1
 layout_mode = 2
 theme_override_colors/font_color = Color(0.4, 0.8, 1, 0.6)
 theme_override_font_sizes/font_size = 12
-text = "WASD MOVE · SPACE JUMP · SHIFT DASH · LMB FIRE · RMB SPECIAL · F MELEE"
+text = "WASD MOVE · SPACE JUMP · SHIFT DASH · LMB FIRE · RMB SPECIAL (SWORD/GRENADE/ETC)"
 horizontal_alignment = 1

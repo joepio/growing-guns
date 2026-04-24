@@ -73,9 +73,111 @@ var _ghost_overlay: Control = null
 var _ghost_label: Label = null
 var _death_overlay: ColorRect = null
 
+var _dash_segments: Array[ProgressBar] = []
+var _dash_text_hbox: Control = null
+
 func _ready() -> void:
-	# Hide the static label and set up the dynamic one
-	if crosshair_label: crosshair_label.visible = false
+	process_mode = Node.PROCESS_MODE_ALWAYS
+
+	# --- Ability Bar Redesign ---
+	# Hide legacy components
+	var melee_cont = $HUD/AbilityBar/Melee
+	if melee_cont: melee_cont.visible = false
+	if dash_bar: dash_bar.visible = false
+	if rifle_bar: rifle_bar.visible = false
+	if grenade_bar: grenade_bar.visible = false
+
+	# 1. Setup Rifle & Grenade overlays
+	var icon_script := load("res://scripts/hud_icon.gd")
+
+	for info in [
+		{"cont": $HUD/AbilityBar/Rifle, "bar": rifle_bar, "lbl": rifle_label, "type": 1, "color": Color(1, 0.9, 0.5)}, # LMB
+		{"cont": $HUD/AbilityBar/Grenade, "bar": grenade_bar, "lbl": grenade_label, "type": 2, "color": Color(0.7, 1, 0.4)} # RMB
+	]:
+		var c: Control = info.cont
+		var b: ProgressBar = info.bar
+		var l: Label = info.lbl
+
+		# Overlay layout
+		b.get_parent().remove_child(b)
+		l.get_parent().remove_child(l)
+
+		var overlay := PanelContainer.new()
+		overlay.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		overlay.add_theme_stylebox_override("panel", StyleBoxEmpty.new())
+		c.add_child(overlay)
+
+		b.custom_minimum_size.y = 28
+		overlay.add_child(b)
+
+		var hbox := HBoxContainer.new()
+		hbox.alignment = BoxContainer.ALIGNMENT_CENTER
+		hbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		hbox.add_theme_constant_override("separation", 8)
+		overlay.add_child(hbox)
+
+		# Create icon
+		var icon := Control.new()
+		icon.custom_minimum_size = Vector2(20, 20)
+		icon.set_script(icon_script)
+		icon.set("icon_type", info.type)
+		icon.set("icon_color", info.color)
+		hbox.add_child(icon)
+
+		l.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		l.text = "" # We'll set the action name (RIFLE/GRENADE) in _refresh
+		hbox.add_child(l)
+
+	# 2. Setup Dash Segmented Overlay
+	var dash_cont := $HUD/AbilityBar/Dash
+	var dash_lbl := $HUD/AbilityBar/Dash/Label
+	dash_lbl.get_parent().remove_child(dash_lbl)
+
+	var d_overlay := PanelContainer.new()
+	d_overlay.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	d_overlay.add_theme_stylebox_override("panel", StyleBoxEmpty.new())
+	dash_cont.add_child(d_overlay)
+
+	var d_bar_hbox := HBoxContainer.new()
+	d_bar_hbox.add_theme_constant_override("separation", 4)
+	d_overlay.add_child(d_bar_hbox)
+
+	for i in range(2):
+		var seg := ProgressBar.new()
+		seg.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		seg.custom_minimum_size.y = 28
+		seg.max_value = 1.0
+		seg.show_percentage = false
+		d_bar_hbox.add_child(seg)
+		_dash_segments.append(seg)
+
+	_dash_text_hbox = HBoxContainer.new()
+	_dash_text_hbox.alignment = BoxContainer.ALIGNMENT_CENTER
+	_dash_text_hbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_dash_text_hbox.add_theme_constant_override("separation", 8)
+	d_overlay.add_child(_dash_text_hbox)
+
+	var d_icon := Control.new()
+	d_icon.custom_minimum_size = Vector2(46, 20) # Wider for SHIFT
+	d_icon.set_script(icon_script)
+	d_icon.set("icon_type", 0) # SHIFT
+	d_icon.set("icon_color", Color(0.6, 0.9, 1.0))
+	_dash_text_hbox.add_child(d_icon)
+
+	# Add the text inside the icon wrapper for Shift
+	var shift_text := Label.new()
+	shift_text.text = "SHIFT"
+	shift_text.add_theme_font_size_override("font_size", 10)
+	shift_text.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	shift_text.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	shift_text.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	d_icon.add_child(shift_text)
+
+	dash_lbl.text = "DASH"
+	_dash_text_hbox.add_child(dash_lbl)
+
+	# Hide the static label and set up the dynamic one	if crosshair_label: crosshair_label.visible = false
 	_custom_crosshair = Control.new()
 	_custom_crosshair.name = "DynamicCrosshair"
 	_custom_crosshair.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -204,37 +306,62 @@ func _unhandled_input(event: InputEvent) -> void:
 
 func _refresh_cooldowns() -> void:
 	var w: Weapon = local_player.weapon
-	if local_player.get("ghost_mode") == true:
+	var is_ghost: bool = local_player.get("ghost_mode") == true
+
+	# --- Ammo / Rifle ---
+	var rifle_text_box := rifle_label.get_parent() as Control
+	if is_ghost:
 		rifle_label.text = "GHOST"
 		rifle_bar.visible = false
-		rifle_bar.value = 0.0
-		grenade_bar.value = 1.0 - (local_player.grenade_cooldown / local_player.MINE_RELOAD)
-		grenade_label.text = "LMB  MINE"
-		melee_bar.value = 0.0
-		var ghost_charge_progress: float = local_player.dash_recharge_timer / local_player.DASH_RECHARGE_TIME
-		dash_bar.value = (float(local_player.dash_charges) + ghost_charge_progress) / float(local_player.MAX_DASH_CHARGES)
-		return
-	if local_player.reloading:
-		rifle_label.text = "RELOADING…"
+		if rifle_text_box: rifle_text_box.visible = true
+	elif local_player.reloading:
 		rifle_bar.visible = true
+		if rifle_text_box: rifle_text_box.visible = false
 		rifle_bar.value = 1.0 - (local_player.rifle_cooldown / max(0.01, w.get_reload_time()))
 	else:
-		rifle_label.text = "AMMO  %d / %d" % [local_player.mag, w.get_mag_size()]
+		rifle_label.text = "%d / %d" % [local_player.mag, w.get_mag_size()]
 		rifle_bar.visible = false
-		rifle_bar.value = float(local_player.mag) / float(w.get_mag_size())
-	# The RMB slot hosts multiple specials with different cooldowns. Normalize
-	# against the max cooldown of the equipped special so the bar reads right.
+		if rifle_text_box: rifle_text_box.visible = true
+
+	# --- Special (RMB) ---
 	var special_max: float = local_player.GRENADE_RELOAD
-	match w.special:
-		Weapon.SPECIAL_TELEPORT: special_max = local_player.TELEPORT_RELOAD
-		Weapon.SPECIAL_SHIELD:   special_max = local_player.SHIELD_RELOAD
-		Weapon.SPECIAL_INVISIBLE: special_max = local_player.INVISIBLE_RELOAD
-	special_max *= w.special_cooldown_mult
-	grenade_bar.value = 1.0 - (local_player.grenade_cooldown / max(0.01, special_max))
-	grenade_label.text = "RMB  %s" % w.special.to_upper()
-	melee_bar.value = 1.0 - (local_player.melee_cooldown / local_player.MELEE_RELOAD)
-	var charge_progress: float = local_player.dash_recharge_timer / local_player.DASH_RECHARGE_TIME
-	dash_bar.value = (float(local_player.dash_charges) + charge_progress) / float(local_player.MAX_DASH_CHARGES)
+	var grenade_text_box := grenade_label.get_parent() as Control
+	if is_ghost:
+		special_max = local_player.MINE_RELOAD
+		grenade_label.text = "MINE"
+	else:
+		match w.special:
+			Weapon.SPECIAL_TELEPORT: special_max = local_player.TELEPORT_RELOAD
+			Weapon.SPECIAL_SHIELD:   special_max = local_player.SHIELD_RELOAD
+			Weapon.SPECIAL_INVISIBLE: special_max = local_player.INVISIBLE_RELOAD
+			Weapon.SPECIAL_SWORD:    special_max = local_player.MELEE_RELOAD
+		special_max *= w.special_cooldown_mult
+		grenade_label.text = w.special.to_upper()
+
+	var special_ready: bool = local_player.grenade_cooldown <= 0.0
+	grenade_bar.visible = not special_ready
+	if grenade_text_box: grenade_text_box.visible = special_ready
+	if not special_ready:
+		grenade_bar.value = 1.0 - (local_player.grenade_cooldown / max(0.01, special_max))
+
+	# --- Dash (Segmented) ---
+	var dash_recharge: float = local_player.dash_recharge_timer / local_player.DASH_RECHARGE_TIME
+	var all_full: bool = local_player.dash_charges >= _dash_segments.size()
+
+	if _dash_text_hbox:
+		_dash_text_hbox.visible = all_full
+
+	for i in range(_dash_segments.size()):
+		var seg: ProgressBar = _dash_segments[i]
+		if local_player.dash_charges > i:
+			seg.value = 1.0
+			seg.visible = not all_full # Hide individual segments if totally full
+		elif local_player.dash_charges == i:
+			seg.value = dash_recharge
+			seg.visible = true
+		else:
+			seg.value = 0.0
+			seg.visible = true
 
 # -------------------- SPAWN / DESPAWN --------------------
 
@@ -608,13 +735,19 @@ func _show_card_pick(loser_id: int, card_ids: Array) -> void:
 	_stats_panel.visible = true
 	_refresh_stats_panel()
 	pick_title.text = "PICK A CARD"
-	pick_subtitle.text = "you lost the round — choose an upgrade (8s left)"
+
+	var is_solo := NetworkManager.players.size() <= 1
+	if is_solo:
+		pick_subtitle.text = "you lost the round — choose an upgrade"
+		_pick_timeout_active = false
+	else:
+		pick_subtitle.text = "you lost the round — choose an upgrade (8s left)"
+		_pick_timeout_timer = 8.0
+		_pick_timeout_active = true
+		_last_pling_sec = -1
+
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	_populate_cards(card_ids, true)
-
-	_pick_timeout_timer = 8.0
-	_pick_timeout_active = true
-	_last_pling_sec = -1
 
 	# 1-second grace period before the loser can actually click — avoids
 	# accidental picks mid-death animation / mid-mouse-release.
@@ -685,7 +818,7 @@ func _populate_cards(card_ids: Array, clickable: bool) -> void:
 		tw.tween_callback(func():
 			content.visible = true
 			body.add_theme_stylebox_override("panel", front_style) # Re-apply front style
-			SFX.pling(0.8 + (index * 0.15))
+			SFX.card_flip(0.8 + (index * 0.15))
 		)
 		tw.tween_property(body, "scale:x", 1.0, 0.15).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 
@@ -1132,13 +1265,7 @@ func _build_ghost_overlay() -> void:
 	# Move to the background of the HUD so it doesn't affect other UI elements
 	$HUD.move_child(_ghost_overlay, 0)
 
-func _build_retro_filter() -> void:
-	var retro_overlay := ColorRect.new()
-	retro_overlay.name = "RetroFilter"
-	retro_overlay.anchor_right = 1.0
-	retro_overlay.anchor_bottom = 1.0
-	retro_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
-
+func _apply_retro_shader(node: Control) -> void:
 	var shader := Shader.new()
 	shader.code = "
 		shader_type canvas_item;
@@ -1152,28 +1279,24 @@ func _build_retro_filter() -> void:
 		};
 
 		void fragment() {
-			// 1. Lens Distortion (Fish-eye / Visor Curvature)
 			vec2 uv = SCREEN_UV;
 			vec2 centered_uv = uv - 0.5;
-			float dist = length(centered_uv);
-
-			// Zoom in (0.92 factor) to hide distorted dark edges
+			float aspect = SCREEN_PIXEL_SIZE.y / SCREEN_PIXEL_SIZE.x;
+			vec2 aspect_uv = centered_uv * vec2(aspect, 1.0);
+			float dist = length(aspect_uv);
 			float zoom = 0.92;
 			uv = 0.5 + centered_uv * zoom * (1.0 + 0.15 * dist * dist);
 
-			// 2. Pixelation Factor
 			int p_size = 3;
 			vec2 res = 1.0 / SCREEN_PIXEL_SIZE;
 			uv = floor(uv * res / float(p_size)) / (res / float(p_size));
 
-			// 3. Chromatic Aberration (VHS style)
 			float amount = 0.001 * (dist * dist);
 			float r = texture(screen_texture, uv + vec2(amount, 0.0)).r;
 			float g = texture(screen_texture, uv).g;
 			float b = texture(screen_texture, uv - vec2(amount, 0.0)).b;
 			vec3 color = vec3(r, g, b);
 
-			// 4. Neon Bloom / Light Bleed
 			vec3 bleed = vec3(0.0);
 			vec2 b_offset = SCREEN_PIXEL_SIZE * float(p_size) * 1.5;
 			bleed += texture(screen_texture, uv + vec2(b_offset.x, b_offset.y)).rgb;
@@ -1182,11 +1305,9 @@ func _build_retro_filter() -> void:
 			bleed += texture(screen_texture, uv + vec2(-b_offset.x, -b_offset.y)).rgb;
 			color += bleed * 0.15;
 
-			// 5. Ordered Dithering
 			ivec2 p = ivec2(FRAGCOORD.xy / float(p_size));
 			float threshold = bayer[(p.x % 4) * 4 + (p.y % 4)];
 
-			// 6. Color Depth & Vignette
 			float levels = 24.0;
 			float vignette = clamp(1.0 - dist * 1.4, 0.0, 1.0);
 			color = floor(color * levels + threshold) / levels;
@@ -1198,10 +1319,20 @@ func _build_retro_filter() -> void:
 	"
 	var mat := ShaderMaterial.new()
 	mat.shader = shader
-	retro_overlay.material = mat
+	node.material = mat
 
-	$HUD.add_child(retro_overlay)
-	# Add last so it captures all UI rendered before it
+func _build_retro_filter() -> void:
+	var cl := CanvasLayer.new()
+	cl.layer = 100 # Put it above everything else
+	add_child(cl)
+
+	var retro_overlay := ColorRect.new()
+	retro_overlay.name = "RetroFilter"
+	retro_overlay.anchor_right = 1.0
+	retro_overlay.anchor_bottom = 1.0
+	retro_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_apply_retro_shader(retro_overlay)
+	cl.add_child(retro_overlay)
 
 func _update_ghost_overlay() -> void:
 	if _ghost_overlay == null:

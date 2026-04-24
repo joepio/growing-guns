@@ -262,12 +262,21 @@ static func all() -> Array:
 				w.special = Weapon.SPECIAL_INVISIBLE,
 		},
 		{
+			"id": "sword",
+			"name": "SWORD",
+			"desc": "RMB: powerful melee slash",
+			"color": Color(0.8, 0.8, 0.9),
+			"apply": func(w: Weapon) -> void:
+				w.special = Weapon.SPECIAL_SWORD,
+		},
+		{
 			"id": "cleaver",
 			"name": "CLEAVER",
-			"desc": "Massive melee slash with longer reach",
+			"desc": "RMB: massive slash radius",
 			"rarity": "rare",
 			"color": Color(0.8, 0.4, 0.9),
 			"apply": func(w: Weapon) -> void:
+				w.special = Weapon.SPECIAL_SWORD
 				w.melee_damage_mult *= 3.0
 				w.melee_scale *= 1.8,
 		},
