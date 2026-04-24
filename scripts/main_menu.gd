@@ -46,36 +46,38 @@ func _build_retro_filter() -> void:
 			float aspect = SCREEN_PIXEL_SIZE.y / SCREEN_PIXEL_SIZE.x;
 			vec2 aspect_uv = centered_uv * vec2(aspect, 1.0);
 			float dist = length(aspect_uv);
-			float zoom = 0.92;
-			uv = 0.5 + centered_uv * zoom * (1.0 + 0.15 * dist * dist);
+			float distortion = 0.15;
+			float max_dist_sq = dot(vec2(0.5 * aspect, 0.5), vec2(0.5 * aspect, 0.5));
+			float zoom = 0.995 / (1.0 + distortion * max_dist_sq);
+			uv = 0.5 + centered_uv * zoom * (1.0 + distortion * dist * dist);
 
-			int p_size = 3;
 			vec2 res = 1.0 / SCREEN_PIXEL_SIZE;
-			uv = floor(uv * res / float(p_size)) / (res / float(p_size));
+			int p_size = max(1, int(round(res.y / 720.0)));
+			uv = (floor(uv * res / float(p_size)) + 0.5) * float(p_size) / res;
+			vec2 uv_min = SCREEN_PIXEL_SIZE * 0.5;
+			vec2 uv_max = vec2(1.0) - uv_min;
 
 			float amount = 0.001 * (dist * dist);
-			float r = texture(screen_texture, uv + vec2(amount, 0.0)).r;
-			float g = texture(screen_texture, uv).g;
-			float b = texture(screen_texture, uv - vec2(amount, 0.0)).b;
+			float r = texture(screen_texture, clamp(uv + vec2(amount, 0.0), uv_min, uv_max)).r;
+			float g = texture(screen_texture, clamp(uv, uv_min, uv_max)).g;
+			float b = texture(screen_texture, clamp(uv - vec2(amount, 0.0), uv_min, uv_max)).b;
 			vec3 color = vec3(r, g, b);
 
 			vec3 bleed = vec3(0.0);
 			vec2 b_offset = SCREEN_PIXEL_SIZE * float(p_size) * 1.5;
-			bleed += texture(screen_texture, uv + vec2(b_offset.x, b_offset.y)).rgb;
-			bleed += texture(screen_texture, uv + vec2(-b_offset.x, b_offset.y)).rgb;
-			bleed += texture(screen_texture, uv + vec2(b_offset.x, -b_offset.y)).rgb;
-			bleed += texture(screen_texture, uv + vec2(-b_offset.x, -b_offset.y)).rgb;
+			bleed += texture(screen_texture, clamp(uv + vec2(b_offset.x, b_offset.y), uv_min, uv_max)).rgb;
+			bleed += texture(screen_texture, clamp(uv + vec2(-b_offset.x, b_offset.y), uv_min, uv_max)).rgb;
+			bleed += texture(screen_texture, clamp(uv + vec2(b_offset.x, -b_offset.y), uv_min, uv_max)).rgb;
+			bleed += texture(screen_texture, clamp(uv + vec2(-b_offset.x, -b_offset.y), uv_min, uv_max)).rgb;
 			color += bleed * 0.15;
 
 			ivec2 p = ivec2(FRAGCOORD.xy / float(p_size));
-			float threshold = bayer[(p.x % 4) * 4 + (p.y % 4)];
+			float threshold = (bayer[(p.x % 4) * 4 + (p.y % 4)] - 0.5) * 0.5;
 
-			float levels = 24.0;
+			float levels = 32.0;
 			float vignette = clamp(1.0 - dist * 1.4, 0.0, 1.0);
-			color = floor(color * levels + threshold) / levels;
-			color *= mix(0.7, 1.0, vignette);
-
-			COLOR.rgb = color;
+			color = floor(color * levels + threshold + 0.5) / levels;
+			color *= mix(0.7, 1.0, vignette);			COLOR.rgb = color;
 			COLOR.a = 1.0;
 		}
 	"

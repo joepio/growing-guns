@@ -3,7 +3,7 @@
 [ext_resource type="Script" uid="uid://r582d7dl3f3f" path="res://scripts/game.gd" id="1_game"]
 [ext_resource type="PackedScene" uid="uid://b0arena01" path="res://scenes/arena.tscn" id="2_arena"]
 [ext_resource type="Script" uid="uid://dwdfqr76hp64y" path="res://scripts/hit_marker.gd" id="3_hit"]
-[ext_resource type="Script" path="res://scripts/damage_indicator.gd" id="4_dmg"]
+[ext_resource type="Script" uid="uid://drgwakc2d3shj" path="res://scripts/damage_indicator.gd" id="4_dmg"]
 
 [sub_resource type="StyleBoxFlat" id="Style_HP"]
 bg_color = Color(0, 0, 0, 0.55)
@@ -27,7 +27,8 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.7405052, 4.5380306, 16.3836
 
 [node name="HUD" type="CanvasLayer" parent="." unique_id=1999100657]
 
-[node name="DamageIndicator" type="Control" parent="HUD"]
+[node name="DamageIndicator" type="Control" parent="HUD" unique_id=46628555]
+layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
@@ -35,26 +36,6 @@ grow_horizontal = 2
 grow_vertical = 2
 mouse_filter = 2
 script = ExtResource("4_dmg")
-
-[node name="Crosshair" type="Label" parent="HUD" unique_id=1006712146]
-anchors_preset = 8
-anchor_left = 0.5
-anchor_top = 0.5
-anchor_right = 0.5
-anchor_bottom = 0.5
-offset_left = -10.0
-offset_top = -14.0
-offset_right = 10.0
-offset_bottom = 14.0
-grow_horizontal = 2
-grow_vertical = 2
-theme_override_colors/font_color = Color(1, 0.9, 0.2, 1)
-theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
-theme_override_constants/outline_size = 4
-theme_override_font_sizes/font_size = 28
-text = "+"
-horizontal_alignment = 1
-vertical_alignment = 1
 
 [node name="Hitmarker" type="Control" parent="HUD" unique_id=1794456534]
 layout_mode = 3

@@ -17,7 +17,6 @@ var rounds_to_win: int = 10
 @onready var health_label: Label = $HUD/HealthPanel/HealthLabel
 @onready var scoreboard: Label = $HUD/Scoreboard
 @onready var hitmarker: Control = $HUD/Hitmarker
-@onready var crosshair_label: Label = $HUD/Crosshair
 @onready var damage_indicator: Control = $HUD/DamageIndicator
 @onready var rifle_label: Label = $HUD/AbilityBar/Rifle/Label
 @onready var rifle_bar: ProgressBar = $HUD/AbilityBar/Rifle/Bar
@@ -62,6 +61,8 @@ var _extend_votes: Dictionary = {} # id -> bool
 # --- Dev panel (F1) ---
 var _dev_root: PanelContainer = null
 var _dev_content: VBoxContainer
+# Dev-only: bots keep full AI (targeting, chasing, aiming) but never fire.
+var bots_hold_fire: bool = false
 
 # --- Tab scoreboard overlay ---
 var _tab_root: PanelContainer = null
@@ -77,7 +78,6 @@ var _dash_segments: Array[ProgressBar] = []
 var _dash_text_hbox: Control = null
 
 func _ready() -> void:
-	process_mode = Node.PROCESS_MODE_ALWAYS
 
 	# --- Ability Bar Redesign ---
 	# Hide legacy components
@@ -177,17 +177,14 @@ func _ready() -> void:
 	dash_lbl.text = "DASH"
 	_dash_text_hbox.add_child(dash_lbl)
 
-	# Hide the static label and set up the dynamic one	if crosshair_label: crosshair_label.visible = false
 	_custom_crosshair = Control.new()
 	_custom_crosshair.name = "DynamicCrosshair"
 	_custom_crosshair.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_custom_crosshair.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_custom_crosshair.set_script(load("res://scripts/crosshair.gd"))
 	$HUD.add_child(_custom_crosshair)
-	if crosshair_label: $HUD.move_child(_custom_crosshair, crosshair_label.get_index())
 
 	# Keep the game controller and its UI running when the tree is paused.
-	process_mode = Node.PROCESS_MODE_ALWAYS
 
 	# No menu — bootstrap networking on the fly. First launcher hosts, later
 	# launches fall back to client. Note: Godot 4 installs a default
@@ -207,6 +204,7 @@ func _ready() -> void:
 	scoreboard.visible = false
 	_build_rematch_overlay()
 	_build_ghost_overlay()
+	_build_custom_cursor()
 	_build_death_overlay()
 	_build_retro_filter()
 	_build_tab_overlay()
@@ -252,6 +250,7 @@ func _client_request_spawn_when_ready() -> void:
 	)
 
 func _process(delta: float) -> void:
+	_update_custom_cursor()
 	if local_player and is_instance_valid(local_player):
 		health_label.text = "GHOST" if local_player.get("ghost_mode") == true else "HP  %d" % local_player.health
 		_refresh_cooldowns()
@@ -293,8 +292,7 @@ func _input(event: InputEvent) -> void:
 		else:
 			_hide_tab_overlay()
 		get_viewport().set_input_as_handled()
-
-func _unhandled_input(event: InputEvent) -> void:
+		return
 	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_F1:
 		_toggle_dev_panel()
 		return
@@ -746,7 +744,7 @@ func _show_card_pick(loser_id: int, card_ids: Array) -> void:
 		_pick_timeout_active = true
 		_last_pling_sec = -1
 
-	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	Input.mouse_mode = Input.MOUSE_MODE_HIDDEN
 	_populate_cards(card_ids, true)
 
 	# 1-second grace period before the loser can actually click — avoids
@@ -900,43 +898,62 @@ func _make_card_button(card_id: String, card: Dictionary, clickable: bool) -> Co
 
 	# Holographic effects for rare
 	if rarity == "rare":
-		# Create an internal clipping layer so the outer shadow/glow isn't cut off
-		var clip_layer := Control.new()
-		clip_layer.name = "HoloClip"
-		clip_layer.set_anchors_preset(Control.PRESET_FULL_RECT)
-		clip_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		clip_layer.clip_contents = true
-		card_body.add_child(clip_layer)
-
-		# Shifting gradient "Holo" sweep
-		for i in range(2):
-			var shine := TextureRect.new()
-			var grad := Gradient.new()
-			grad.set_offsets(PackedFloat32Array([0.0, 0.5, 1.0]))
-			var tint := Color(0.4, 0.8, 1.0, 0.1) if i == 0 else Color(0.9, 0.5, 1.0, 0.08)
-			grad.set_colors(PackedColorArray([Color(tint.r, tint.g, tint.b, 0), tint, Color(tint.r, tint.g, tint.b, 0)]))
-			var tex := GradientTexture2D.new()
-			tex.gradient = grad
-			tex.width = 128
-			tex.height = 1
-			tex.fill_from = Vector2(0, 0)
-			tex.fill_to = Vector2(1, 0)
-			shine.texture = tex
-			shine.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-			shine.size = Vector2(240, 700)
-			shine.rotation = deg_to_rad(20)
-			shine.position = Vector2(-300, -200)
-			shine.mouse_filter = Control.MOUSE_FILTER_IGNORE
-			clip_layer.add_child(shine)
-
-			var tw_shine := shine.create_tween().set_loops()
-			tw_shine.tween_property(shine, "position:x", 500.0, 3.0 + (i * 0.5)).set_delay(0.2 + (i * 1.8))
-			tw_shine.tween_property(shine, "position:x", -300.0, 0.0)
-
 		# Pulsing border color
 		var tw_border := card_body.create_tween().set_loops()
-		tw_border.tween_property(sb, "border_color", Color(0.7, 0.9, 1.0), 1.8)
-		tw_border.tween_property(sb, "border_color", Color(0.9, 0.7, 1.0), 1.8)
+		tw_border.tween_property(sb, "border_color", Color(0.6, 0.9, 1.0), 1.8)
+		tw_border.tween_property(sb, "border_color", Color(0.9, 0.6, 1.0), 1.8)
+
+		var holo_shader := Shader.new()
+		holo_shader.code = "
+			shader_type canvas_item;
+			render_mode blend_add;
+			uniform sampler2D gradient : source_color;
+			uniform float speed = 0.5;
+			uniform float angle = 0.5;
+			uniform float intensity = 0.35;
+
+			void fragment() {
+				vec2 uv = UV;
+				float s = sin(angle);
+				float c = cos(angle);
+				vec2 rot_uv = vec2(
+					uv.x * c - uv.y * s,
+					uv.x * s + uv.y * c
+				);
+				float pos = fract(rot_uv.x * 1.5 + TIME * speed);
+				vec4 holo_color = texture(gradient, vec2(pos, 0.5));
+				float noise = fract(sin(dot(uv, vec2(12.9898, 78.233))) * 43758.5453);
+				holo_color.rgb += noise * 0.15;
+				// Additive blend on top of the card panel below. ColorRect's
+				// base color is ignored — we emit only the shimmer contribution.
+				COLOR = vec4(holo_color.rgb * intensity, 1.0);
+			}
+		"
+
+		var holo_mat := ShaderMaterial.new()
+		holo_mat.shader = holo_shader
+
+		# Create a rainbow gradient texture
+		var grad := Gradient.new()
+		grad.set_offsets(PackedFloat32Array([0.0, 0.25, 0.5, 0.75, 1.0]))
+		grad.set_colors(PackedColorArray([
+			Color(1.0, 0.3, 0.3), # Red
+			Color(1.0, 0.9, 0.3), # Yellow
+			Color(0.3, 1.0, 0.3), # Green
+			Color(0.3, 0.6, 1.0), # Blue
+			Color(1.0, 0.3, 1.0)  # Magenta
+		]))
+
+		var grad_tex := GradientTexture1D.new()
+		grad_tex.gradient = grad
+		holo_mat.set_shader_parameter("gradient", grad_tex)
+
+		var holo_overlay := ColorRect.new()
+		holo_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		holo_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		holo_overlay.material = holo_mat
+		card_body.add_child(holo_overlay)
+		card_body.move_child(holo_overlay, 0)
 
 	# Clickable overlay
 	var btn := Button.new()
@@ -949,22 +966,30 @@ func _make_card_button(card_id: String, card: Dictionary, clickable: bool) -> Co
 	if clickable:
 		btn.pressed.connect(func() -> void: _on_card_button(card_id, root))
 
-		# Idle Float (bobbing)
-		var idle_tw := idle_node.create_tween().set_loops()
-		idle_tw.tween_property(idle_node, "position:y", 4.0, 2.2).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
-		idle_tw.tween_property(idle_node, "position:y", -4.0, 2.2).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+		# Idle Float (bobbing & tilting)
+		idle_node.pivot_offset = idle_node.size * 0.5
 
-		# Initial random tilt
-		var base_rot := randf_range(-1.2, 1.2)
-		card_body.rotation_degrees = base_rot
+		var idle_y := idle_node.create_tween().set_loops()
+		idle_y.tween_property(idle_node, "position:y", 4.0, 2.2).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+		idle_y.tween_property(idle_node, "position:y", -4.0, 2.2).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+
+		var idle_rot := idle_node.create_tween().set_loops()
+		var rot_mag := randf_range(1.5, 3.5)
+		idle_rot.tween_property(idle_node, "rotation_degrees", rot_mag, 3.1).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+		idle_rot.tween_property(idle_node, "rotation_degrees", -rot_mag, 3.1).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 
 		# Hover logic
 		btn.mouse_entered.connect(func() -> void:
 			_refresh_stats_panel(card_id) # Show projection
 			var tw := card_body.create_tween().set_parallel(true)
 			tw.tween_property(card_body, "scale", Vector2(1.12, 1.12), 0.2).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-			tw.tween_property(card_body, "rotation_degrees", 0.0, 0.15).set_trans(Tween.TRANS_CUBIC)
 			tw.tween_property(card_body, "position:y", -10.0, 0.2).set_trans(Tween.TRANS_CUBIC)
+
+			if idle_y.is_running(): idle_y.pause()
+			if idle_rot.is_running(): idle_rot.pause()
+
+			tw.tween_property(idle_node, "rotation_degrees", 0.0, 0.15).set_trans(Tween.TRANS_CUBIC)
+
 			if rarity == "rare":
 				sb.shadow_size = 40
 				sb.shadow_color.a = 0.7
@@ -974,15 +999,15 @@ func _make_card_button(card_id: String, card: Dictionary, clickable: bool) -> Co
 			_refresh_stats_panel() # Reset to current
 			var tw := card_body.create_tween().set_parallel(true)
 			tw.tween_property(card_body, "scale", Vector2.ONE, 0.25).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
-			tw.tween_property(card_body, "rotation_degrees", base_rot, 0.2).set_trans(Tween.TRANS_CUBIC)
 			tw.tween_property(card_body, "position:y", 0.0, 0.25).set_trans(Tween.TRANS_CUBIC)
 			if rarity == "rare":
 				sb.shadow_size = 25
 				sb.shadow_color.a = 0.4
+			if idle_y: idle_y.play()
+			if idle_rot: idle_rot.play()
 		)
 
 	return root
-
 func _get_card_stat_diff(card_id: String) -> Array[String]:
 	var out: Array[String] = []
 	if local_player == null or not is_instance_valid(local_player):
@@ -1141,7 +1166,7 @@ func _match_over(winner_id: int) -> void:
 	round_banner.visible = true
 	banner_timer.stop()
 	_show_rematch_overlay(winner_id)
-	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	Input.mouse_mode = Input.MOUSE_MODE_HIDDEN
 
 func _build_rematch_overlay() -> void:
 	_rematch_overlay = Control.new()
@@ -1284,42 +1309,74 @@ func _apply_retro_shader(node: Control) -> void:
 			float aspect = SCREEN_PIXEL_SIZE.y / SCREEN_PIXEL_SIZE.x;
 			vec2 aspect_uv = centered_uv * vec2(aspect, 1.0);
 			float dist = length(aspect_uv);
-			float zoom = 0.92;
-			uv = 0.5 + centered_uv * zoom * (1.0 + 0.15 * dist * dist);
+			float distortion = 0.15;
+			float max_dist_sq = dot(vec2(0.5 * aspect, 0.5), vec2(0.5 * aspect, 0.5));
+			float zoom = 0.995 / (1.0 + distortion * max_dist_sq);
+			uv = 0.5 + centered_uv * zoom * (1.0 + distortion * dist * dist);
 
-			int p_size = 3;
 			vec2 res = 1.0 / SCREEN_PIXEL_SIZE;
-			uv = floor(uv * res / float(p_size)) / (res / float(p_size));
+			int p_size = max(1, int(round(res.y / 720.0)));
+			uv = (floor(uv * res / float(p_size)) + 0.5) * float(p_size) / res;
+			vec2 uv_min = SCREEN_PIXEL_SIZE * 0.5;
+			vec2 uv_max = vec2(1.0) - uv_min;
 
 			float amount = 0.001 * (dist * dist);
-			float r = texture(screen_texture, uv + vec2(amount, 0.0)).r;
-			float g = texture(screen_texture, uv).g;
-			float b = texture(screen_texture, uv - vec2(amount, 0.0)).b;
+			float r = texture(screen_texture, clamp(uv + vec2(amount, 0.0), uv_min, uv_max)).r;
+			float g = texture(screen_texture, clamp(uv, uv_min, uv_max)).g;
+			float b = texture(screen_texture, clamp(uv - vec2(amount, 0.0), uv_min, uv_max)).b;
 			vec3 color = vec3(r, g, b);
 
 			vec3 bleed = vec3(0.0);
 			vec2 b_offset = SCREEN_PIXEL_SIZE * float(p_size) * 1.5;
-			bleed += texture(screen_texture, uv + vec2(b_offset.x, b_offset.y)).rgb;
-			bleed += texture(screen_texture, uv + vec2(-b_offset.x, b_offset.y)).rgb;
-			bleed += texture(screen_texture, uv + vec2(b_offset.x, -b_offset.y)).rgb;
-			bleed += texture(screen_texture, uv + vec2(-b_offset.x, -b_offset.y)).rgb;
+			bleed += texture(screen_texture, clamp(uv + vec2(b_offset.x, b_offset.y), uv_min, uv_max)).rgb;
+			bleed += texture(screen_texture, clamp(uv + vec2(-b_offset.x, b_offset.y), uv_min, uv_max)).rgb;
+			bleed += texture(screen_texture, clamp(uv + vec2(b_offset.x, -b_offset.y), uv_min, uv_max)).rgb;
+			bleed += texture(screen_texture, clamp(uv + vec2(-b_offset.x, -b_offset.y), uv_min, uv_max)).rgb;
 			color += bleed * 0.15;
 
 			ivec2 p = ivec2(FRAGCOORD.xy / float(p_size));
-			float threshold = bayer[(p.x % 4) * 4 + (p.y % 4)];
+			float threshold = (bayer[(p.x % 4) * 4 + (p.y % 4)] - 0.5) * 0.5;
 
-			float levels = 24.0;
+			float levels = 32.0;
 			float vignette = clamp(1.0 - dist * 1.4, 0.0, 1.0);
-			color = floor(color * levels + threshold) / levels;
-			color *= mix(0.7, 1.0, vignette);
-
-			COLOR.rgb = color;
+			color = floor(color * levels + threshold + 0.5) / levels;
+			color *= mix(0.7, 1.0, vignette);			COLOR.rgb = color;
 			COLOR.a = 1.0;
 		}
 	"
 	var mat := ShaderMaterial.new()
 	mat.shader = shader
 	node.material = mat
+
+# Custom in-HUD cursor so the retro/fisheye shader distorts the cursor along
+# with the rest of the UI. The OS cursor is hidden (MOUSE_MODE_HIDDEN) in
+# menus; the mouse position Godot tracks is undistorted and matches the
+# button's logical rect, so clicks land correctly while the cursor *visually*
+# follows the warped UI.
+var _custom_cursor: Polygon2D = null
+
+func _build_custom_cursor() -> void:
+	_custom_cursor = Polygon2D.new()
+	_custom_cursor.name = "CustomCursor"
+	# Classic arrow pointing up-left, tip at (0,0).
+	_custom_cursor.polygon = PackedVector2Array([
+		Vector2(0, 0), Vector2(0, 16), Vector2(4, 12),
+		Vector2(7, 18), Vector2(9, 17), Vector2(6, 11),
+		Vector2(11, 11),
+	])
+	_custom_cursor.color = Color(1, 1, 1)
+	_custom_cursor.z_index = 4096
+	_custom_cursor.visible = false
+	$HUD.add_child(_custom_cursor)
+
+func _update_custom_cursor() -> void:
+	if _custom_cursor == null:
+		return
+	# Only show when the OS cursor is hidden (menu context). In captured or
+	# fully-visible modes we leave the OS cursor alone.
+	_custom_cursor.visible = Input.mouse_mode == Input.MOUSE_MODE_HIDDEN
+	if _custom_cursor.visible:
+		_custom_cursor.position = get_viewport().get_mouse_position()
 
 func _build_retro_filter() -> void:
 	var cl := CanvasLayer.new()
@@ -1669,9 +1726,13 @@ func _toggle_pause_menu() -> void:
 		_build_pause_menu()
 	_pause_menu.visible = not _pause_menu.visible
 	if _pause_menu.visible:
-		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+		Input.mouse_mode = Input.MOUSE_MODE_HIDDEN
 		# Pause the world if this is a solo match (local player + bots only).
-		if NetworkManager.players.size() <= 1:
+		var human_count := NetworkManager.players.size()
+		if NetworkManager.players.has(BOT_ID):
+			human_count -= 1
+
+		if human_count <= 1:
 			get_tree().paused = true
 	else:
 		# Unpause if we were paused.
@@ -1686,6 +1747,7 @@ func _build_pause_menu() -> void:
 	root.anchor_right = 1.0
 	root.anchor_bottom = 1.0
 	root.mouse_filter = Control.MOUSE_FILTER_STOP
+	root.process_mode = Node.PROCESS_MODE_ALWAYS
 	$HUD.add_child(root)
 
 	var bg := ColorRect.new()
@@ -1726,6 +1788,11 @@ func _build_pause_menu() -> void:
 	resume.text = "RESUME"
 	resume.custom_minimum_size = Vector2(260, 44)
 	resume.pressed.connect(_toggle_pause_menu)
+	var shortcut := Shortcut.new()
+	var ev := InputEventAction.new()
+	ev.action = "ui_cancel"
+	shortcut.events.append(ev)
+	resume.shortcut = shortcut
 	vb.add_child(resume)
 
 	var leave := Button.new()
@@ -1897,7 +1964,7 @@ func _toggle_dev_panel() -> void:
 	_dev_root.visible = not _dev_root.visible
 	if _dev_root.visible:
 		_refresh_dev_panel()
-		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+		Input.mouse_mode = Input.MOUSE_MODE_HIDDEN
 	else:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
@@ -1936,6 +2003,9 @@ func _refresh_dev_panel() -> void:
 	for c in _dev_content.get_children():
 		c.queue_free()
 	_dev_heading("DEV  ·  F1 to close", Color(0.5, 0.9, 1.0), 20)
+	_dev_toggle("Bots hold fire (move + aim, no shooting)", bots_hold_fire, func(v: bool) -> void:
+		bots_hold_fire = v
+		call_deferred("_refresh_dev_panel"))
 	_dev_heading("— WEAPON STATS —", Color(1.0, 0.9, 0.5), 15)
 	if local_player and is_instance_valid(local_player):
 		var w: Weapon = local_player.weapon
@@ -1991,6 +2061,15 @@ func _dev_note(text: String) -> void:
 	lbl.text = text
 	lbl.add_theme_color_override("font_color", Color(0.6, 0.6, 0.7))
 	_dev_content.add_child(lbl)
+
+func _dev_toggle(label: String, value: bool, on_changed: Callable) -> void:
+	var cb := CheckBox.new()
+	cb.text = label
+	cb.button_pressed = value
+	cb.focus_mode = Control.FOCUS_NONE
+	cb.add_theme_color_override("font_color", Color(1, 1, 1))
+	cb.toggled.connect(on_changed)
+	_dev_content.add_child(cb)
 
 func _dev_card_row(card: Dictionary, count: int) -> void:
 	var hbox := HBoxContainer.new()
