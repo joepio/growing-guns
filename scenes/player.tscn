@@ -137,12 +137,12 @@ visible = false
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.14, 0.03, -0.43)
 
 [node name="StrokeTop" type="MeshInstance3D" parent="BodyModel/BlobRig/HeadBlob/HitEyeLeft"]
-transform = Transform3D(0.24, -0.14, 0, 0.12, 0.22, 0, 0, 0, 0.18, 0, 0.04, 0)
+transform = Transform3D(0.15, -0.09, 0, 0.075, 0.14, 0, 0, 0, 0.12, 0, 0.025, 0)
 mesh = SubResource("CapsuleMesh_Caret")
 material_override = SubResource("Material_Pupil")
 
 [node name="StrokeBottom" type="MeshInstance3D" parent="BodyModel/BlobRig/HeadBlob/HitEyeLeft"]
-transform = Transform3D(0.24, 0.14, 0, -0.12, 0.22, 0, 0, 0, 0.18, 0, -0.04, 0)
+transform = Transform3D(0.15, 0.09, 0, -0.075, 0.14, 0, 0, 0, 0.12, 0, -0.025, 0)
 mesh = SubResource("CapsuleMesh_Caret")
 material_override = SubResource("Material_Pupil")
 
@@ -151,12 +151,12 @@ visible = false
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.14, 0.03, -0.43)
 
 [node name="StrokeTop" type="MeshInstance3D" parent="BodyModel/BlobRig/HeadBlob/HitEyeRight"]
-transform = Transform3D(-0.24, -0.14, 0, 0.12, -0.22, 0, 0, 0, 0.18, 0, 0.04, 0)
+transform = Transform3D(-0.15, -0.09, 0, 0.075, -0.14, 0, 0, 0, 0.12, 0, 0.025, 0)
 mesh = SubResource("CapsuleMesh_Caret")
 material_override = SubResource("Material_Pupil")
 
 [node name="StrokeBottom" type="MeshInstance3D" parent="BodyModel/BlobRig/HeadBlob/HitEyeRight"]
-transform = Transform3D(-0.24, 0.14, 0, -0.12, -0.22, 0, 0, 0, 0.18, 0, -0.04, 0)
+transform = Transform3D(-0.15, 0.09, 0, -0.075, -0.14, 0, 0, 0, 0.12, 0, -0.025, 0)
 mesh = SubResource("CapsuleMesh_Caret")
 material_override = SubResource("Material_Pupil")
 

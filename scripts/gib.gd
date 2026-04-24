@@ -18,6 +18,7 @@ const _QUANTIZE := 0.0001
 static var _cache: Dictionary = {}
 static var _cache_mutex: Mutex = Mutex.new()
 static var _flesh_material_cached: StandardMaterial3D = null
+static var _blood_splat_material_cached: StandardMaterial3D = null
 
 # Kick off async bakes for every MeshInstance3D under `root`. Idempotent;
 # subsequent calls with the same mesh/chunk_count are no-ops.
@@ -85,6 +86,8 @@ static func explode(
 	burst_strength: float = 3.0,
 	chunk_count: int = 4,
 	lifetime: float = 12.0,
+	force_origin_global: Vector3 = Vector3.INF,
+	impact_blood_strength: float = 0.0,
 ) -> Array[RigidBody3D]:
 	var out: Array[RigidBody3D] = []
 	if mesh == null or scene == null:
@@ -109,7 +112,7 @@ static func explode(
 		var rb: RigidBody3D = _instantiate_chunk(
 			chunk, chunk_material, flesh_material,
 			source_transform, body_basis, scene,
-			base_velocity, burst_strength,
+			base_velocity, burst_strength, force_origin_global, impact_blood_strength,
 		)
 		if rb == null:
 			continue
@@ -128,6 +131,8 @@ static func _instantiate_chunk(
 	scene: Node,
 	base_velocity: Vector3,
 	burst_strength: float,
+	force_origin_global: Vector3,
+	impact_blood_strength: float,
 ) -> RigidBody3D:
 	var verts: PackedVector3Array = chunk["verts"]
 	if verts.is_empty():
@@ -163,6 +168,8 @@ static func _instantiate_chunk(
 	rb.collision_layer = 0
 	rb.collision_mask = 1
 	rb.gravity_scale = 1.0
+	rb.contact_monitor = true
+	rb.max_contacts_reported = 1
 	scene.add_child(rb)
 	rb.global_transform = Transform3D(body_basis, source_transform * centroid_src)
 
@@ -182,11 +189,19 @@ static func _instantiate_chunk(
 	cs.position = chunk_aabb.position + chunk_aabb.size * 0.5
 	rb.add_child(cs)
 
-	# Outward burst from the source's origin — chunks fan apart naturally.
-	var burst_dir_src: Vector3 = centroid_src
-	if burst_dir_src.length_squared() < 0.0001:
-		burst_dir_src = Vector3(randf_range(-1.0, 1.0), 1.0, randf_range(-1.0, 1.0))
-	var burst_dir: Vector3 = (body_basis * burst_dir_src).normalized()
+	# If a force origin is provided (bullet hit point / explosion center),
+	# burst away from that point; otherwise fall back to body-center fan-out.
+	var centroid_global: Vector3 = source_transform * centroid_src
+	var burst_dir: Vector3
+	if force_origin_global != Vector3.INF:
+		burst_dir = centroid_global - force_origin_global
+		if burst_dir.length_squared() < 0.0001:
+			burst_dir = body_basis * centroid_src
+	else:
+		burst_dir = body_basis * centroid_src
+	if burst_dir.length_squared() < 0.0001:
+		burst_dir = Vector3(randf_range(-1.0, 1.0), 1.0, randf_range(-1.0, 1.0))
+	burst_dir = burst_dir.normalized()
 	rb.linear_velocity = base_velocity \
 		+ burst_dir * burst_strength \
 		+ Vector3.UP * burst_strength * 0.2
@@ -195,7 +210,77 @@ static func _instantiate_chunk(
 		randf_range(-10.0, 10.0),
 		randf_range(-10.0, 10.0),
 	)
+	rb.body_entered.connect(func(_body: Node) -> void:
+		_on_chunk_body_entered(rb, scene, impact_blood_strength)
+	)
 	return rb
+
+static func _on_chunk_body_entered(rb: RigidBody3D, scene: Node, strength: float) -> void:
+	if rb == null or scene == null or not is_instance_valid(rb):
+		return
+	if rb.get_meta("blood_splatted", false):
+		return
+	rb.set_meta("blood_splatted", true)
+	if strength <= 0.01:
+		return
+	var vel: Vector3 = rb.linear_velocity
+	if vel.length_squared() < 0.01:
+		vel = -rb.global_transform.basis.z
+	var dir := vel.normalized()
+	var start := rb.global_position + dir * 0.18
+	var finish := rb.global_position - dir * 0.45
+	var q := PhysicsRayQueryParameters3D.create(start, finish)
+	q.collision_mask = 1
+	var hit := rb.get_world_3d().direct_space_state.intersect_ray(q)
+	if hit.is_empty():
+		return
+	_spawn_blood_splat(scene, hit.position, hit.normal, dir, strength)
+
+static func _spawn_blood_splat(
+	scene: Node,
+	pos: Vector3,
+	normal: Vector3,
+	travel_dir: Vector3,
+	strength: float
+) -> void:
+	var splat := MeshInstance3D.new()
+	var mesh := QuadMesh.new()
+	var size := randf_range(0.16, 0.28) * lerpf(0.9, 2.1, clampf(strength, 0.0, 1.0))
+	mesh.size = Vector2(size, size * randf_range(0.6, 1.15))
+	splat.mesh = mesh
+	splat.material_override = _get_blood_splat_material()
+	scene.add_child(splat)
+
+	var up := normal.normalized() if normal.length_squared() > 0.001 else Vector3.UP
+	var tangent := travel_dir.slide(up).normalized()
+	if tangent.length_squared() < 0.001:
+		tangent = up.cross(Vector3.RIGHT).normalized()
+		if tangent.length_squared() < 0.001:
+			tangent = Vector3.FORWARD
+	splat.global_position = pos + up * 0.025
+	splat.look_at(splat.global_position + up, tangent)
+	splat.rotate_object_local(Vector3.FORWARD, randf_range(-0.55, 0.55))
+
+	var mat := splat.material_override.duplicate() as StandardMaterial3D
+	var alpha := randf_range(0.5, 0.82) * lerpf(0.8, 1.2, clampf(strength, 0.0, 1.0))
+	mat.albedo_color = Color(randf_range(0.28, 0.42), 0.015, 0.015, clampf(alpha, 0.0, 0.92))
+	splat.material_override = mat
+
+	var tw := splat.create_tween().set_parallel(true)
+	tw.tween_property(splat, "scale", Vector3.ONE * randf_range(1.05, 1.3), 0.22)\
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	tw.tween_property(mat, "albedo_color", Color(mat.albedo_color.r, 0.015, 0.015, mat.albedo_color.a * 0.92), 0.22)
+
+static func _get_blood_splat_material() -> StandardMaterial3D:
+	if _blood_splat_material_cached:
+		return _blood_splat_material_cached
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mat.billboard_mode = BaseMaterial3D.BILLBOARD_DISABLED
+	_blood_splat_material_cached = mat
+	return mat
 
 # -------------------- baking (thread-safe) --------------------
 

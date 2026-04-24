@@ -678,9 +678,6 @@ func _apply_bullet_splash(pos: Vector3, radius: float, damage: float, shooter_id
 		if p.player_id == shooter_id:
 			dmg = int(dmg * 0.5)
 
-		if dmg > 0:
-			p.take_damage.rpc_id(p.get_multiplayer_authority(), dmg, shooter_id)
-
 		# Explosion Knockback
 		var shooter := get_parent().get_node_or_null(str(shooter_id))
 		var kb_mult: float = 24.0 # Doubled base for explosions
@@ -694,6 +691,17 @@ func _apply_bullet_splash(pos: Vector3, radius: float, damage: float, shooter_id
 
 		# Violent outward push + upward lift, using linear falloff for physics feel
 		var impulse: Vector3 = (dir * kb_mult * weapon_kb * falloff) + (Vector3.UP * kb_mult * 0.8 * falloff)
+		if dmg > 0:
+			p.take_damage.rpc_id(
+				p.get_multiplayer_authority(),
+				dmg,
+				shooter_id,
+				pos,
+				dir,
+				impulse.length(),
+				radius,
+				falloff
+			)
 		p.apply_knockback.rpc_id(p.get_multiplayer_authority(), impulse)
 
 func _player_from_hit_collider(collider: Node) -> Node:
@@ -723,6 +731,9 @@ func _spawn_bullet_blast(pos: Vector3, radius: float, color: Color) -> void:
 	var scene: Node = get_tree().current_scene
 	if scene and scene.has_method("trigger_explosion_sidechain"):
 		scene.trigger_explosion_sidechain(pos, radius, clampf(radius / 5.0, 0.35, 1.0))
+	var local_player: Node = scene.get("local_player") if scene else null
+	if local_player and is_instance_valid(local_player) and local_player.has_method("apply_explosion_view_punch"):
+		local_player.apply_explosion_view_punch(pos, radius, clampf(radius / 5.0, 0.45, 1.0))
 	var r_norm: float = clampf(radius / 6.0, 0.4, 2.8)
 	var expand_time: float = clampf(0.1 + radius * 0.012, 0.12, 0.24)
 	_spawn_heat_distortion(scene, pos, radius, expand_time, clampf(radius * 0.012, 0.025, 0.06))
@@ -813,6 +824,28 @@ func _spawn_bullet_blast(pos: Vector3, radius: float, color: Color) -> void:
 	# 4) Big blasts play the full explosion SFX; smaller impacts stay visual.
 	if radius >= 3.5:
 		SFX.explosion(pos)
+
+func apply_explosion_view_punch(pos: Vector3, radius: float, peak: float = 1.0) -> void:
+	if not is_multiplayer_authority() or camera == null:
+		return
+	var to_player := global_position - pos
+	var dist: float = to_player.length()
+	var effect_radius := maxf(radius * 2.0, radius + 1.0)
+	if dist >= effect_radius:
+		return
+	var falloff: float = clampf(1.0 - dist / effect_radius, 0.0, 1.0)
+	var strength: float = falloff * peak
+	if strength <= 0.0:
+		return
+	var away_dir := to_player.normalized() if dist > 0.001 else Vector3.UP
+	var local_dir: Vector3 = global_transform.basis.inverse() * away_dir
+	_view_punch_pos += local_dir * (0.08 + 0.12 * strength)
+	_view_punch_rot += Vector3(
+		-local_dir.y * (0.04 + 0.06 * strength),
+		local_dir.x * (0.015 + 0.03 * strength),
+		-local_dir.x * (0.02 + 0.04 * strength)
+	)
+	shake_amt = max(shake_amt, 0.012 + 0.05 * strength)
 
 func _spawn_heat_distortion(scene: Node, pos: Vector3, radius: float, duration: float, strength: float) -> void:
 	if scene == null:
@@ -1079,30 +1112,161 @@ func _spawn_blood(pos: Vector3, dir: Vector3, dmg_ratio: float) -> void:
 		tw.tween_property(mat, "albedo_color", Color(shade, 0.03, 0.02, 0.0), dur * 1.1)
 		tw.chain().tween_callback(drop.queue_free)
 
+func _spawn_gib_mist(
+	pos: Vector3,
+	dir: Vector3,
+	intensity: float,
+	blast_radius: float = 0.0,
+	blast_severity: float = 0.0
+) -> void:
+	var scene := get_tree().current_scene
+	if scene == null:
+		return
+	var dir_n := dir.normalized() if dir.length_squared() > 0.001 else Vector3.UP
+	var chaos := blast_severity * clampf(intensity / maxf(Weapon.BASE_KNOCKBACK, 0.001), 0.6, 2.4)
+	var count: int = clampi(int(round(8.0 + intensity * 2.5 + blast_radius * 0.25 + chaos * 10.0)), 8, 28)
+	var spread: float = 0.45 + blast_radius * 0.03 + chaos * 0.14
+	var base_travel: float = 0.9 + intensity * 0.22 + blast_radius * 0.05 + chaos * 0.9
+	var base_size: float = 0.12 + intensity * 0.018 + chaos * 0.04
+
+	for i in count:
+		var puff := MeshInstance3D.new()
+		var mesh := SphereMesh.new()
+		mesh.radius = randf_range(base_size * 0.6, base_size * 1.2)
+		mesh.height = mesh.radius * 2.0
+		mesh.radial_segments = 6
+		mesh.rings = 4
+		puff.mesh = mesh
+		var mat := StandardMaterial3D.new()
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		var shade := randf_range(0.28, 0.52)
+		mat.albedo_color = Color(shade, 0.02, 0.02, randf_range(0.2, 0.42))
+		mat.emission_enabled = true
+		mat.emission = Color(0.4, 0.02, 0.02)
+		mat.emission_energy_multiplier = 0.1
+		puff.material_override = mat
+		puff.position = pos + Vector3(
+			randf_range(-0.08, 0.08),
+			randf_range(-0.08, 0.08),
+			randf_range(-0.08, 0.08)
+		)
+		scene.add_child(puff)
+
+		var scatter := Vector3(
+			randf_range(-spread, spread),
+			randf_range(-0.22, 0.45),
+			randf_range(-spread, spread)
+		)
+		var travel_dir := (dir_n + scatter).normalized()
+		var end := puff.position + travel_dir * randf_range(base_travel * 0.65, base_travel * 1.2)
+		var dur := randf_range(0.35, 0.68)
+		var tw := puff.create_tween().set_parallel(true)
+		tw.tween_property(puff, "position", end, dur)\
+			.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+		tw.tween_property(puff, "scale", Vector3.ONE * randf_range(1.8, 2.8), dur)\
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+		tw.tween_property(mat, "albedo_color", Color(shade, 0.02, 0.02, 0.0), dur)\
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+		tw.chain().tween_callback(puff.queue_free)
+
+func _spawn_blast_blood_splash(pos: Vector3, dir: Vector3, severity: float) -> void:
+	if severity <= 0.08:
+		return
+	var scene := get_tree().current_scene
+	if scene == null:
+		return
+	var dir_n := dir.normalized() if dir.length_squared() > 0.001 else Vector3.UP
+	var count := clampi(int(round(5.0 + severity * 10.0)), 5, 14)
+	for i in count:
+		var splash := MeshInstance3D.new()
+		var mesh := SphereMesh.new()
+		mesh.radius = randf_range(0.06, 0.12) * lerpf(0.9, 1.5, severity)
+		mesh.height = mesh.radius * 2.0
+		mesh.radial_segments = 5
+		mesh.rings = 3
+		splash.mesh = mesh
+		var mat := StandardMaterial3D.new()
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		mat.albedo_color = Color(randf_range(0.3, 0.46), 0.02, 0.02, randf_range(0.18, 0.34))
+		splash.material_override = mat
+		splash.position = pos
+		scene.add_child(splash)
+		var scatter := Vector3(
+			randf_range(-0.9, 0.9),
+			randf_range(-0.25, 0.85),
+			randf_range(-0.9, 0.9)
+		)
+		var end := pos + (dir_n + scatter).normalized() * randf_range(0.6, 1.5) * lerpf(0.8, 1.8, severity)
+		var dur := randf_range(0.22, 0.42)
+		var tw := splash.create_tween().set_parallel(true)
+		tw.tween_property(splash, "position", end, dur)\
+			.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+		tw.tween_property(splash, "scale", Vector3.ONE * randf_range(1.2, 1.9), dur)\
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+		tw.tween_property(mat, "albedo_color", Color(mat.albedo_color.r, 0.02, 0.02, 0.0), dur)\
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+		tw.chain().tween_callback(splash.queue_free)
+
 # -------------------- RAGDOLL --------------------
 
 @rpc("any_peer", "call_local", "reliable")
-func _ragdoll(push_dir: Vector3) -> void:
+func _ragdoll(
+	push_dir: Vector3,
+	force_origin: Vector3 = Vector3.INF,
+	gib_force: float = 0.0,
+	blast_radius: float = 0.0,
+	blast_severity: float = 0.0
+) -> void:
 	# Hide the standing body and scatter a matching set of rigid chunks.
 	# Every peer simulates its own — cosmetic desync is fine.
 	body_model.visible = false
-	_spawn_ragdoll(push_dir)
+	_spawn_ragdoll(push_dir, force_origin, gib_force, blast_radius, blast_severity)
 
-func _spawn_ragdoll(push_dir: Vector3) -> void:
+func _spawn_ragdoll(
+	push_dir: Vector3,
+	force_origin: Vector3 = Vector3.INF,
+	gib_force: float = 0.0,
+	blast_radius: float = 0.0,
+	blast_severity: float = 0.0
+) -> void:
 	# Voronoi-split the blob's primitive meshes into chunks that fly apart.
 	# body_model is hidden first so the user only reads the flying debris.
 	# Chunks collide with world only — players and bullets ignore the corpse.
 	var scene := get_tree().current_scene
-	var kb_mag: float = clampf(push_dir.length(), 1.0, 6.0)
+	var inferred_force: float = push_dir.length()
+	if gib_force > 0.0:
+		inferred_force = maxf(inferred_force, gib_force)
+	var kb_mag: float = clampf(sqrt(maxf(inferred_force, 1.0)), 1.0, 3.2)
 	var dir_n: Vector3 = push_dir.normalized() if push_dir.length_squared() > 0.01 else Vector3.UP
-	var base_vel: Vector3 = dir_n * randf_range(4.0, 8.0) * kb_mag \
-		+ Vector3.UP * randf_range(2.0, 5.0) * sqrt(kb_mag)
+	var chaos := 0.0
+	if blast_radius > 0.0:
+		chaos = clampf(blast_severity * clampf(gib_force / maxf(Weapon.BASE_KNOCKBACK, 0.001), 0.8, 2.8), 0.0, 2.8)
+	var blast_lift := 0.2
+	if blast_radius > 0.0:
+		blast_lift = 0.28 + chaos * 0.12
+	var base_vel: Vector3 = dir_n * randf_range(2.6, 4.8) * kb_mag * (1.0 + chaos * 0.4) \
+		+ Vector3.UP * randf_range(1.2, 2.8) * kb_mag * (1.0 + blast_lift)
+	var burst_strength: float = 1.8 * kb_mag
+	if blast_radius > 0.0:
+		burst_strength *= 1.0 + clampf(blast_radius / 12.0, 0.0, 0.6) + chaos * 0.65
 
 	var meshes: Array[MeshInstance3D] = []
 	if body_model:
 		_collect_meshes(body_model, meshes)
 	if meshes.is_empty():
 		return
+	var mist_origin := force_origin if force_origin != Vector3.INF else global_position + Vector3.UP * 0.4
+	_spawn_gib_mist(mist_origin, dir_n, kb_mag, blast_radius, blast_severity)
+	if blast_radius > 0.0:
+		_spawn_blast_blood_splash(mist_origin, dir_n, blast_severity)
+	var chunk_count: int = 5
+	if blast_radius > 0.0:
+		chunk_count = clampi(int(round(5.0 + chaos * 2.0)), 5, 8)
+	var impact_blood_strength := clampf(0.18 + kb_mag * 0.12 + chaos * 0.22, 0.15, 1.0)
 
 	# One gib call per visible body surface. The blob body is just a few
 	# primitives, but this loop keeps the effect resilient if the body changes.
@@ -1116,9 +1280,11 @@ func _spawn_ragdoll(push_dir: Vector3) -> void:
 			scene,
 			src.material_override,
 			base_vel + Vector3(randf_range(-1.5, 1.5), 0, randf_range(-1.5, 1.5)),
-			3.5 * sqrt(kb_mag),
-			10,
+			burst_strength,
+			chunk_count,
 			14.0,
+			force_origin,
+			impact_blood_strength,
 		)
 		if chunks.is_empty():
 			continue
@@ -1481,7 +1647,16 @@ func _melee_swung(origin: Vector3, dir: Vector3, attacker_id: int) -> void:
 	var attacker_fwd: Vector3 = dir
 	var backstab: bool = v_fwd.dot(attacker_fwd) > 0.4
 	var dmg: int = MELEE_BACKSTAB if backstab else w.get_melee_damage()
-	target.take_damage.rpc_id(target.get_multiplayer_authority(), dmg, attacker_id)
+	var melee_force := w.knockback if w.knockback > 0.0 else w.get_melee_damage() * 0.06
+	target.take_damage.rpc_id(
+		target.get_multiplayer_authority(),
+		dmg,
+		attacker_id,
+		result.position,
+		dir.normalized(),
+		melee_force,
+		0.0
+	)
 	if w.knockback > 0.0:
 		var melee_impulse: Vector3 = dir.normalized() * w.knockback + Vector3.UP * w.knockback * 0.25
 		target.apply_knockback.rpc_id(target.get_multiplayer_authority(), melee_impulse)
@@ -1563,12 +1738,28 @@ func _spawn_slice_trail(origin: Vector3, dir: Vector3, m_scale: float = 1.0) -> 
 # -------------------- DAMAGE / DEATH --------------------
 
 @rpc("any_peer", "call_local", "reliable")
-func take_damage(amount: int, from_id: int) -> void:
+func take_damage(
+	amount: int,
+	from_id: int,
+	force_origin: Vector3 = Vector3.INF,
+	hit_dir: Vector3 = Vector3.ZERO,
+	gib_force: float = 0.0,
+	blast_radius: float = 0.0,
+	blast_severity: float = 0.0
+) -> void:
 	if not is_multiplayer_authority():
 		return
-	_apply_damage(amount, from_id)
+	_apply_damage(amount, from_id, force_origin, hit_dir, gib_force, blast_radius, blast_severity)
 
-func _apply_damage(amount: int, from_id: int) -> void:
+func _apply_damage(
+	amount: int,
+	from_id: int,
+	force_origin: Vector3 = Vector3.INF,
+	hit_dir: Vector3 = Vector3.ZERO,
+	gib_force: float = 0.0,
+	blast_radius: float = 0.0,
+	blast_severity: float = 0.0
+) -> void:
 	if ghost_mode or frozen or health <= 0:
 		return
 	if shielded:
@@ -1582,9 +1773,9 @@ func _apply_damage(amount: int, from_id: int) -> void:
 		# View punch: shift camera in the direction of the hit
 		var attacker := get_parent().get_node_or_null(str(from_id))
 		if attacker and is_multiplayer_authority():
-			var hit_dir: Vector3 = (attacker.global_position - global_position).normalized()
+			var attacker_hit_dir: Vector3 = (attacker.global_position - global_position).normalized()
 			# Transform world hit dir to local space
-			var local_dir: Vector3 = global_transform.basis.inverse() * hit_dir
+			var local_dir: Vector3 = global_transform.basis.inverse() * attacker_hit_dir
 			# Punch camera away from hit
 			_view_punch_pos = -local_dir * 0.15
 			# Add some random rotational kick
@@ -1595,16 +1786,23 @@ func _apply_damage(amount: int, from_id: int) -> void:
 	if health <= 0:
 		_play_death_sound.rpc(global_position)
 		var push: Vector3 = Vector3.UP
+		var ctx_force: float = maxf(gib_force, 0.0)
+		if hit_dir.length_squared() > 0.001:
+			push = hit_dir.normalized()
+			if push.y < 0.15:
+				push.y = 0.15
 		var killer := get_parent().get_node_or_null(str(from_id))
-		if killer and killer is Node3D:
+		if killer and killer is Node3D and hit_dir.length_squared() <= 0.001:
 			push = (global_position - killer.global_position).normalized() + Vector3.UP * 0.6
 			# Scale ragdoll impulse by the killer's knockback stat — HAYMAKER
 			# launches the corpse across the map, default push just topples.
 			var kb: float = Weapon.BASE_KNOCKBACK
 			if killer.get("weapon") != null:
 				kb = killer.weapon.knockback
-			push *= clampf(kb / Weapon.BASE_KNOCKBACK, 1.0, 6.0)
-		_ragdoll.rpc(push)
+			ctx_force = maxf(ctx_force, kb)
+		var kb_scale := clampf((ctx_force if ctx_force > 0.0 else push.length()) / Weapon.BASE_KNOCKBACK, 1.0, 8.0)
+		push = push.normalized() * kb_scale + Vector3.UP * (0.25 + 0.12 * kb_scale)
+		_ragdoll.rpc(push, force_origin, ctx_force, blast_radius, blast_severity)
 		died.emit(from_id)
 		_report_death.rpc_id(1, from_id)
 

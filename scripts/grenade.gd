@@ -19,6 +19,7 @@ var _exploded := false
 
 func _ready() -> void:
 	set_multiplayer_authority(1)
+	add_to_group("projectiles")
 	if not multiplayer.is_server():
 		freeze = true
 		freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
@@ -88,9 +89,6 @@ func _explode() -> void:
 		if p.player_id == shooter_id:
 			dmg = int(dmg * 0.4)
 
-		if dmg > 0:
-			p.take_damage.rpc_id(p.get_multiplayer_authority(), dmg, shooter_id)
-
 		# Grenade Knockback
 		var kb_force: float = 18.0 # Stronger base for heavy grenades
 		var dir: Vector3 = (p.global_position - global_position)
@@ -100,6 +98,17 @@ func _explode() -> void:
 			dir = Vector3.UP
 
 		var impulse: Vector3 = (dir * kb_force * falloff) + (Vector3.UP * kb_force * 0.4 * falloff)
+		if dmg > 0:
+			p.take_damage.rpc_id(
+				p.get_multiplayer_authority(),
+				dmg,
+				shooter_id,
+				global_position,
+				dir,
+				impulse.length(),
+				RADIUS,
+				falloff
+			)
 		p.apply_knockback.rpc_id(p.get_multiplayer_authority(), impulse)
 	_do_vfx.rpc()
 
@@ -192,11 +201,8 @@ func _do_vfx() -> void:
 
 	# --- Local camera shake with distance falloff
 	var lp: Node = scene.get("local_player")
-	if lp and is_instance_valid(lp):
-		var dist: float = pos.distance_to(lp.global_position)
-		if dist < SHAKE_RADIUS:
-			var strength: float = SHAKE_STRENGTH * (1.0 - dist / SHAKE_RADIUS)
-			lp.shake_amt = max(lp.shake_amt, strength)
+	if lp and is_instance_valid(lp) and lp.has_method("apply_explosion_view_punch"):
+		lp.apply_explosion_view_punch(pos, RADIUS, 1.25)
 
 	queue_free()
 

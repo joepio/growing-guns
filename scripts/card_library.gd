@@ -124,18 +124,30 @@ static func all() -> Array:
 				w.bullet_scale *= 1.35
 				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.45, 0.08), 0.45),
 		},
-		{
-			"id": "precision",
-			"name": "PRECISION",
-			"desc": "",
-			"color": Color(0.9, 0.9, 1.0),
-			"apply": func(w: Weapon) -> void:
-				w.headshot_mult *= 2.0,
-		},
-		{
-				"id": "heavy_rounds",
-				"name": "HEAVY ROUNDS",
-				"desc": "Powerful but slow projectiles",
+			{
+				"id": "precision",
+				"name": "PRECISION",
+				"desc": "",
+				"color": Color(0.9, 0.9, 1.0),
+				"apply": func(w: Weapon) -> void:
+					w.headshot_mult *= 2.0,
+			},
+			{
+				"id": "hitscan",
+				"name": "HITSCAN",
+				"desc": "Extreme muzzle velocity and near-perfect accuracy",
+				"rarity": "rare",
+				"color": Color(0.7, 0.95, 1.0),
+				"apply": func(w: Weapon) -> void:
+					w.bullet_speed_mult *= 4.0
+					w.spread *= 0.1
+					w.bullet_scale *= 0.9
+					w.bullet_color = w.bullet_color.lerp(Color(0.72, 0.96, 1.0), 0.55),
+			},
+			{
+					"id": "heavy_rounds",
+					"name": "HEAVY ROUNDS",
+					"desc": "Powerful but slow projectiles",
 				"rarity": "rare",
 				"color": Color(0.7, 0.4, 0.2),
 				"apply": func(w: Weapon) -> void:
