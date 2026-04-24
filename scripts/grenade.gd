@@ -69,6 +69,8 @@ func detonate() -> void:
 
 func _explode() -> void:
 	_exploded = true
+	var players_root: Node = get_tree().current_scene.get_node_or_null("Players")
+	var shooter_node: Node = players_root.get_node_or_null(str(shooter_id)) if players_root else null
 	for p in get_tree().get_nodes_in_group("players"):
 		if not is_instance_valid(p):
 			continue
@@ -109,6 +111,8 @@ func _explode() -> void:
 				RADIUS,
 				falloff
 			)
+			if p.player_id != shooter_id and shooter_node and is_instance_valid(shooter_node):
+				shooter_node._hit_confirm.rpc_id(shooter_node.get_multiplayer_authority(), false, dmg, p.global_position + Vector3.UP * 0.6)
 		p.apply_knockback.rpc_id(p.get_multiplayer_authority(), impulse)
 	_do_vfx.rpc()
 

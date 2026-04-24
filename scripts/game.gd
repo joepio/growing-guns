@@ -1757,12 +1757,44 @@ func _broadcast_scores(scores: Dictionary) -> void:
 	round_wins = scores
 	_update_scoreboard()
 
-func show_hitmarker(kind: String, dmg: int = 0) -> void:
+func show_hitmarker(kind: String, dmg: int = 0, world_pos: Vector3 = Vector3.INF) -> void:
 	hitmarker.flash(kind)
 	if kind == "kill":
 		SFX.kill_confirm()
 	else:
 		SFX.hitmarker(kind, dmg)
+	if dmg > 0 and world_pos != Vector3.INF:
+		_show_hit_damage_number(dmg, kind, world_pos)
+
+func _show_hit_damage_number(dmg: int, kind: String, world_pos: Vector3) -> void:
+	# Floating world-space damage number anchored above the hit point.
+	# Each call spawns a fresh Label3D so simultaneous hits stack rather than
+	# overwriting each other; a small random offset keeps them from piling up.
+	var label := Label3D.new()
+	label.text = str(dmg)
+	label.font_size = 64
+	label.outline_size = 16
+	label.outline_modulate = Color(0, 0, 0, 1)
+	label.modulate = Color(1.0, 0.55, 0.45) if kind == "head" else Color(1.0, 0.95, 0.75)
+	label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	label.no_depth_test = true                  # always visible — gameplay info
+	label.fixed_size = false
+	label.pixel_size = 0.004
+	add_child(label)
+	var jitter := Vector3(
+		randf_range(-0.35, 0.35),
+		randf_range(0.05, 0.35),
+		randf_range(-0.35, 0.35),
+	)
+	var start_pos: Vector3 = world_pos + Vector3.UP * 0.4 + jitter
+	label.global_position = start_pos
+	var end_pos: Vector3 = start_pos + Vector3.UP * 0.9
+	var tw := label.create_tween().set_parallel(true)
+	tw.tween_property(label, "global_position", end_pos, 1.0)\
+		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	tw.tween_property(label, "modulate:a", 0.0, 0.55)\
+		.set_delay(0.45).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
+	tw.chain().tween_callback(label.queue_free)
 
 func is_any_modal_open() -> bool:
 	# Used by Player._unhandled_input to avoid recapturing the mouse when a
