@@ -7,8 +7,27 @@ enum State { WAITING, PLAYING, PICKING_CARD, MATCH_OVER }
 const CARDS_PER_PICK := 3
 const SPAWN_CAPSULE_RADIUS := 0.4
 const SPAWN_CAPSULE_HEIGHT := 1.8
-const BOT_ID := 9999
+const BOT_ID_BASE := 9000
+const BOT_ID_LIMIT := 9100  # IDs 9000..9099 are reserved for bots
 const BOT_NAME := "BOT"
+
+func _is_bot_id(pid: int) -> bool:
+	return pid >= BOT_ID_BASE and pid < BOT_ID_LIMIT
+
+func _bot_ids() -> Array[int]:
+	var out: Array[int] = []
+	for raw_id in NetworkManager.players:
+		var pid := int(raw_id)
+		if _is_bot_id(pid):
+			out.append(pid)
+	return out
+
+func _human_count() -> int:
+	var n: int = 0
+	for raw_id in NetworkManager.players:
+		if not _is_bot_id(int(raw_id)):
+			n += 1
+	return n
 const SPAWN_MIN_SPACING := 8.0   # meters — two fresh spawns must be at least this far apart
 
 var rounds_to_win: int = 10
@@ -229,15 +248,16 @@ func _ready() -> void:
 			_spawn_player(pid, NetworkManager.players[pid])
 
 		var bot_requested: bool = NetworkManager.has_meta("spawn_bot_on_start") and NetworkManager.get_meta("spawn_bot_on_start")
+		var requested_count: int = int(NetworkManager.get_meta("bot_count_on_start", 1)) if bot_requested else 0
 		if bot_requested:
-			_maybe_spawn_bot()
+			_spawn_bots(requested_count)
 
 		_maybe_start_match()
 
 		# SP fallback: if nobody else has joined yet, and no bot was specifically requested,
 		# we still give a bot to fight as a default "sandbox" experience.
 		if not bot_requested:
-			_maybe_spawn_bot.call_deferred()
+			_spawn_bots.call_deferred(1)
 	else:
 		# Instantly show the client state — makes it obvious when you thought
 		# you were solo but actually joined an orphan on port 27015.
@@ -407,8 +427,8 @@ func _request_spawn(pname: String) -> void:
 	var sender := multiplayer.get_remote_sender_id()
 	if sender == 0:
 		sender = 1
-	# A real peer is joining — boot the SP bot if one is around.
-	_despawn_bot_if_any()
+	# A real peer is joining — boot any SP bots that are around.
+	_despawn_all_bots()
 	NetworkManager.players[sender] = pname
 	if not round_wins.has(sender):
 		round_wins[sender] = 0
@@ -491,34 +511,42 @@ func _despawn(id: int) -> void:
 
 # -------------------- SINGLE-PLAYER BOT --------------------
 
-func _maybe_spawn_bot() -> void:
-	if not multiplayer.is_server():
+func _spawn_bots(count: int) -> void:
+	if not multiplayer.is_server() or count <= 0:
 		return
-	if NetworkManager.players.size() >= 2:
-		return
-	if players_root.has_node(str(BOT_ID)):
-		return
-	NetworkManager.players[BOT_ID] = BOT_NAME
-	round_wins[BOT_ID] = 0
-	NetworkManager.player_list_changed.emit()
-	_do_spawn.rpc(BOT_ID, BOT_NAME, _random_spawn(_current_player_positions()), true)
-	_broadcast_scores.rpc(round_wins)
-	_maybe_start_match()
+	var spawned_any := false
+	for i in count:
+		var pid: int = BOT_ID_BASE + i
+		if pid >= BOT_ID_LIMIT:
+			break
+		if players_root.has_node(str(pid)):
+			continue
+		var bot_name: String = BOT_NAME if count == 1 else "%s_%d" % [BOT_NAME, i + 1]
+		NetworkManager.players[pid] = bot_name
+		round_wins[pid] = 0
+		_do_spawn.rpc(pid, bot_name, _random_spawn(_current_player_positions()), true)
+		spawned_any = true
+	if spawned_any:
+		NetworkManager.player_list_changed.emit()
+		_broadcast_scores.rpc(round_wins)
+		_maybe_start_match()
 
-func _despawn_bot_if_any() -> void:
-	if not players_root.has_node(str(BOT_ID)):
+func _despawn_all_bots() -> void:
+	var bot_ids := _bot_ids()
+	if bot_ids.is_empty():
 		return
-	_despawn.rpc(BOT_ID)
-	NetworkManager.players.erase(BOT_ID)
-	round_wins.erase(BOT_ID)
+	for pid in bot_ids:
+		_despawn.rpc(pid)
+		NetworkManager.players.erase(pid)
+		round_wins.erase(pid)
+		pending_pick_cards_by_player.erase(pid)
+		completed_picks.erase(pid)
+		eliminated_players.erase(pid)
 	NetworkManager.player_list_changed.emit()
 	_broadcast_scores.rpc(round_wins)
 	if state == State.PICKING_CARD:
 		_hide_card_pick.rpc()
 	_hide_rematch_overlay.rpc()
-	pending_pick_cards_by_player.erase(BOT_ID)
-	completed_picks.erase(BOT_ID)
-	eliminated_players.erase(BOT_ID)
 	state = State.WAITING
 
 # -------------------- ROUND FLOW --------------------
@@ -663,9 +691,9 @@ func _begin_card_pick_for_loser(loser_id: int) -> void:
 	pending_picker_id = loser_id
 	pending_pick_cards = cards
 	var peer := _peer_for_player(loser_id)
-	if peer != 0 and loser_id != BOT_ID:
+	if peer != 0 and not _is_bot_id(loser_id):
 		_show_card_pick.rpc_id(peer, loser_id, cards)
-	if loser_id == BOT_ID:
+	if _is_bot_id(loser_id):
 		_bot_auto_pick.call_deferred(loser_id)
 
 func _get_rarity_score_factor(pid: int) -> float:
@@ -1176,6 +1204,9 @@ func _hide_card_pick() -> void:
 	for c in pick_row.get_children():
 		c.queue_free()
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	# Card picked → no longer "freshly dead". Drop the blood overlay so
+	# the spectator/ghost view is clear.
+	show_death_effect(false)
 
 @rpc("authority", "call_local", "reliable")
 func _announce(text: String, duration: float) -> void:
@@ -1699,7 +1730,7 @@ func _server_extend_vote(player_id: int) -> void:
 	var all_voted := true
 	for pid in NetworkManager.players:
 		# Bots always effectively vote 'yes' instantly
-		if pid == BOT_ID:
+		if _is_bot_id(int(pid)):
 			continue
 		if not _extend_votes.get(pid, false):
 			all_voted = false
@@ -1825,11 +1856,7 @@ func _toggle_pause_menu() -> void:
 	if _pause_menu.visible:
 		Input.mouse_mode = Input.MOUSE_MODE_HIDDEN
 		# Pause the world if this is a solo match (local player + bots only).
-		var human_count := NetworkManager.players.size()
-		if NetworkManager.players.has(BOT_ID):
-			human_count -= 1
-
-		if human_count <= 1:
+		if _human_count() <= 1:
 			get_tree().paused = true
 	else:
 		# Unpause if we were paused.

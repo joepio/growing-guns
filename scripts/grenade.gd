@@ -74,6 +74,8 @@ func _explode() -> void:
 	for p in get_tree().get_nodes_in_group("players"):
 		if not is_instance_valid(p):
 			continue
+		if p.get("ghost_mode") == true:
+			continue
 		var dist: float = global_position.distance_to(p.global_position)
 		if dist > RADIUS:
 			continue

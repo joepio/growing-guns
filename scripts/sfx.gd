@@ -82,6 +82,26 @@ func _listener_position() -> Vector3:
 
 # -------------------- dispatch --------------------
 
+func _configure_3d_player(p: AudioStreamPlayer3D, at: Vector3) -> void:
+	# Close-up sounds stay dry on Master; farther sounds pick up the reverb bus.
+	var listener := _listener_position()
+	var is_close := listener != NO_POS and listener.distance_to(at) < DRY_RADIUS
+	p.bus = "Master" if is_close else BUS_3D
+	# unit_size = the radius within which the sound plays at its authored
+	# volume. Beyond that, INVERSE_DISTANCE drops it off slowly so distant
+	# gunfire still reads (raised from the tighter old default).
+	p.unit_size = 18.0
+	p.max_db = 0.0
+	# No max_distance: gunshots and explosions should always be audible —
+	# their low end propagates across the map even when high freqs are gone.
+	p.max_distance = 0.0
+	p.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
+	# Distance lowpass — high frequencies fall off, so distant shots/explosions
+	# sound thudded out rather than pin-sharp. -12 dB is gentler than the
+	# default -24 dB, keeping the cue audible without the harsh top end.
+	p.attenuation_filter_cutoff_hz = 3200.0
+	p.attenuation_filter_db = -12.0
+
 func _play(samples: PackedVector2Array, volume_db: float = -6.0, at: Vector3 = NO_POS) -> Node:
 	if samples.is_empty():
 		return null
@@ -103,15 +123,7 @@ func _play(samples: PackedVector2Array, volume_db: float = -6.0, at: Vector3 = N
 		var p := AudioStreamPlayer3D.new()
 		p.stream = stream
 		p.volume_db = volume_db
-		# Close-up sounds (your own gun, your own steps) stay dry on Master;
-		# farther sounds pick up the room tail on the reverb bus.
-		var listener := _listener_position()
-		var is_close := listener != NO_POS and listener.distance_to(at) < DRY_RADIUS
-		p.bus = "Master" if is_close else BUS_3D
-		p.unit_size = 10.0
-		p.max_db = 0.0                  # point-blank matches authored volume
-		p.max_distance = 120.0          # hard-clip to silence beyond this
-		p.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
+		_configure_3d_player(p, at)
 		add_child(p)
 		p.global_position = at
 		p.play()
@@ -139,13 +151,7 @@ func _play_stream(stream: AudioStream, volume_db: float = -6.0, at: Vector3 = NO
 		p.stream = stream
 		p.volume_db = volume_db
 		p.pitch_scale = pitch_scale
-		var listener := _listener_position()
-		var is_close := listener != NO_POS and listener.distance_to(at) < DRY_RADIUS
-		p.bus = "Master" if is_close else BUS_3D
-		p.unit_size = 10.0
-		p.max_db = 0.0
-		p.max_distance = 120.0
-		p.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
+		_configure_3d_player(p, at)
 		add_child(p)
 		p.global_position = at
 		p.play()
