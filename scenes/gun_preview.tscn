@@ -1,0 +1,156 @@
+[gd_scene format=3 uid="uid://bhqluwl31dsnk"]
+
+[ext_resource type="Script" uid="uid://dywb6fqqubg1e" path="res://scripts/procedural_gun.gd" id="1_gun"]
+
+[sub_resource type="ProceduralSkyMaterial" id="SkyMat"]
+sky_top_color = Color(0.18, 0.2, 0.28, 1)
+sky_horizon_color = Color(0.3, 0.3, 0.36, 1)
+ground_bottom_color = Color(0.05, 0.05, 0.07, 1)
+ground_horizon_color = Color(0.2, 0.2, 0.24, 1)
+
+[sub_resource type="Sky" id="Sky"]
+sky_material = SubResource("SkyMat")
+
+[sub_resource type="Environment" id="Env"]
+background_mode = 2
+sky = SubResource("Sky")
+ambient_light_source = 3
+ambient_light_color = Color(0.8, 0.85, 1, 1)
+ambient_light_sky_contribution = 0.6
+ambient_light_energy = 0.4
+tonemap_mode = 2
+glow_enabled = true
+glow_intensity = 0.45
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_aykqp"]
+albedo_color = Color(0.13, 0.14, 0.17, 1)
+metallic = 0.85
+roughness = 0.32
+
+[sub_resource type="BoxMesh" id="BoxMesh_542fy"]
+size = Vector3(0.1, 0.13, 0.36)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_t4im7"]
+albedo_color = Color(0.078, 0.08400001, 0.102000006, 0.6)
+metallic = 0.95
+roughness = 0.22
+
+[sub_resource type="BoxMesh" id="BoxMesh_i7f7h"]
+size = Vector3(0.08, 0.02, 0.30600002)
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_vr0tt"]
+top_radius = 0.022
+bottom_radius = 0.022
+height = 0.62292624
+radial_segments = 16
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_l83cc"]
+top_radius = 0.0341
+bottom_radius = 0.028985
+height = 0.05
+radial_segments = 16
+
+[sub_resource type="BoxMesh" id="BoxMesh_gl47o"]
+size = Vector3(0.08, 0.16, 0.06)
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_ryc77"]
+top_radius = 0.024
+bottom_radius = 0.0252
+height = 0.13
+radial_segments = 16
+
+[sub_resource type="TorusMesh" id="TorusMesh_275tl"]
+inner_radius = 0.02296
+outer_radius = 0.028
+rings = 16
+ring_segments = 8
+
+[sub_resource type="BoxMesh" id="BoxMesh_y0ocl"]
+size = Vector3(0.005, 0.04, 0.012)
+
+[sub_resource type="TorusMesh" id="TorusMesh_pj20n"]
+inner_radius = 0.0165
+outer_radius = 0.022
+rings = 16
+ring_segments = 8
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_haubs"]
+shading_mode = 0
+albedo_color = Color(0.4, 1, 0.95, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_ygvd7"]
+size = Vector3(0.012, 0.012, 0.05)
+
+[node name="GunPreview" type="Node3D" unique_id=1797829177]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=283075451]
+environment = SubResource("Env")
+
+[node name="KeyLight" type="DirectionalLight3D" parent="." unique_id=1821552346]
+transform = Transform3D(0.78, 0.42, -0.46, 0, 0.74, 0.67, 0.62, -0.52, 0.58, 0, 1.5, 0)
+light_energy = 1.2
+
+[node name="FillLight" type="DirectionalLight3D" parent="." unique_id=1943114263]
+transform = Transform3D(-0.85, 0, 0.52, 0.18, 0.93, 0.3, -0.49, 0.37, -0.79, 0, 1, 0)
+light_color = Color(0.7, 0.85, 1, 1)
+light_energy = 0.4
+
+[node name="Camera" type="Camera3D" parent="." unique_id=450683823]
+transform = Transform3D(0.92, -0.1, 0.37, 0, 0.96, 0.27, -0.39, -0.25, 0.88, 0.6, 0.32, 0.85)
+fov = 35.0
+
+[node name="Gun" type="Node3D" parent="." unique_id=1231103048]
+script = ExtResource("1_gun")
+barrel_length = 0.6229262602319304
+has_stock = false
+has_foregrip = false
+preview_apply_stats = true
+
+[node name="Receiver" type="MeshInstance3D" parent="Gun" unique_id=846905387]
+material_override = SubResource("StandardMaterial3D_aykqp")
+mesh = SubResource("BoxMesh_542fy")
+
+[node name="SightRail" type="MeshInstance3D" parent="Gun" unique_id=283663054]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.074999996, 0)
+material_override = SubResource("StandardMaterial3D_t4im7")
+mesh = SubResource("BoxMesh_i7f7h")
+
+[node name="Barrel0" type="MeshInstance3D" parent="Gun" unique_id=1465724240]
+transform = Transform3D(1, 0, 0, 0, -4.371139e-08, -1, 0, 1, -4.371139e-08, 0, 0, -0.49146312)
+material_override = SubResource("StandardMaterial3D_t4im7")
+mesh = SubResource("CylinderMesh_vr0tt")
+
+[node name="Muzzle0" type="MeshInstance3D" parent="Gun" unique_id=1933902863]
+transform = Transform3D(1, 0, 0, 0, -4.371139e-08, -1, 0, 1, -4.371139e-08, 0, 0, -0.8279263)
+material_override = SubResource("StandardMaterial3D_t4im7")
+mesh = SubResource("CylinderMesh_l83cc")
+
+[node name="Magazine" type="MeshInstance3D" parent="Gun" unique_id=2064182443]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.145, 0.04)
+material_override = SubResource("StandardMaterial3D_t4im7")
+mesh = SubResource("BoxMesh_gl47o")
+
+[node name="PistolGrip" type="MeshInstance3D" parent="Gun" unique_id=1264524908]
+transform = Transform3D(1, 0, 0, 0, 0.809017, 0.58778524, 0, -0.58778524, 0.809017, 0, -0.13, 0.115200005)
+material_override = SubResource("StandardMaterial3D_t4im7")
+mesh = SubResource("CylinderMesh_ryc77")
+
+[node name="TriggerGuard" type="MeshInstance3D" parent="Gun" unique_id=894778792]
+transform = Transform3D(-4.371139e-08, -1, 0, 1, -4.371139e-08, 0, 0, 0, 1, 0, -0.078999996, 0.0776)
+material_override = SubResource("StandardMaterial3D_t4im7")
+mesh = SubResource("TorusMesh_275tl")
+
+[node name="FrontSight" type="MeshInstance3D" parent="Gun" unique_id=1444927716]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.042, -0.7094873)
+material_override = SubResource("StandardMaterial3D_t4im7")
+mesh = SubResource("BoxMesh_y0ocl")
+
+[node name="RearSight" type="MeshInstance3D" parent="Gun" unique_id=1231845150]
+transform = Transform3D(1, 0, 0, 0, -4.371139e-08, -1, 0, 1, -4.371139e-08, 0, 0.0938, 0.115200005)
+material_override = SubResource("StandardMaterial3D_t4im7")
+mesh = SubResource("TorusMesh_pj20n")
+
+[node name="Indicator" type="MeshInstance3D" parent="Gun" unique_id=2145736022]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.056, 0, 0)
+material_override = SubResource("StandardMaterial3D_haubs")
+mesh = SubResource("BoxMesh_ygvd7")

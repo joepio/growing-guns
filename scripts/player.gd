@@ -89,6 +89,7 @@ var _third_person_gun: Node3D = null
 var _blade_rest_transform: Transform3D
 var gun_barrel: MeshInstance3D = null
 var gun_magazine: MeshInstance3D = null
+var _procedural_gun: Node3D = null
 var _ragdoll_pieces: Array[Node] = []
 
 var jumps_left := 2
@@ -143,6 +144,7 @@ var _torso_hitbox_rest_y: float = 0.12
 var _legs_hitbox_rest_y: float = -0.55
 var reload_offset: Vector3 = Vector3.ZERO
 var _reload_tween: Tween = null
+var _mag_reload_tween: Tween = null
 var _reload_audio: Node = null
 var _camera_rest_pos: Vector3
 var _landing_bump_y: float = 0.0
@@ -1506,17 +1508,51 @@ func _animate_reload(duration: float) -> void:
 		return
 	if _reload_tween and _reload_tween.is_valid():
 		_reload_tween.kill()
+	if _mag_reload_tween and _mag_reload_tween.is_valid():
+		_mag_reload_tween.kill()
 	reload_offset = Vector3.ZERO
-	var down := Vector3(0.03, -0.22, -0.03)
-	_reload_tween = create_tween()
-	# Drop gun (clip out)
-	_reload_tween.tween_method(_set_reload_offset, Vector3.ZERO, down, duration * 0.25) \
+
+	# Phased timeline (fractions of `duration`):
+	#   0.00–0.18  gun rises + tilts back
+	#   0.12–0.28  magazine drops out (overlaps with gun rise tail)
+	#   0.28–0.45  gun sways right
+	#   0.45–0.62  gun sways back to centre
+	#   0.55–0.70  magazine slides back in (overlaps end of sway)
+	#   0.70–0.92  gun lowers + levels out
+	var gun_up := Vector3(0.0, 0.14, -0.02)
+	var gun_up_right := gun_up + Vector3(0.06, 0.0, 0.0)
+	var tilt_rad: float = deg_to_rad(22.0)
+
+	_reload_tween = create_tween().set_parallel(true)
+	# Rise + tilt.
+	_reload_tween.tween_method(_set_reload_offset, Vector3.ZERO, gun_up, duration * 0.18) \
 		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
-	# Hold at bottom (clip swap)
-	_reload_tween.tween_interval(duration * 0.45)
-	# Bring it back up (rack)
-	_reload_tween.tween_method(_set_reload_offset, down, Vector3.ZERO, duration * 0.30) \
-		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
+	_reload_tween.tween_property(muzzle, "rotation:x", tilt_rad, duration * 0.18) \
+		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	# Sway right.
+	_reload_tween.tween_method(_set_reload_offset, gun_up, gun_up_right, duration * 0.17) \
+		.set_delay(duration * 0.28).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	# Sway back to centre.
+	_reload_tween.tween_method(_set_reload_offset, gun_up_right, gun_up, duration * 0.17) \
+		.set_delay(duration * 0.45).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	# Lower + level out.
+	_reload_tween.tween_method(_set_reload_offset, gun_up, Vector3.ZERO, duration * 0.22) \
+		.set_delay(duration * 0.70).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
+	_reload_tween.tween_property(muzzle, "rotation:x", 0.0, duration * 0.22) \
+		.set_delay(duration * 0.70).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
+
+	# Magazine drop + return on its own timeline.
+	var mag_node: Node3D = null
+	if _procedural_gun:
+		mag_node = _procedural_gun.get_node_or_null("Magazine") as Node3D
+	if mag_node:
+		var mag_rest_pos: Vector3 = mag_node.position
+		var mag_drop: Vector3 = mag_rest_pos + Vector3(0, -1.2, 0)
+		_mag_reload_tween = create_tween().set_parallel(true)
+		_mag_reload_tween.tween_property(mag_node, "position", mag_drop, duration * 0.16) \
+			.set_delay(duration * 0.12).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
+		_mag_reload_tween.tween_property(mag_node, "position", mag_rest_pos, duration * 0.15) \
+			.set_delay(duration * 0.55).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 
 func _set_reload_offset(v: Vector3) -> void:
 	reload_offset = v
@@ -2011,7 +2047,11 @@ func server_respawn(pos: Vector3) -> void:
 	reloading = false
 	if _reload_tween and _reload_tween.is_valid():
 		_reload_tween.kill()
+	if _mag_reload_tween and _mag_reload_tween.is_valid():
+		_mag_reload_tween.kill()
 	reload_offset = Vector3.ZERO
+	if muzzle:
+		muzzle.rotation.x = 0.0
 	_stop_reload_audio()
 	dash_charges = MAX_DASH_CHARGES
 	dash_timer = 0.0
@@ -2134,55 +2174,32 @@ func reset_weapon() -> void:
 # -------------------- GUN VISUALS --------------------
 
 func _setup_gun_visuals() -> void:
-	# Scene's GunMesh uses a shared BoxMesh sub_resource — give this player
-	# its own so resizing doesn't mutate every other player's gun.
-	gun_body.mesh = BoxMesh.new()
-	var mat: Material = gun_body.material_override
-
+	# Hide the legacy GunMesh boxes — replaced by the procedural gun below.
+	# (Leaving the nodes around so existing references like _apply_ghost_visuals
+	# don't crash; they're just invisible.)
+	if gun_body:
+		gun_body.visible = false
 	gun_barrel = MeshInstance3D.new()
-	gun_barrel.mesh = BoxMesh.new()
-	gun_barrel.material_override = mat
+	gun_barrel.visible = false
 	muzzle.add_child(gun_barrel)
-
 	gun_magazine = MeshInstance3D.new()
-	gun_magazine.mesh = BoxMesh.new()
-	gun_magazine.material_override = mat
+	gun_magazine.visible = false
 	muzzle.add_child(gun_magazine)
+
+	# Procedural gun — its parts react to weapon stats via apply_weapon_stats.
+	_procedural_gun = preload("res://scripts/procedural_gun.gd").new()
+	_procedural_gun.name = "ProceduralGun"
+	muzzle.add_child(_procedural_gun)
 
 	# Remember the blade's authored position so scaling it doesn't drift.
 	if blade:
 		_blade_rest_transform = blade.transform
 
 func _update_gun_visuals() -> void:
-	if gun_body == null or gun_barrel == null or gun_magazine == null:
-		return
-	var dmg_ratio: float = clampf(weapon.get_damage() / Weapon.BASE_DAMAGE, 0.6, 3.5)
-	var mag_ratio: float = clampf(float(weapon.get_mag_size()) / float(Weapon.BASE_MAG_SIZE), 0.3, 5.0)
-	# Lower spread = tighter aim = longer barrel. Treat near-zero (sniper) as the max.
-	var acc_ratio: float = 5.0 if weapon.spread <= 0.0001 \
-		else clampf(Weapon.BASE_SPREAD / weapon.spread, 0.4, 5.0)
-
-	# Body — compact receiver, scales with damage.
-	var body_w: float = 0.11 * sqrt(dmg_ratio)
-	var body_h: float = 0.10 * sqrt(dmg_ratio)
-	var body_d: float = 0.20 * pow(dmg_ratio, 0.4)
-	(gun_body.mesh as BoxMesh).size = Vector3(body_w, body_h, body_d)
-	# Front of body sits just behind the muzzle point (z = 0); body extends back (+Z in local space).
-	var body_front_z: float = 0.04
-	gun_body.transform = Transform3D(Basis.IDENTITY, Vector3(0, 0, body_front_z + body_d * 0.5))
-
-	# Barrel — thin, length scales aggressively with accuracy. Sniper → ~1.2m barrel.
-	var barrel_len: float = 0.24 * acc_ratio
-	var barrel_thick: float = 0.045 * sqrt(dmg_ratio)
-	(gun_barrel.mesh as BoxMesh).size = Vector3(barrel_thick, barrel_thick, barrel_len)
-	gun_barrel.transform = Transform3D(Basis.IDENTITY, Vector3(0, 0, body_front_z - barrel_len * 0.5))
-
-	# Magazine — hangs below body, height scales with mag size.
-	var mag_h: float = 0.10 * mag_ratio
-	var mag_w: float = 0.08 * sqrt(dmg_ratio)
-	(gun_magazine.mesh as BoxMesh).size = Vector3(mag_w, mag_h, 0.10)
-	gun_magazine.transform = Transform3D(Basis.IDENTITY,
-		Vector3(0, -body_h * 0.5 - mag_h * 0.5, body_front_z + body_d * 0.35))
+	# Push the current weapon stats into the procedural gun. All
+	# stat→geometry mapping lives in procedural_gun.gd.
+	if _procedural_gun and _procedural_gun.has_method("apply_weapon_stats"):
+		_procedural_gun.apply_weapon_stats(weapon)
 
 	# Blade — under the gun, grows with melee damage × reach. BIG SWORD makes
 	# it very obviously a sword; default melee keeps it a small knife.
