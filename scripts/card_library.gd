@@ -232,6 +232,22 @@ static func all() -> Array:
 				w.body_scale *= 1.5,
 		},
 		{
+			"id": "slenderman",
+			"name": "SLENDERMAN",
+			"desc": "Tall and narrow — hard to hit body-on",
+			"color": Color(0.35, 0.35, 0.45),
+			"apply": func(w: Weapon) -> void:
+				w.body_scale_axes *= Vector3(0.55, 1.6, 0.55),
+		},
+		{
+			"id": "flatfish",
+			"name": "FLATFISH",
+			"desc": "Squished — small from the front, big from the sides",
+			"color": Color(0.55, 0.85, 1.0),
+			"apply": func(w: Weapon) -> void:
+				w.body_scale_axes *= Vector3(1.7, 0.85, 0.45),
+		},
+		{
 			"id": "acrobat",
 			"name": "ACROBAT",
 			"desc": "Jump like a ninja",

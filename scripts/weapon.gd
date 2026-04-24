@@ -57,7 +57,8 @@ const BASE_KNOCKBACK := 3.0            # every shot gives a light nudge
 
 # --- Player-body modifiers (cards can grow head/torso for tradeoff builds) ---
 @export var head_scale: float = 1.0            # visual + head hitbox
-@export var body_scale: float = 1.0            # visual + torso/legs hitbox
+@export var body_scale: float = 1.0            # visual + torso/legs hitbox (uniform)
+@export var body_scale_axes: Vector3 = Vector3.ONE  # per-axis warp on top of body_scale
 @export var max_hp_bonus: int = 0              # flat HP added on top of Player.MAX_HEALTH
 @export var extra_jumps: int = 0               # additional air-jumps beyond the default double-jump
 
@@ -117,6 +118,7 @@ func reset() -> void:
 		bullet_scale = 1.0
 		head_scale = 1.0
 		body_scale = 1.0
+		body_scale_axes = Vector3.ONE
 		max_hp_bonus = 0
 		extra_jumps = 0
 		special = SPECIAL_GRENADE
