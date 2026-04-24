@@ -237,7 +237,7 @@ static func all() -> Array:
 			"desc": "Tall and narrow — hard to hit body-on",
 			"color": Color(0.35, 0.35, 0.45),
 			"apply": func(w: Weapon) -> void:
-				w.body_scale_axes *= Vector3(0.55, 1.6, 0.55),
+				w.body_scale_axes *= Vector3(0.75, 2.4, 0.75),
 		},
 		{
 			"id": "flatfish",
@@ -245,7 +245,8 @@ static func all() -> Array:
 			"desc": "Squished — small from the front, big from the sides",
 			"color": Color(0.55, 0.85, 1.0),
 			"apply": func(w: Weapon) -> void:
-				w.body_scale_axes *= Vector3(1.7, 0.85, 0.45),
+				# X (left-right) narrow, Y (height) unchanged, Z (front-back) deep.
+				w.body_scale_axes *= Vector3(0.65, 1.0, 1.45),
 		},
 		{
 			"id": "acrobat",

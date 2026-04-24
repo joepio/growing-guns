@@ -79,6 +79,7 @@ var _extend_votes: Dictionary = {} # id -> bool
 
 # --- Dev panel (F1) ---
 var _dev_root: PanelContainer = null
+var _dev_target_id: int = 0  # 0 = follow local player; otherwise a specific player_id
 var _dev_content: VBoxContainer
 # Dev-only: bots keep full AI (targeting, chasing, aiming) but never fire.
 var bots_hold_fire: bool = false
@@ -2130,9 +2131,11 @@ func _refresh_dev_panel() -> void:
 	_dev_toggle("Bots hold fire (move + aim, no shooting)", bots_hold_fire, func(v: bool) -> void:
 		bots_hold_fire = v
 		call_deferred("_refresh_dev_panel"))
+	_dev_player_picker()
+	var target: Node = _dev_target_player()
 	_dev_heading("— WEAPON STATS —", Color(1.0, 0.9, 0.5), 15)
-	if local_player and is_instance_valid(local_player):
-		var w: Weapon = local_player.weapon
+	if target and is_instance_valid(target):
+		var w: Weapon = target.weapon
 		_dev_stat("damage", "%.1f  (base %.0f × %.2f)" % [w.get_damage(), Weapon.BASE_DAMAGE, w.damage_mult])
 		_dev_stat("fire interval", "%.3fs  (×%.2f)  %s" % [w.get_fire_interval(), w.fire_rate_mult, "FULL-AUTO" if w.full_auto else "semi-auto"])
 		_dev_stat("mag size", "%d  (base %d %+d)" % [w.get_mag_size(), Weapon.BASE_MAG_SIZE, w.mag_size_bonus])
@@ -2147,10 +2150,10 @@ func _refresh_dev_panel() -> void:
 		_dev_stat("bullet scale", "%.2f" % w.bullet_scale)
 		_dev_stat("bullet color", "#%s" % w.bullet_color.to_html(false))
 	else:
-		_dev_note("(local player not spawned)")
+		_dev_note("(target player not spawned)")
 	_dev_heading("— CARDS —", Color(1.0, 0.6, 0.9), 15)
-	if local_player and is_instance_valid(local_player):
-		var applied: Array = local_player.weapon.applied_cards
+	if target and is_instance_valid(target):
+		var applied: Array = target.weapon.applied_cards
 		var counts := {}
 		for cid in applied:
 			counts[cid] = counts.get(cid, 0) + 1
@@ -2158,7 +2161,43 @@ func _refresh_dev_panel() -> void:
 		for card in CardLibrary.all():
 			_dev_card_row(card, counts.get(card.id, 0))
 	else:
-		_dev_note("(local player not spawned)")
+		_dev_note("(target player not spawned)")
+
+func _dev_target_player() -> Node:
+	# 0 = "Local player" — follow whoever local_player resolves to.
+	if _dev_target_id == 0:
+		return local_player if (local_player and is_instance_valid(local_player)) else null
+	return players_root.get_node_or_null(str(_dev_target_id))
+
+func _dev_player_picker() -> void:
+	var hbox := HBoxContainer.new()
+	hbox.add_theme_constant_override("separation", 8)
+	var lbl := Label.new()
+	lbl.text = "Edit player:"
+	lbl.add_theme_color_override("font_color", Color(0.7, 0.7, 0.85))
+	hbox.add_child(lbl)
+	var opt := OptionButton.new()
+	opt.focus_mode = Control.FOCUS_NONE
+	# Index 0 is always "Local" so the panel keeps following you across deaths.
+	opt.add_item("Local player", 0)
+	var selected_idx: int = 0
+	var i: int = 1
+	for raw_id in NetworkManager.players:
+		var pid := int(raw_id)
+		var pname: String = str(NetworkManager.players[raw_id])
+		var label_text: String = "%s  (id %d)" % [pname, pid]
+		if _is_bot_id(pid):
+			label_text += "  [bot]"
+		opt.add_item(label_text, pid)
+		if pid == _dev_target_id:
+			selected_idx = i
+		i += 1
+	opt.select(selected_idx)
+	opt.item_selected.connect(func(idx: int) -> void:
+		_dev_target_id = int(opt.get_item_id(idx))
+		call_deferred("_refresh_dev_panel"))
+	hbox.add_child(opt)
+	_dev_content.add_child(hbox)
 
 func _dev_heading(text: String, color: Color, font_size: int) -> void:
 	var lbl := Label.new()
@@ -2230,21 +2269,23 @@ func _dev_card_row(card: Dictionary, count: int) -> void:
 	_dev_content.add_child(hbox)
 
 func _dev_apply_card(card_id: String) -> void:
-	if not local_player or not is_instance_valid(local_player):
+	var target: Node = _dev_target_player()
+	if target == null or not is_instance_valid(target):
 		return
-	local_player.apply_card.rpc(card_id)
+	target.apply_card.rpc(card_id)
 	call_deferred("_refresh_dev_panel")
 
 func _dev_remove_card(card_id: String) -> void:
 	# Cards mutate weapon cumulatively and have no inverse — easiest way to
 	# drop one is to reset and reapply every OTHER card in the stack.
-	if not local_player or not is_instance_valid(local_player):
+	var target: Node = _dev_target_player()
+	if target == null or not is_instance_valid(target):
 		return
-	var remaining: Array = local_player.weapon.applied_cards.duplicate()
+	var remaining: Array = target.weapon.applied_cards.duplicate()
 	var idx := remaining.find(card_id)
 	if idx >= 0:
 		remaining.remove_at(idx)
-	local_player.reset_weapon.rpc()
+	target.reset_weapon.rpc()
 	for c in remaining:
-		local_player.apply_card.rpc(str(c))
+		target.apply_card.rpc(str(c))
 	call_deferred("_refresh_dev_panel")

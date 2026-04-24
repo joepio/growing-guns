@@ -625,8 +625,21 @@ func _input_vector() -> Vector3:
 # -------------------- RIFLE (hitscan) --------------------
 
 func _fire_rifle() -> void:
-	var origin: Vector3 = camera.global_position
-	var base_dir: Vector3 = -camera.global_transform.basis.z
+	var cam_origin: Vector3 = camera.global_position
+	var cam_dir: Vector3 = -camera.global_transform.basis.z
+	# Bullet visually leaves the gun, but aims at whatever the crosshair sees —
+	# raycast from the camera, then point the muzzle at that hit point. Far
+	# enough away the parallax is invisible; close range stays believable.
+	var origin: Vector3 = muzzle.global_position if muzzle else cam_origin
+	var aim_dist: float = RIFLE_RANGE
+	var space := get_world_3d().direct_space_state
+	var aim_q := PhysicsRayQueryParameters3D.create(cam_origin, cam_origin + cam_dir * aim_dist)
+	aim_q.collision_mask = 1 | 2  # world + players
+	aim_q.collide_with_areas = true
+	aim_q.exclude = get_hitbox_rids()
+	var aim_hit := space.intersect_ray(aim_q)
+	var aim_point: Vector3 = aim_hit.position if not aim_hit.is_empty() else (cam_origin + cam_dir * aim_dist)
+	var base_dir: Vector3 = (aim_point - origin).normalized()
 	# Local feel (authority-only; these fields are driven by the local physics loop).
 	# Scale recoil and kick by the size of the bullet
 	var scale_f := weapon.bullet_scale

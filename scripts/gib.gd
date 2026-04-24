@@ -164,6 +164,12 @@ static func _instantiate_chunk(
 	var centroid_src: Vector3 = chunk["centroid"]
 	var chunk_aabb: AABB = chunk["aabb"]
 
+	# Non-uniform warp from the source body (SLENDERMAN, FLATFISH, …). The
+	# chunk geometry is cached in unwarped source-local space, so we apply the
+	# warp visually on the MeshInstance3D and to the collision box. The rigid
+	# body itself stays orthonormal so physics behaves cleanly.
+	var warp: Vector3 = source_transform.basis.get_scale()
+
 	var rb: RigidBody3D = RigidBody3D.new()
 	rb.collision_layer = 0
 	rb.collision_mask = 1
@@ -175,6 +181,7 @@ static func _instantiate_chunk(
 
 	var mi: MeshInstance3D = MeshInstance3D.new()
 	mi.mesh = chunk_mesh
+	mi.scale = warp
 	if chunk_material:
 		mi.set_surface_override_material(0, chunk_material)
 	if has_cap and flesh_material:
@@ -183,10 +190,10 @@ static func _instantiate_chunk(
 
 	var cs: CollisionShape3D = CollisionShape3D.new()
 	var box_shape: BoxShape3D = BoxShape3D.new()
-	var sz: Vector3 = chunk_aabb.size
+	var sz: Vector3 = chunk_aabb.size * warp
 	box_shape.size = Vector3(maxf(sz.x, 0.05), maxf(sz.y, 0.05), maxf(sz.z, 0.05))
 	cs.shape = box_shape
-	cs.position = chunk_aabb.position + chunk_aabb.size * 0.5
+	cs.position = (chunk_aabb.position + chunk_aabb.size * 0.5) * warp
 	rb.add_child(cs)
 
 	# If a force origin is provided (bullet hit point / explosion center),
@@ -235,9 +242,13 @@ static func body_ragdoll(
 	rb.collision_mask = 1
 	rb.gravity_scale = 1.0
 	scene.add_child(rb)
-	rb.global_transform = pivot_xform
+	# Keep the rigid body itself orthonormal (physics doesn't like non-uniform
+	# scale on bodies), but bake any pivot warp INTO the cloned mesh transforms
+	# below. That way SLENDERMAN / FLATFISH ragdolls keep the same shape.
+	var rb_xform := Transform3D(pivot_xform.basis.orthonormalized(), pivot_xform.origin)
+	rb.global_transform = rb_xform
 
-	var inv := pivot_xform.affine_inverse()
+	var inv := rb_xform.affine_inverse()
 	var union: AABB = AABB()
 	var union_init := false
 	for src: MeshInstance3D in meshes:
