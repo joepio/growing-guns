@@ -213,7 +213,11 @@ func _handle_collision(result: Dictionary) -> void:
 
 	if not hit_player and ricochet_left > 0:
 		ricochet_left -= 1
-		direction = direction.bounce(normal).normalized()
+		# Bounce the full velocity so drop / homing keep working post-ricochet.
+		# Reflecting only `direction` would be overwritten next tick when
+		# direction is re-derived from velocity.
+		velocity = velocity.bounce(normal)
+		direction = velocity.normalized() if velocity.length_squared() > 0.0001 else direction
 		look_at(global_position + direction)
 		global_position += direction * 0.05
 		return

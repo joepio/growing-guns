@@ -894,22 +894,26 @@ func apply_explosion_view_punch(pos: Vector3, radius: float, peak: float = 1.0) 
 		return
 	var to_player := global_position - pos
 	var dist: float = to_player.length()
-	var effect_radius := maxf(radius * 2.0, radius + 1.0)
+	# Felt-radius is 5× the visible blast — distant players still get a
+	# tremor; nearby players get a real kick.
+	var effect_radius := maxf(radius * 5.0, radius + 1.0)
 	if dist >= effect_radius:
 		return
-	var falloff: float = clampf(1.0 - dist / effect_radius, 0.0, 1.0)
-	var strength: float = falloff * peak
+	# Curve the falloff so the strong punch is reserved for ~2× radius and
+	# everything beyond that decays into a fainter shake (still visible).
+	var linear: float = clampf(1.0 - dist / effect_radius, 0.0, 1.0)
+	var strength: float = pow(linear, 1.6) * peak
 	if strength <= 0.0:
 		return
 	var away_dir := to_player.normalized() if dist > 0.001 else Vector3.UP
 	var local_dir: Vector3 = global_transform.basis.inverse() * away_dir
-	_view_punch_pos += local_dir * (0.08 + 0.12 * strength)
+	_view_punch_pos += local_dir * (0.09 + 0.33 * strength)
 	_view_punch_rot += Vector3(
-		-local_dir.y * (0.04 + 0.06 * strength),
-		local_dir.x * (0.015 + 0.03 * strength),
-		-local_dir.x * (0.02 + 0.04 * strength)
+		-local_dir.y * (0.045 + 0.165 * strength),
+		local_dir.x * (0.018 + 0.084 * strength),
+		-local_dir.x * (0.024 + 0.114 * strength)
 	)
-	shake_amt = max(shake_amt, 0.012 + 0.05 * strength)
+	shake_amt = max(shake_amt, 0.015 + 0.15 * strength)
 
 func _spawn_heat_distortion(scene: Node, pos: Vector3, radius: float, duration: float, strength: float) -> void:
 	if scene == null:
