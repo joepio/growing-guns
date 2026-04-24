@@ -193,8 +193,8 @@ func _ready() -> void:
 		_torso_hitbox_rest_y = torso_hitbox.position.y
 	if legs_hitbox:
 		_legs_hitbox_rest_y = legs_hitbox.position.y
-	_capture_body_materials()
 	_setup_gun_visuals()
+	_capture_body_materials()  # after gun setup so we capture the original gun material too
 	_update_gun_visuals()
 	_update_body_scale()
 	_refresh_authority_view()
@@ -298,6 +298,14 @@ func _capture_body_materials() -> void:
 	_body_materials.clear()
 	for mesh in _body_meshes():
 		_body_materials[mesh] = mesh.material_override
+	# Gun meshes are added at runtime by _setup_gun_visuals() — capture their
+	# rest material too so ghost mode can be reverted after respawn.
+	if gun_body:
+		_body_materials[gun_body] = gun_body.material_override
+	if gun_barrel:
+		_body_materials[gun_barrel] = gun_barrel.material_override
+	if gun_magazine:
+		_body_materials[gun_magazine] = gun_magazine.material_override
 
 func _body_meshes() -> Array[MeshInstance3D]:
 	var out: Array[MeshInstance3D] = []
@@ -2015,6 +2023,16 @@ func set_ghost_mode(enabled: bool) -> void:
 		frozen = false
 		invisible_mode = false
 		health = 0
+		# Detach the death-cam from the tumbling ragdoll head so the camera
+		# snaps back to the body at the death position. Otherwise we'd watch
+		# the corpse fly off into the void.
+		_ragdoll_head = null
+		if camera:
+			camera.transform = Transform3D(Basis.IDENTITY, _camera_rest_pos)
+		# Make the body itself solid + visible (was hidden + de-collided on death).
+		if body_model:
+			body_model.visible = true
+		_set_dead_visuals(false)
 		if is_multiplayer_authority():
 			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	else:

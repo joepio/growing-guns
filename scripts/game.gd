@@ -70,10 +70,9 @@ var _last_pling_sec: int = -1
 
 # --- Match over / rematch ---
 var _rematch_overlay: Control = null
-var _rematch_title: Label = null
 var _rematch_subtitle: Label = null
-var _rematch_button: Button = null
 var _extend_button: Button = null
+var _exit_to_menu_button: Button = null
 var _rematch_requested: bool = false
 var _extend_votes: Dictionary = {} # id -> bool
 
@@ -677,7 +676,7 @@ func _end_round(winner_id: int) -> void:
 		var loser_id := int(raw_loser_id)
 		if not completed_picks.has(loser_id) and not pending_pick_cards_by_player.has(loser_id):
 			_begin_card_pick_for_loser(loser_id)
-		elif completed_picks.has(loser_id):
+		elif completed_picks.has(loser_id) and not _is_bot_id(loser_id):
 			_show_spectating.rpc_id(_peer_for_player(loser_id), "WAITING FOR OTHER PICKS…")
 	_show_round_winner_wait.rpc(winner_id)
 	_maybe_finish_card_picks()
@@ -728,13 +727,16 @@ func _finalize_card_pick(player_id_to_apply: int, card_id: String) -> void:
 		p.apply_card.rpc(card_id)
 	completed_picks[player_id_to_apply] = true
 	pending_pick_cards_by_player.erase(player_id_to_apply)
-	var peer := _peer_for_player(player_id_to_apply)
-	if peer != 0:
-		_hide_card_pick.rpc_id(peer)
-		if state == State.PLAYING:
-			_show_spectating.rpc_id(peer, "SPECTATING…")
-		elif state == State.PICKING_CARD:
-			_show_spectating.rpc_id(peer, "WAITING FOR OTHER PICKS…")
+	# Bots have no HUD; routing UI RPCs to a bot's peer hits the server peer
+	# (1), which would clobber the host human's overlay. Skip them entirely.
+	if not _is_bot_id(player_id_to_apply):
+		var peer := _peer_for_player(player_id_to_apply)
+		if peer != 0:
+			_hide_card_pick.rpc_id(peer)
+			if state == State.PLAYING:
+				_show_spectating.rpc_id(peer, "SPECTATING…")
+			elif state == State.PICKING_CARD:
+				_show_spectating.rpc_id(peer, "WAITING FOR OTHER PICKS…")
 	_maybe_finish_card_picks()
 
 func _maybe_finish_card_picks() -> void:
@@ -788,6 +790,7 @@ func _show_card_pick(loser_id: int, card_ids: Array) -> void:
 		return
 	# Loser: full overlay + cursor + card buttons.
 	pick_overlay.visible = true
+	_set_gameplay_hud_visible(false)
 	_stats_panel.visible = true
 	_refresh_stats_panel()
 	pick_title.text = "PICK A CARD"
@@ -802,7 +805,7 @@ func _show_card_pick(loser_id: int, card_ids: Array) -> void:
 		_pick_timeout_active = true
 		_last_pling_sec = -1
 
-	Input.mouse_mode = Input.MOUSE_MODE_HIDDEN
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	_populate_cards(card_ids, true)
 
 	# 1-second grace period before the loser can actually click — avoids
@@ -968,7 +971,9 @@ func _make_card_button(card_id: String, card: Dictionary, clickable: bool) -> Co
 			uniform sampler2D gradient : source_color;
 			uniform float speed = 0.5;
 			uniform float angle = 0.5;
-			uniform float intensity = 0.35;
+			uniform float intensity = 0.16;
+			uniform vec2 card_size = vec2(200.0, 280.0);
+			uniform float corner_radius = 12.0;
 
 			void fragment() {
 				vec2 uv = UV;
@@ -982,9 +987,15 @@ func _make_card_button(card_id: String, card: Dictionary, clickable: bool) -> Co
 				vec4 holo_color = texture(gradient, vec2(pos, 0.5));
 				float noise = fract(sin(dot(uv, vec2(12.9898, 78.233))) * 43758.5453);
 				holo_color.rgb += noise * 0.15;
+				// Rounded-corner mask so the shimmer doesn't bleed past the
+				// StyleBox's rounded panel underneath. SDF of a rounded rect.
+				vec2 px = uv * card_size;
+				vec2 d = max(vec2(0.0), abs(px - card_size * 0.5) - (card_size * 0.5 - corner_radius));
+				float dist = length(d) - corner_radius;
+				float mask = smoothstep(1.0, -1.0, dist);
 				// Additive blend on top of the card panel below. ColorRect's
 				// base color is ignored — we emit only the shimmer contribution.
-				COLOR = vec4(holo_color.rgb * intensity, 1.0);
+				COLOR = vec4(holo_color.rgb * intensity * mask, 1.0);
 			}
 		"
 
@@ -1204,10 +1215,21 @@ func _hide_card_pick() -> void:
 	if _stats_panel: _stats_panel.visible = false
 	for c in pick_row.get_children():
 		c.queue_free()
+	_set_gameplay_hud_visible(true)
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	# Card picked → no longer "freshly dead". Drop the blood overlay so
 	# the spectator/ghost view is clear.
 	show_death_effect(false)
+
+func _set_gameplay_hud_visible(visible_: bool) -> void:
+	# Hide in-game HUD pieces (HP, ammo bars, crosshair, hit-direction
+	# indicator, scoreboard) so the card-pick overlay reads cleanly.
+	for path in ["HUD/HealthPanel", "HUD/AbilityBar", "HUD/Hitmarker", "HUD/DamageIndicator", "HUD/Scoreboard"]:
+		var n := get_node_or_null(path)
+		if n:
+			n.visible = visible_
+	if _custom_crosshair:
+		_custom_crosshair.visible = visible_
 
 @rpc("authority", "call_local", "reliable")
 func _announce(text: String, duration: float) -> void:
@@ -1227,7 +1249,7 @@ func _match_over(winner_id: int) -> void:
 	round_banner.visible = true
 	banner_timer.stop()
 	_show_rematch_overlay(winner_id)
-	Input.mouse_mode = Input.MOUSE_MODE_HIDDEN
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 func _build_rematch_overlay() -> void:
 	_rematch_overlay = Control.new()
@@ -1243,30 +1265,11 @@ func _build_rematch_overlay() -> void:
 	center.anchor_bottom = 1.0
 	_rematch_overlay.add_child(center)
 
-	var panel := PanelContainer.new()
-	panel.custom_minimum_size = Vector2(420, 0)
-	var sb := StyleBoxFlat.new()
-	sb.bg_color = Color(0.04, 0.035, 0.06, 0.92)
-	sb.border_color = Color(1.0, 0.9, 0.35, 0.9)
-	sb.set_border_width_all(2)
-	sb.set_corner_radius_all(8)
-	sb.content_margin_left = 28
-	sb.content_margin_right = 28
-	sb.content_margin_top = 22
-	sb.content_margin_bottom = 22
-	panel.add_theme_stylebox_override("panel", sb)
-	center.add_child(panel)
-
+	# No backdrop panel — buttons float over the world. The big "WINNER"
+	# banner above is enough framing.
 	var vb := VBoxContainer.new()
 	vb.add_theme_constant_override("separation", 14)
-	panel.add_child(vb)
-
-	_rematch_title = Label.new()
-	_rematch_title.text = "MATCH OVER"
-	_rematch_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_rematch_title.add_theme_font_size_override("font_size", 34)
-	_rematch_title.add_theme_color_override("font_color", Color(1.0, 0.95, 0.5))
-	vb.add_child(_rematch_title)
+	center.add_child(vb)
 
 	_rematch_subtitle = Label.new()
 	_rematch_subtitle.text = ""
@@ -1275,13 +1278,6 @@ func _build_rematch_overlay() -> void:
 	_rematch_subtitle.add_theme_color_override("font_color", Color(0.86, 0.86, 0.95))
 	vb.add_child(_rematch_subtitle)
 
-	_rematch_button = Button.new()
-	_rematch_button.text = "REMATCH"
-	_rematch_button.custom_minimum_size = Vector2(260, 46)
-	_rematch_button.focus_mode = Control.FOCUS_NONE
-	_rematch_button.pressed.connect(_on_rematch_pressed)
-	vb.add_child(_rematch_button)
-
 	_extend_button = Button.new()
 	_extend_button.text = "5 MORE ROUNDS"
 	_extend_button.custom_minimum_size = Vector2(260, 46)
@@ -1289,16 +1285,20 @@ func _build_rematch_overlay() -> void:
 	_extend_button.pressed.connect(_on_extend_pressed)
 	vb.add_child(_extend_button)
 
-func _show_rematch_overlay(winner_id: int) -> void:
+	_exit_to_menu_button = Button.new()
+	_exit_to_menu_button.text = "EXIT TO MENU"
+	_exit_to_menu_button.custom_minimum_size = Vector2(260, 46)
+	_exit_to_menu_button.focus_mode = Control.FOCUS_NONE
+	_exit_to_menu_button.pressed.connect(_leave_to_main_menu)
+	vb.add_child(_exit_to_menu_button)
+
+func _show_rematch_overlay(_winner_id: int) -> void:
 	if _rematch_overlay == null:
 		_build_rematch_overlay()
-	var winner_name: String = NetworkManager.players.get(winner_id, "Player")
-	var is_me := winner_id == multiplayer.get_unique_id()
 	_rematch_requested = false
-	_rematch_title.text = "YOU WIN" if is_me else "%s WINS" % winner_name
-	_rematch_subtitle.text = "start a fresh match with reset scores and cards"
-	_rematch_button.text = "REMATCH"
-	_rematch_button.disabled = false
+	_rematch_subtitle.text = "another 5 rounds, or back to the menu"
+	_extend_button.disabled = false
+	_extend_button.text = "5 MORE ROUNDS"
 	_rematch_overlay.visible = true
 
 func _build_ghost_overlay() -> void:
@@ -1699,18 +1699,6 @@ func show_death_effect(show: bool) -> void:
 		# Fade out only when told to (at respawn)
 		tw.tween_property(_death_overlay, "color:a", 0.0, 0.5).set_trans(Tween.TRANS_CUBIC)
 
-func _on_rematch_pressed() -> void:
-	if _rematch_requested:
-		return
-	_rematch_requested = true
-	_rematch_button.text = "REMATCH REQUESTED"
-	_rematch_button.disabled = true
-	_extend_button.disabled = true
-	if multiplayer.is_server():
-		_server_rematch_requested()
-	else:
-		_server_rematch_requested.rpc_id(1)
-
 func _on_extend_pressed() -> void:
 	_extend_button.text = "VOTED TO EXTEND"
 	_extend_button.disabled = true
@@ -1760,30 +1748,6 @@ func _extend_match() -> void:
 @rpc("authority", "call_local", "reliable")
 func _set_rounds_to_win(count: int) -> void:
 	rounds_to_win = count
-
-@rpc("any_peer", "call_local", "reliable")
-func _server_rematch_requested() -> void:
-	if not multiplayer.is_server():
-		return
-	if state != State.MATCH_OVER:
-		return
-	_start_rematch()
-
-func _start_rematch() -> void:
-	_reset_round_tracking()
-	current_round = 1
-	for pid in NetworkManager.players:
-		round_wins[pid] = 0
-		var p := players_root.get_node_or_null(str(pid))
-		if p:
-			p.reset_weapon.rpc()
-			p.set_ghost_mode.rpc(false)
-			p.set_frozen.rpc(false)
-			p.clear_ragdoll.rpc()
-	_broadcast_scores.rpc(round_wins)
-	_hide_rematch_overlay.rpc()
-	state = State.PLAYING
-	_start_round_now()
 
 @rpc("authority", "call_local", "reliable")
 func _hide_rematch_overlay() -> void:
@@ -1837,7 +1801,7 @@ func _show_hit_damage_number(dmg: int, kind: String, world_pos: Vector3) -> void
 
 func is_any_modal_open() -> bool:
 	# Used by Player._unhandled_input to avoid recapturing the mouse when a
-	# UI overlay (card pick, dev panel, pause menu) is visible.
+	# UI overlay (card pick, dev panel, pause menu, rematch) is visible.
 	if pick_overlay and pick_overlay.visible:
 		return true
 	if _dev_root and _dev_root.visible:
@@ -1845,6 +1809,8 @@ func is_any_modal_open() -> bool:
 	if _pause_menu and _pause_menu.visible:
 		return true
 	if _tab_root and _tab_root.visible:
+		return true
+	if _rematch_overlay and _rematch_overlay.visible:
 		return true
 	return false
 
@@ -1855,7 +1821,7 @@ func _toggle_pause_menu() -> void:
 		_build_pause_menu()
 	_pause_menu.visible = not _pause_menu.visible
 	if _pause_menu.visible:
-		Input.mouse_mode = Input.MOUSE_MODE_HIDDEN
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 		# Pause the world if this is a solo match (local player + bots only).
 		if _human_count() <= 1:
 			get_tree().paused = true
@@ -2089,7 +2055,7 @@ func _toggle_dev_panel() -> void:
 	_dev_root.visible = not _dev_root.visible
 	if _dev_root.visible:
 		_refresh_dev_panel()
-		Input.mouse_mode = Input.MOUSE_MODE_HIDDEN
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	else:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
