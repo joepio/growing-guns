@@ -11,6 +11,12 @@ var pierce_left: int = 0
 var ricochet_left: int = 0
 var excluded_rids: Array[RID] = []
 
+# Visuals — head dot + a tracer trail that stretches as the bullet flies.
+# Fast bullets cover more distance per frame, so the trail naturally reads
+# as a long streak; slow bullets stay short and chunky.
+var _trail_inst: MeshInstance3D = null
+var _max_trail_length: float = 2.0
+
 func setup(origin: Vector3, dir: Vector3, shooter: int, w: Weapon) -> void:
 	global_position = origin
 	direction = dir.normalized()
@@ -29,28 +35,37 @@ func setup(origin: Vector3, dir: Vector3, shooter: int, w: Weapon) -> void:
 		if shooter_node and shooter_node.has_method("get_hitbox_rids"):
 			excluded_rids = shooter_node.call("get_hitbox_rids")
 
-	# Create visuals here to ensure weapon_stats is available.
-	# Length stretches with bullet_speed_mult so fast rounds read as streaks
-	# while sluggish ones stay chunky.
-	var mesh_inst: MeshInstance3D = MeshInstance3D.new()
-	var box: BoxMesh = BoxMesh.new()
-	var length_scale: float = clampf(weapon_stats.bullet_speed_mult, 0.5, 4.0)
-	box.size = Vector3(
-		0.06 * weapon_stats.bullet_scale,
-		0.06 * weapon_stats.bullet_scale,
-		0.6 * weapon_stats.bullet_scale * length_scale,
-	)
-	mesh_inst.mesh = box
-
 	var mat: StandardMaterial3D = StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	mat.albedo_color = weapon_stats.bullet_color
 	mat.emission_enabled = true
 	mat.emission = weapon_stats.bullet_color
 	mat.emission_energy_multiplier = 4.0
-	mesh_inst.material_override = mat
 
-	add_child(mesh_inst)
+	# Head — a small bright dot that always sits at the bullet's tip.
+	var s: float = weapon_stats.bullet_scale
+	var head_inst := MeshInstance3D.new()
+	var head_box := BoxMesh.new()
+	head_box.size = Vector3(0.08 * s, 0.08 * s, 0.14 * s)
+	head_inst.mesh = head_box
+	head_inst.material_override = mat
+	add_child(head_inst)
+
+	# Trail — unit-length box anchored so its FRONT face touches the head and
+	# extends backwards along travel direction (+local Z, since look_at puts
+	# our forward at -Z). Each physics tick scales it to match how far we've
+	# come, capped to keep the streak from stretching across the map.
+	_trail_inst = MeshInstance3D.new()
+	var trail_box := BoxMesh.new()
+	trail_box.size = Vector3(0.04 * s, 0.04 * s, 1.0)
+	_trail_inst.mesh = trail_box
+	_trail_inst.material_override = mat
+	_trail_inst.scale = Vector3(1.0, 1.0, 0.001)  # invisible until first tick
+	add_child(_trail_inst)
+
+	# Faster rounds get longer max streaks. SNIPER (×2.5) → ~8 m; HITSCAN
+	# (×4) → ~12 m; BAZOOKA (×0.1) keeps a stubby tail.
+	_max_trail_length = clampf(weapon_stats.bullet_speed_mult * 3.0 + 0.5, 0.5, 14.0)
 
 func _physics_process(delta: float) -> void:
 	if weapon_stats == null:
@@ -86,6 +101,13 @@ func _physics_process(delta: float) -> void:
 		distance_traveled += step_len
 	else:
 		_handle_collision(result)
+
+	if _trail_inst:
+		var trail_len: float = clampf(distance_traveled, 0.001, _max_trail_length)
+		_trail_inst.scale = Vector3(1.0, 1.0, trail_len)
+		# Front face of the unit-Z box sits at the bullet origin; centre is
+		# half a length back along +Z (which is "behind" since forward is -Z).
+		_trail_inst.position = Vector3(0.0, 0.0, trail_len * 0.5)
 
 	if distance_traveled > max_range:
 		queue_free()
