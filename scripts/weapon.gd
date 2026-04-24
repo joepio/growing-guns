@@ -54,6 +54,8 @@ const BASE_KNOCKBACK := 3.0            # every shot gives a light nudge
 @export var bullet_color: Color = BASE_BULLET_COLOR
 @export var bullet_speed_mult: float = 1.0       # scales projectile travel speed
 @export var bullet_scale: float = 1.0          # scales tracer brightness + muzzle flash
+const BASE_BULLET_DROP := 30.0                  # matches Player.GRAVITY so bullets fall like everything else
+@export var bullet_drop: float = BASE_BULLET_DROP  # m/s² downward acceleration on bullets (0 = laser-flat)
 
 # --- Player-body modifiers (cards can grow head/torso for tradeoff builds) ---
 @export var head_scale: float = 1.0            # visual + head hitbox
@@ -109,6 +111,7 @@ func reset() -> void:
 		explosive_damage = 0.0
 		move_speed_mult = 1.0
 		bullet_speed_mult = 1.0
+		bullet_drop = BASE_BULLET_DROP
 		knockback = BASE_KNOCKBACK
 		special_cooldown_mult = 1.0
 		melee_damage_mult = 1.0

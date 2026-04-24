@@ -2,6 +2,9 @@ extends Node3D
 
 var speed: float = 150.0
 var direction: Vector3 = Vector3.FORWARD
+# velocity carries the actual world-space motion so we can apply gravity
+# (bullet_drop) and homing without recomputing direction/speed manually.
+var velocity: Vector3 = Vector3.ZERO
 var shooter_id: int = 0
 var weapon_stats: Weapon = null
 var max_range: float = 200.0
@@ -24,6 +27,7 @@ func setup(origin: Vector3, dir: Vector3, shooter: int, w: Weapon) -> void:
 	weapon_stats = w
 	add_to_group("projectiles")
 	speed = w.get_bullet_speed()
+	velocity = direction * speed
 	pierce_left = w.pierce_count
 	ricochet_left = w.ricochet_count
 
@@ -71,22 +75,33 @@ func _physics_process(delta: float) -> void:
 	if weapon_stats == null:
 		return
 
+	# Bullet drop — steady downward acceleration on the velocity vector.
+	if weapon_stats.bullet_drop > 0.0:
+		velocity.y -= weapon_stats.bullet_drop * delta
+
 	# Homing: steer toward the closest target in front of us, capped at
 	# `weapon_stats.homing` degrees-per-second. Cheap — one pass over players
 	# (≤ handful per match), dot-product cone filter, then a single slerp.
 	if weapon_stats.homing > 0.0:
 		var target: Node3D = _find_homing_target()
 		if target:
+			var cur_speed: float = velocity.length()
+			var dir_now: Vector3 = velocity.normalized() if cur_speed > 0.0001 else direction
 			var to_t: Vector3 = (target.global_position - global_position).normalized()
-			var cos_ang: float = clampf(direction.dot(to_t), -1.0, 1.0)
+			var cos_ang: float = clampf(dir_now.dot(to_t), -1.0, 1.0)
 			var ang: float = acos(cos_ang)
 			if ang > 0.0001:
 				var max_turn: float = deg_to_rad(weapon_stats.homing) * delta
 				var turn: float = minf(ang, max_turn)
-				direction = direction.slerp(to_t, turn / ang).normalized()
-				look_at(global_position + direction)
+				var new_dir: Vector3 = dir_now.slerp(to_t, turn / ang).normalized()
+				velocity = new_dir * cur_speed
 
-	var step: Vector3 = direction * speed * delta
+	# Sync direction/speed for downstream code, and aim the visual mesh.
+	direction = velocity.normalized() if velocity.length_squared() > 0.0001 else direction
+	speed = velocity.length()
+	look_at(global_position + direction)
+
+	var step: Vector3 = velocity * delta
 	var step_len: float = step.length()
 
 	var space: PhysicsDirectSpaceState3D = get_world_3d().direct_space_state
