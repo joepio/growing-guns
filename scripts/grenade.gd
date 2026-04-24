@@ -1,7 +1,7 @@
 extends RigidBody3D
 
-const FUSE := 1.8
-const ARM_DELAY := 0.12          # ignore contacts for this long after spawn
+const FUSE := 4.0                # fallback if the grenade somehow never touches anything
+const ARM_DELAY := 0.04          # ignore contacts for this long after spawn (just enough to clear the muzzle)
 const RADIUS := 6.0
 const MAX_DAMAGE := 100
 const MIN_DAMAGE := 10
