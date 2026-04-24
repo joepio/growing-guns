@@ -483,8 +483,9 @@ func _physics_process(delta: float) -> void:
 	camera.rotation.z = deg_to_rad(tilt_z) + _view_punch_rot.z
 
 	muzzle.position = _muzzle_rest_pos + Vector3(0.0, 0.0, muzzle_kick_z) + melee_offset + reload_offset
-	# Height scales with body_scale so the viewpoint follows the taller head.
-	var cam_y: float = (_camera_rest_pos.y * maxf(0.1, weapon.body_scale)) - _landing_bump_y
+	# Height scales with body_scale (and the per-axis Y warp) so the viewpoint
+	# follows the taller head — SLENDERMAN sees the world from way up high.
+	var cam_y: float = (_camera_rest_pos.y * maxf(0.1, weapon.body_scale) * maxf(0.1, weapon.body_scale_axes.y)) - _landing_bump_y
 	camera.position = Vector3(
 		_camera_rest_pos.x + randf_range(-1.0, 1.0) * shake_amt,
 		cam_y + randf_range(-1.0, 1.0) * shake_amt,
@@ -2120,26 +2121,33 @@ func _update_body_scale() -> void:
 		return
 	var bs: float = maxf(0.1, weapon.body_scale)
 	var hs: float = maxf(0.1, weapon.head_scale)
-	body_model.scale = Vector3.ONE * bs
+	# Per-axis warp lets cards like SLENDERMAN / FLATFISH stretch the body
+	# without changing overall mass. Clamped so a 0 axis doesn't squash to nothing.
+	var axes: Vector3 = Vector3(
+		maxf(0.1, weapon.body_scale_axes.x),
+		maxf(0.1, weapon.body_scale_axes.y),
+		maxf(0.1, weapon.body_scale_axes.z),
+	)
+	body_model.scale = axes * bs
 	# head_scale does not change the blob mesh itself; it only scales the head
 	# hitbox below, so cards like BIG HEAD still change how easy the head is to hit.
 	# Hitboxes are siblings under the Player root — shift their y so they sit
 	# where the scaled visual parts actually are, and scale them to match.
 	if head_hitbox:
-		head_hitbox.position.y = _head_hitbox_rest_y * bs
-		head_hitbox.scale = Vector3.ONE * (bs * hs)
+		head_hitbox.position.y = _head_hitbox_rest_y * bs * axes.y
+		head_hitbox.scale = axes * (bs * hs)
 	if torso_hitbox:
-		torso_hitbox.position.y = _torso_hitbox_rest_y * bs
-		torso_hitbox.scale = Vector3.ONE * bs
+		torso_hitbox.position.y = _torso_hitbox_rest_y * bs * axes.y
+		torso_hitbox.scale = axes * bs
 	if legs_hitbox:
-		legs_hitbox.position.y = _legs_hitbox_rest_y * bs
-		legs_hitbox.scale = Vector3.ONE * bs
+		legs_hitbox.position.y = _legs_hitbox_rest_y * bs * axes.y
+		legs_hitbox.scale = axes * bs
 	# Camera sits at head height — scale the rest position so a CHONKY player
 	# looks out from their actual (taller) head rather than mid-torso.
 	if camera:
 		camera.position = Vector3(
 			_camera_rest_pos.x,
-			_camera_rest_pos.y * bs,
+			_camera_rest_pos.y * bs * axes.y,
 			_camera_rest_pos.z,
 		)
 	# Gun feels smaller in the hands of a bigger player (inverse sqrt scaling
