@@ -73,6 +73,13 @@ var _pause_menu: Control = null
 var _ghost_overlay: Control = null
 var _ghost_label: Label = null
 var _death_overlay: ColorRect = null
+var _explosion_flash_overlay: ColorRect = null
+var _arena_env: Environment = null
+var _base_tonemap_exposure: float = 1.0
+var _exposure_duck: float = 0.0
+var _exposure_duck_vel: float = 0.0
+var _flash_alpha: float = 0.0
+var _flash_alpha_vel: float = 0.0
 
 var _dash_segments: Array[ProgressBar] = []
 var _dash_text_hbox: Control = null
@@ -206,9 +213,14 @@ func _ready() -> void:
 	_build_ghost_overlay()
 	_build_custom_cursor()
 	_build_death_overlay()
+	_build_explosion_flash_overlay()
 	_build_retro_filter()
 	_build_tab_overlay()
 	_build_stats_panel()
+	var we := $Arena/WorldEnvironment
+	if we and we.environment:
+		_arena_env = we.environment
+		_base_tonemap_exposure = _arena_env.tonemap_exposure
 
 	if multiplayer.is_server():
 		multiplayer.peer_disconnected.connect(_on_peer_disconnected)
@@ -250,6 +262,7 @@ func _client_request_spawn_when_ready() -> void:
 	)
 
 func _process(delta: float) -> void:
+	_update_explosion_sidechain(delta)
 	_update_custom_cursor()
 	if local_player and is_instance_valid(local_player):
 		health_label.text = "GHOST" if local_player.get("ghost_mode") == true else "HP  %d" % local_player.health
@@ -1583,6 +1596,41 @@ func _build_death_overlay() -> void:
 	$HUD.add_child(_death_overlay)
 	# Place it above the ghost shader (index 0) but still at the back of the HUD
 	$HUD.move_child(_death_overlay, 1)
+
+func _build_explosion_flash_overlay() -> void:
+	_explosion_flash_overlay = ColorRect.new()
+	_explosion_flash_overlay.name = "ExplosionFlashOverlay"
+	_explosion_flash_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_explosion_flash_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_explosion_flash_overlay.color = Color(1.0, 0.96, 0.88, 0.0)
+	$HUD.add_child(_explosion_flash_overlay)
+	$HUD.move_child(_explosion_flash_overlay, 1)
+
+func trigger_explosion_sidechain(pos: Vector3, radius: float, peak: float = 1.0) -> void:
+	if local_player == null or not is_instance_valid(local_player):
+		return
+	var dist := pos.distance_to(local_player.global_position)
+	var affect_radius := maxf(radius * 3.2, 8.0)
+	if dist > affect_radius:
+		return
+	var amount := clampf((1.0 - dist / affect_radius) * peak, 0.0, 1.0)
+	if amount <= 0.0:
+		return
+	# Exposure duck sells the "camera iris clamps down" effect while the white
+	# veil provides the immediate retinal blast.
+	_exposure_duck = maxf(_exposure_duck, amount * 0.95)
+	_exposure_duck_vel = maxf(_exposure_duck_vel, 4.6 + amount * 2.8)
+	_flash_alpha = maxf(_flash_alpha, amount * 0.55)
+	_flash_alpha_vel = maxf(_flash_alpha_vel, 7.0 + amount * 4.0)
+
+func _update_explosion_sidechain(delta: float) -> void:
+	if _arena_env:
+		var target_exposure := _base_tonemap_exposure - _exposure_duck * 0.75
+		_arena_env.tonemap_exposure = lerpf(_arena_env.tonemap_exposure, target_exposure, clampf(delta * 20.0, 0.0, 1.0))
+	if _explosion_flash_overlay:
+		_explosion_flash_overlay.color.a = _flash_alpha
+	_exposure_duck = move_toward(_exposure_duck, 0.0, _exposure_duck_vel * delta)
+	_flash_alpha = move_toward(_flash_alpha, 0.0, _flash_alpha_vel * delta)
 
 func show_death_effect(show: bool) -> void:
 	if _death_overlay == null: return

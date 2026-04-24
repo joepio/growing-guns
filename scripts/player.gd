@@ -721,10 +721,14 @@ func _spawn_bullet_blast(pos: Vector3, radius: float, color: Color) -> void:
 	# Bigger blasts expand further, hold a hotter core, and pump a brighter
 	# point light — stacked EXPLOSIVE ROUNDS cards should feel earth-shaking.
 	var scene: Node = get_tree().current_scene
+	if scene and scene.has_method("trigger_explosion_sidechain"):
+		scene.trigger_explosion_sidechain(pos, radius, clampf(radius / 5.0, 0.35, 1.0))
 	var r_norm: float = clampf(radius / 6.0, 0.4, 2.8)
-	var expand_time: float = clampf(0.16 + radius * 0.015, 0.16, 0.45)
+	var expand_time: float = clampf(0.1 + radius * 0.012, 0.12, 0.24)
+	_spawn_heat_distortion(scene, pos, radius, expand_time, clampf(radius * 0.012, 0.025, 0.06))
 
-	# 1) White-hot core flash.
+	# 1) Fireball volume. Grow linearly to the effective radius while the
+	# emitted light drops fast; opacity ramps up as the blast front arrives.
 	var core := MeshInstance3D.new()
 	var cm := SphereMesh.new()
 	cm.radius = 0.25
@@ -733,21 +737,30 @@ func _spawn_bullet_blast(pos: Vector3, radius: float, color: Color) -> void:
 	var cmat := StandardMaterial3D.new()
 	cmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	cmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	cmat.albedo_color = Color(1.0, 0.95, 0.8, 0.92)
+	cmat.albedo_color = Color(1.0, 0.96, 0.86, 0.08)
 	cmat.emission_enabled = true
-	cmat.emission = Color(1.0, 0.9, 0.55)
-	cmat.emission_energy_multiplier = 9.0
+	cmat.emission = Color(1.0, 0.88, 0.4)
+	cmat.emission_energy_multiplier = 14.0
+	cmat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	core.material_override = cmat
 	core.position = pos
 	scene.add_child(core)
 	var ctw := core.create_tween().set_parallel(true)
-	ctw.tween_property(core, "scale", Vector3.ONE * r_norm * 2.0, 0.10)\
+	var core_target_scale := Vector3.ONE * maxf(0.01, radius / cm.radius)
+	ctw.tween_property(core, "scale", core_target_scale, expand_time)\
+		.set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_IN_OUT)
+	ctw.tween_property(cmat, "albedo_color", Color(1.0, 0.62, 0.18, 0.34), expand_time * 0.52)\
+		.set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_IN_OUT)
+	ctw.tween_property(cmat, "albedo_color", Color(0.95, 0.12, 0.02, 0.0), expand_time * 0.48)\
+		.set_delay(expand_time * 0.52).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	ctw.tween_property(cmat, "emission", Color(1.0, 0.34, 0.08), expand_time * 0.65)\
+		.set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_IN_OUT)
+	ctw.tween_property(cmat, "emission_energy_multiplier", 0.0, expand_time * 0.34)\
 		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
-	ctw.tween_property(cmat, "albedo_color", Color(1, 1, 1, 0.0), 0.13)
-	ctw.tween_property(cmat, "emission_energy_multiplier", 0.0, 0.13)
 	ctw.chain().tween_callback(core.queue_free)
 
-	# 2) Colored shockwave — expands to full damage radius.
+	# 2) Dense blast shell. The border of the effective radius reads as a
+	# briefly opaque wall rather than a faint transparent puff.
 	var wave := MeshInstance3D.new()
 	var wm := SphereMesh.new()
 	wm.radius = 0.2
@@ -756,36 +769,114 @@ func _spawn_bullet_blast(pos: Vector3, radius: float, color: Color) -> void:
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.albedo_color = Color(color.r, color.g, color.b, 0.55)
+	mat.albedo_color = Color(1.0, 0.5, 0.14, 0.02)
 	mat.emission_enabled = true
-	mat.emission = color
-	mat.emission_energy_multiplier = 6.0
+	mat.emission = color.lerp(Color(1.0, 0.45, 0.08), 0.6)
+	mat.emission_energy_multiplier = 4.0
 	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	wave.material_override = mat
 	wave.position = pos
 	scene.add_child(wave)
 	var tw := wave.create_tween().set_parallel(true)
-	tw.tween_property(wave, "scale", Vector3.ONE * radius * 1.35, expand_time)\
+	var wave_target_scale := Vector3.ONE * maxf(0.01, (radius * 1.08) / wm.radius)
+	tw.tween_property(wave, "scale", wave_target_scale, expand_time)\
+		.set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_IN_OUT)
+	tw.tween_property(mat, "albedo_color", Color(1.0, 0.42, 0.08, 0.13), expand_time * 0.5)\
+		.set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_IN_OUT)
+	tw.tween_property(mat, "albedo_color", Color(0.82, 0.08, 0.01, 0.0), expand_time * 0.5)\
+		.set_delay(expand_time * 0.5).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	tw.tween_property(mat, "emission_energy_multiplier", 0.0, expand_time * 0.28)\
 		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
-	tw.tween_property(mat, "albedo_color", Color(color.r, color.g, color.b, 0.0), expand_time + 0.05)
-	tw.tween_property(mat, "emission_energy_multiplier", 0.0, expand_time + 0.05)
 	tw.chain().tween_callback(wave.queue_free)
 
-	# 3) Explosion light — always on, and notably hotter than the rifle flash.
+	# 3) Explosion light — extremely bright at ignition, then it collapses fast.
 	var light := OmniLight3D.new()
-	light.light_color = color.lerp(Color(1.0, 0.86, 0.62), 0.45)
-	light.light_energy = clampf(12.0 + radius * 2.8, 12.0, 34.0)
-	light.omni_range = radius * 3.6
+	var hot_color := color.lerp(Color(1.0, 0.98, 0.9), 0.72)
+	var warm_color := color.lerp(Color(1.0, 0.6, 0.18), 0.5)
+	var ember_color := color.lerp(Color(0.9, 0.16, 0.04), 0.38)
+	light.light_color = hot_color
+	light.light_energy = clampf(20.0 + radius * 4.5, 20.0, 48.0)
+	light.omni_range = radius * 4.2
 	light.position = pos
 	scene.add_child(light)
+	var light_dur := clampf(0.1 + radius * 0.012, 0.1, 0.22)
 	var ltw := light.create_tween()
-	ltw.tween_property(light, "light_energy", 0.0, clampf(0.18 + radius * 0.02, 0.18, 0.4))\
+	ltw.set_parallel(true)
+	ltw.tween_property(light, "light_color", warm_color, light_dur * 0.28)\
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	ltw.tween_property(light, "light_color", ember_color, light_dur * 0.72)\
+		.set_delay(light_dur * 0.28).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
+	ltw.tween_property(light, "light_energy", 0.0, light_dur)\
 		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
 	ltw.tween_callback(light.queue_free)
 
 	# 4) Big blasts play the full explosion SFX; smaller impacts stay visual.
 	if radius >= 3.5:
 		SFX.explosion(pos)
+
+func _spawn_heat_distortion(scene: Node, pos: Vector3, radius: float, duration: float, strength: float) -> void:
+	if scene == null:
+		return
+	var shell := MeshInstance3D.new()
+	var mesh := SphereMesh.new()
+	mesh.radius = 0.22
+	mesh.height = 0.44
+	mesh.radial_segments = 20
+	mesh.rings = 10
+	shell.mesh = mesh
+	var shader := Shader.new()
+	shader.code = """
+		shader_type spatial;
+		render_mode unshaded, cull_disabled, depth_draw_never;
+
+		uniform sampler2D screen_tex : hint_screen_texture, filter_linear_mipmap;
+		uniform float distortion_strength = 0.04;
+		uniform float zoom_strength = 0.015;
+		uniform float opacity = 0.18;
+
+		void fragment() {
+			vec3 n = normalize((VIEW_MATRIX * vec4(NORMAL, 0.0)).xyz);
+			float fresnel = pow(1.0 - abs(dot(normalize(VIEW), NORMAL)), 2.4);
+			vec2 offset = n.xy * distortion_strength * fresnel;
+			vec2 zoom = (SCREEN_UV - vec2(0.5)) * zoom_strength * fresnel;
+			vec2 uv = SCREEN_UV - zoom + offset;
+			vec3 col = texture(screen_tex, uv).rgb;
+			ALBEDO = col;
+			ALPHA = opacity * fresnel;
+		}
+	"""
+	var mat := ShaderMaterial.new()
+	mat.shader = shader
+	mat.set_shader_parameter("distortion_strength", strength * 2.4)
+	mat.set_shader_parameter("zoom_strength", strength * 0.9)
+	mat.set_shader_parameter("opacity", 0.34)
+	shell.material_override = mat
+	shell.position = pos
+	scene.add_child(shell)
+
+	var target_scale := Vector3.ONE * maxf(0.01, (radius * 1.85) / mesh.radius)
+	var tw := shell.create_tween().set_parallel(true)
+	tw.tween_property(shell, "scale", target_scale, duration)\
+		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+	tw.tween_method(
+		func(v: float) -> void: mat.set_shader_parameter("distortion_strength", v),
+		strength,
+		0.0,
+		duration * 0.85
+	).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+	tw.tween_method(
+		func(v: float) -> void: mat.set_shader_parameter("zoom_strength", v),
+		strength * 0.35,
+		0.0,
+		duration * 0.85
+	).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+	tw.tween_method(
+		func(v: float) -> void: mat.set_shader_parameter("opacity", v),
+		0.34,
+		0.0,
+		duration * 0.72
+	).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+	tw.chain().tween_callback(shell.queue_free)
 
 func _spawn_muzzle_flash(color: Color = Color(1.0, 0.88, 0.45), scale_f: float = 1.0) -> void:
 	# Directional flash: a short starburst plus a forward flame plume reads
