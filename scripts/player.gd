@@ -53,9 +53,10 @@ const MELEE_RELOAD := 0.5
 const MELEE_RANGE := 3.2
 const MELEE_DAMAGE := 50
 const MELEE_BACKSTAB := 9999  # guaranteed kill
-const VFX_TRANSIENT_LIGHTS := false
-const VFX_MAX_IMPACT_DUST := 2
-const VFX_MAX_BLOOD_DROPS := 3
+const VFX_TRANSIENT_LIGHTS := false  # gameplay-wide override; the impact/blood
+									 # paths now spawn lights based on damage instead.
+const VFX_MAX_IMPACT_DUST := 12
+const VFX_MAX_BLOOD_DROPS := 16
 const REMOTE_INTERP_SPEED := 24.0
 const REMOTE_SNAP_DISTANCE := 8.0
 const MINE_RELOAD := 2.5
@@ -704,6 +705,12 @@ func _fire_rifle() -> void:
 	muzzle_kick_z = max(muzzle_kick_z, RIFLE_RECOIL_KICK * scale_f)
 	shake_amt = max(shake_amt, RIFLE_SHAKE * scale_f)
 	rotate_y(randf_range(-RIFLE_RECOIL_YAW_JITTER, RIFLE_RECOIL_YAW_JITTER) * scale_f)
+	# Physical recoil push — opposite to where you're aiming. Negligible at
+	# base damage; meaningful when you stack DAMAGE / HAYMAKER / BAZOOKA.
+	# Power 1.6 means scaling is gentle until damage is well above 1×.
+	var dmg_ratio: float = weapon.get_damage() / Weapon.BASE_DAMAGE
+	var kick_strength: float = clampf(0.4 * pow(dmg_ratio, 1.6), 0.1, 12.0)
+	velocity -= cam_dir * kick_strength * float(weapon.get_shots_per_trigger())
 	# Snapshot the effective spread BEFORE this shot's recoil kicks in,
 	# then add the per-shot recoil so the next shot is sloppier.
 	var spread: float = get_effective_spread()
@@ -1102,9 +1109,9 @@ func _spawn_impact(pos: Vector3, color: Color = Color(1.0, 0.9, 0.3), scale_f: f
 	var sz: float = scale_f * sqrt(dmg_ratio)
 	var spark_boost: float = lerpf(1.0, 2.5, clampf((dmg_ratio - 1.0) / 4.0, 0.0, 1.0))
 
-	# Brief colored point lights look good, but they are expensive when every
-	# peer renders every hit. Keep them optional for LAN playtests.
-	if VFX_TRANSIENT_LIGHTS:
+	# Heavy hits flash a brief colored point light at the impact. Pistol-base
+	# shots stay dark so the GPU doesn't burn cycles on every plink.
+	if dmg_ratio > 1.4:
 		var light := OmniLight3D.new()
 		light.light_color = color
 		light.light_energy = 3.5 * scale_f * spark_boost
@@ -1116,8 +1123,8 @@ func _spawn_impact(pos: Vector3, color: Color = Color(1.0, 0.9, 0.3), scale_f: f
 			.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
 		ltw.tween_callback(light.queue_free)
 
-	# Heat flash: a very brief, almost-white burst for high-damage hits.
-	if VFX_TRANSIENT_LIGHTS and dmg_ratio > 1.8:
+	# Heat flash: a very brief, almost-white burst for very-high-damage hits.
+	if dmg_ratio > 2.2:
 		var heat := OmniLight3D.new()
 		heat.light_color = Color(1.0, 0.88, 0.65)
 		heat.light_energy = 6.0 + 3.0 * dmg_ratio
@@ -1165,7 +1172,8 @@ func _spawn_blood(pos: Vector3, dir: Vector3, dmg_ratio: float) -> void:
 	var sz: float = sqrt(dmg_ratio)
 	var count: int = min(VFX_MAX_BLOOD_DROPS, int(round(8.0 * sz)))
 
-	if VFX_TRANSIENT_LIGHTS:
+	# Hard hits emit a brief deep-red flash on the wound site.
+	if dmg_ratio > 1.4:
 		var light := OmniLight3D.new()
 		light.light_color = Color(0.8, 0.05, 0.05)
 		light.light_energy = 2.5 * sz

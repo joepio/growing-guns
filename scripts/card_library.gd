@@ -40,6 +40,15 @@ static func all() -> Array:
 				w.spread *= 0.65,
 		},
 		{
+			"id": "precision",
+			"name": "PRECISION",
+			"desc": "Tighter spread and lower per-shot recoil",
+			"color": Color(0.45, 0.95, 1.0),
+			"apply": func(w: Weapon) -> void:
+				w.spread *= 0.4
+				w.recoil_per_shot *= 0.5,
+		},
+		{
 			"id": "sneakers",
 			"name": "SNEAKERS",
 			"desc": "",
