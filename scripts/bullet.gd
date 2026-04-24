@@ -139,7 +139,7 @@ func _handle_collision(result: Dictionary) -> void:
 
 			# Send hit confirmation ONLY to the shooter's client
 			if shooter_node:
-				shooter_node._hit_confirm.rpc_id(shooter_node.get_multiplayer_authority(), is_head, dmg)
+				shooter_node._hit_confirm.rpc_id(shooter_node.get_multiplayer_authority(), is_head, dmg, hit_pos)
 
 			if weapon_stats.lifesteal > 0.0:
 				var heal_amt: int = int(float(dmg) * weapon_stats.lifesteal)
