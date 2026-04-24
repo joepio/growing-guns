@@ -309,7 +309,11 @@ func _input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_F1:
 		_toggle_dev_panel()
 		return
-	if event.is_action_pressed("ui_cancel"):
+	# Pause menu: ui_cancel (Esc) plus a hard-coded P fallback. Esc is sometimes
+	# eaten by a focused Control or by the OS, so P is always available.
+	var pause_pressed: bool = event.is_action_pressed("ui_cancel") \
+		or (event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_P)
+	if pause_pressed:
 		if _dev_root and _dev_root.visible:
 			_toggle_dev_panel()
 			return
