@@ -8,6 +8,10 @@ extends Control
 @onready var game_list_vbox: VBoxContainer = $Container/Panel/Margin/VBox/ScrollContainer/GameList
 @onready var status_label: Label = $Container/Panel/Margin/VBox/Status
 
+const MAX_BOTS := 7
+var _bot_count: int = 1
+var _bot_count_label: Label = null
+
 func _ready() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	_build_retro_filter()
@@ -15,12 +19,57 @@ func _ready() -> void:
 	bot_button.pressed.connect(_on_vs_bot)
 	host_button.pressed.connect(_on_host)
 	join_button.pressed.connect(_on_join)
+	_build_bot_count_row()
 
 	name_input.text = "Player_%d" % (randi() % 1000)
 
 	# Start listening for local games immediately
 	NetworkManager.game_discovered.connect(_on_games_discovered)
 	NetworkManager.start_discovery()
+
+func _build_bot_count_row() -> void:
+	# "Bots: [-] N [+]" inserted directly above the VS BOT button.
+	var row := HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.add_theme_constant_override("separation", 8)
+
+	var label := Label.new()
+	label.text = "Bots:"
+	label.add_theme_font_size_override("font_size", 14)
+	row.add_child(label)
+
+	var minus := Button.new()
+	minus.text = "−"
+	minus.custom_minimum_size = Vector2(34, 28)
+	minus.focus_mode = Control.FOCUS_NONE
+	minus.pressed.connect(_on_bot_minus)
+	row.add_child(minus)
+
+	_bot_count_label = Label.new()
+	_bot_count_label.text = str(_bot_count)
+	_bot_count_label.custom_minimum_size = Vector2(28, 0)
+	_bot_count_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_bot_count_label.add_theme_font_size_override("font_size", 16)
+	row.add_child(_bot_count_label)
+
+	var plus := Button.new()
+	plus.text = "+"
+	plus.custom_minimum_size = Vector2(34, 28)
+	plus.focus_mode = Control.FOCUS_NONE
+	plus.pressed.connect(_on_bot_plus)
+	row.add_child(plus)
+
+	var actions := bot_button.get_parent()
+	actions.add_child(row)
+	actions.move_child(row, bot_button.get_index())  # place row right above VS BOT
+
+func _on_bot_minus() -> void:
+	_bot_count = max(1, _bot_count - 1)
+	_bot_count_label.text = str(_bot_count)
+
+func _on_bot_plus() -> void:
+	_bot_count = min(MAX_BOTS, _bot_count + 1)
+	_bot_count_label.text = str(_bot_count)
 
 func _build_retro_filter() -> void:
 	var retro_overlay := ColorRect.new()
@@ -94,6 +143,7 @@ func _on_vs_bot() -> void:
 	status_label.text = "Starting solo match..."
 	if NetworkManager.host_game(name_input.text):
 		NetworkManager.set_meta("spawn_bot_on_start", true)
+		NetworkManager.set_meta("bot_count_on_start", _bot_count)
 		_go_to_game()
 
 func _on_host() -> void:

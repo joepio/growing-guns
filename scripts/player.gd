@@ -664,6 +664,8 @@ func _apply_bullet_splash(pos: Vector3, radius: float, damage: float, shooter_id
 	for p: Node3D in get_tree().get_nodes_in_group("players"):
 		if not is_instance_valid(p):
 			continue
+		if p.get("ghost_mode") == true:
+			continue
 		var dist: float = pos.distance_to(p.global_position)
 		if dist > radius:
 			continue
@@ -2168,7 +2170,7 @@ func _bot_physics(delta: float) -> void:
 	if not is_on_floor():
 		velocity.y -= GRAVITY * delta
 
-	if _bot_target == null or not is_instance_valid(_bot_target):
+	if _bot_target == null or not is_instance_valid(_bot_target) or _bot_target.get("ghost_mode") == true:
 		_bot_target = _bot_find_target()
 	if _bot_target == null:
 		velocity.x = move_toward(velocity.x, 0.0, BOT_MOVE_SPEED * 3.0 * delta)
@@ -2246,7 +2248,7 @@ func _bot_physics(delta: float) -> void:
 		global_position = Vector3(0, 5, 0)
 		_last_sync_pos = Vector3.INF  # force resync
 
-	if _bot_shoot_cooldown <= 0.0 and _bot_has_los(_bot_target):
+	if not ghost_mode and _bot_shoot_cooldown <= 0.0 and _bot_has_los(_bot_target):
 		# Dev toggle (F1 panel): bots keep moving/aiming but hold their fire.
 		var game_scene: Node = get_tree().current_scene
 		if not (game_scene and game_scene.get("bots_hold_fire") == true):
@@ -2268,17 +2270,24 @@ func _tick_footsteps(delta: float) -> void:
 		SFX.footstep(global_position)
 
 func _bot_find_target() -> Node3D:
+	# Pick the nearest non-ghost player (bot or human) — bots fight everything.
+	var best: Node3D = null
+	var best_d: float = INF
 	for p in get_parent().get_children():
 		if p == self:
 			continue
 		if not p.is_in_group("players"):
 			continue
-		if p.get("is_bot"):
-			continue
 		if p.get("ghost_mode") == true:
 			continue
-		return p
-	return null
+		var p3 := p as Node3D
+		if p3 == null:
+			continue
+		var d: float = global_position.distance_squared_to(p3.global_position)
+		if d < best_d:
+			best_d = d
+			best = p3
+	return best
 
 func _bot_has_los(target: Node3D) -> bool:
 	var from := global_position + Vector3.UP * 0.7
