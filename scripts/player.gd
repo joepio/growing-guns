@@ -2,6 +2,16 @@ extends CharacterBody3D
 
 const Gib := preload("res://scripts/gib.gd")
 
+# Heat-distortion shader & sphere mesh are immutable; build once per process
+# instead of per explosion (each Shader.new() triggers a compile = stutter).
+static var _heat_shader: Shader = null
+static var _heat_mesh: SphereMesh = null
+
+# Single chunk count used for every ragdoll. Must match Gib.warm_tree() in
+# _ready() — the gib cache is keyed by [mesh, chunk_count], so any mismatch
+# forces a synchronous main-thread bake (~200ms per surface).
+const GIB_CHUNK_COUNT := 5
+
 # --- Movement ---
 const WALK_SPEED := 14.0
 const AIR_ACCEL := 70.0
@@ -139,11 +149,10 @@ const HIT_FACE_DURATION := 0.22
 
 # --- Bot AI ---
 const BOT_MOVE_SPEED := 8.0
-const BOT_SHOOT_INTERVAL := 0.7
 const BOT_FOLLOW_DIST := 7.0
 const BOT_ROT_SPEED := 6.0
-const BOT_SPREAD := 0.055                # ~3.15° — miss-prone but threatening
-const BOT_MISS_CHANCE := 0.3             # fraction of shots that get huge extra spread
+const BOT_SPREAD := 0.09                 # ~5.2° — miss-prone but threatening
+const BOT_MISS_CHANCE := 0.45            # fraction of shots that get huge extra spread
 const BOT_JUMP_CHANCE := 0.025           # per physics tick, when on floor
 const BOT_DASH_CHANCE := 0.018           # per physics tick, when charge available
 
@@ -194,7 +203,7 @@ func _ready() -> void:
 	_setup_third_person_gun()
 	add_to_group("players")
 	# Pre-bake gib chunk meshes off-thread so the first kill doesn't hitch.
-	Gib.warm_tree(body_model, 10)
+	Gib.warm_tree(body_model, GIB_CHUNK_COUNT)
 
 # Attach a gun mesh to the blob's hand anchor so third-person viewers see
 # roughly where the weapon lives. The local player keeps their first-person
@@ -573,11 +582,9 @@ func _physics_process(delta: float) -> void:
 	_tick_footsteps(delta)
 
 	# --- Combat actions ---
-	# Default is semi-auto (click per shot). The UZI card flips weapon.full_auto
-	# so holding LMB fires continuously until the mag runs out.
+	# Hold LMB to keep firing — the weapon's fire_interval gates the cadence.
 	var can_fire := Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
-	var fire_input := (Input.is_action_pressed("shoot") if weapon.full_auto \
-		else Input.is_action_just_pressed("shoot")) and can_fire
+	var fire_input := Input.is_action_pressed("shoot") and can_fire
 	if ghost_mode:
 		fire_input = false
 		if Input.is_action_just_pressed("shoot") and grenade_cooldown <= 0.0 and can_fire:
@@ -853,35 +860,37 @@ func _spawn_heat_distortion(scene: Node, pos: Vector3, radius: float, duration: 
 	if scene == null:
 		return
 	var shell := MeshInstance3D.new()
-	var mesh := SphereMesh.new()
-	mesh.radius = 0.22
-	mesh.height = 0.44
-	mesh.radial_segments = 20
-	mesh.rings = 10
-	shell.mesh = mesh
-	var shader := Shader.new()
-	shader.code = """
-		shader_type spatial;
-		render_mode unshaded, cull_disabled, depth_draw_never;
+	if _heat_mesh == null:
+		_heat_mesh = SphereMesh.new()
+		_heat_mesh.radius = 0.22
+		_heat_mesh.height = 0.44
+		_heat_mesh.radial_segments = 20
+		_heat_mesh.rings = 10
+	shell.mesh = _heat_mesh
+	if _heat_shader == null:
+		_heat_shader = Shader.new()
+		_heat_shader.code = """
+			shader_type spatial;
+			render_mode unshaded, cull_disabled, depth_draw_never;
 
-		uniform sampler2D screen_tex : hint_screen_texture, filter_linear_mipmap;
-		uniform float distortion_strength = 0.04;
-		uniform float zoom_strength = 0.015;
-		uniform float opacity = 0.18;
+			uniform sampler2D screen_tex : hint_screen_texture, filter_linear_mipmap;
+			uniform float distortion_strength = 0.04;
+			uniform float zoom_strength = 0.015;
+			uniform float opacity = 0.18;
 
-		void fragment() {
-			vec3 n = normalize((VIEW_MATRIX * vec4(NORMAL, 0.0)).xyz);
-			float fresnel = pow(1.0 - abs(dot(normalize(VIEW), NORMAL)), 2.4);
-			vec2 offset = n.xy * distortion_strength * fresnel;
-			vec2 zoom = (SCREEN_UV - vec2(0.5)) * zoom_strength * fresnel;
-			vec2 uv = SCREEN_UV - zoom + offset;
-			vec3 col = texture(screen_tex, uv).rgb;
-			ALBEDO = col;
-			ALPHA = opacity * fresnel;
-		}
-	"""
+			void fragment() {
+				vec3 n = normalize((VIEW_MATRIX * vec4(NORMAL, 0.0)).xyz);
+				float fresnel = pow(1.0 - abs(dot(normalize(VIEW), NORMAL)), 2.4);
+				vec2 offset = n.xy * distortion_strength * fresnel;
+				vec2 zoom = (SCREEN_UV - vec2(0.5)) * zoom_strength * fresnel;
+				vec2 uv = SCREEN_UV - zoom + offset;
+				vec3 col = texture(screen_tex, uv).rgb;
+				ALBEDO = col;
+				ALPHA = opacity * fresnel;
+			}
+		"""
 	var mat := ShaderMaterial.new()
-	mat.shader = shader
+	mat.shader = _heat_shader
 	mat.set_shader_parameter("distortion_strength", strength * 2.4)
 	mat.set_shader_parameter("zoom_strength", strength * 0.9)
 	mat.set_shader_parameter("opacity", 0.34)
@@ -889,7 +898,7 @@ func _spawn_heat_distortion(scene: Node, pos: Vector3, radius: float, duration: 
 	shell.position = pos
 	scene.add_child(shell)
 
-	var target_scale := Vector3.ONE * maxf(0.01, (radius * 1.85) / mesh.radius)
+	var target_scale := Vector3.ONE * maxf(0.01, (radius * 1.85) / _heat_mesh.radius)
 	var tw := shell.create_tween().set_parallel(true)
 	tw.tween_property(shell, "scale", target_scale, duration)\
 		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
@@ -1221,19 +1230,39 @@ func _ragdoll(
 	force_origin: Vector3 = Vector3.INF,
 	gib_force: float = 0.0,
 	blast_radius: float = 0.0,
-	blast_severity: float = 0.0
+	blast_severity: float = 0.0,
+	is_head: bool = false,
 ) -> void:
-	# Hide the standing body and scatter a matching set of rigid chunks.
-	# Every peer simulates its own — cosmetic desync is fine.
+	# Switch to the squinty `>_<` face so the cloned ragdoll meshes inherit
+	# that state. Done BEFORE hiding the body so visibility checks during
+	# cloning still reflect the (about-to-be-hidden) authored tree.
+	_set_hit_face_state(true)
+	_hit_face_timer = 0.0  # don't let _process auto-revert on the dead body
+	_spawn_ragdoll(push_dir, force_origin, gib_force, blast_radius, blast_severity, is_head)
+	# Every peer simulates its own corpse — cosmetic desync is fine.
 	body_model.visible = false
-	_spawn_ragdoll(push_dir, force_origin, gib_force, blast_radius, blast_severity)
+	_set_dead_visuals(true)
+
+# Hide the first-person gun mesh and turn off the hit areas so a corpse
+# can't be shot or seen with a floating gun.
+func _set_dead_visuals(dead: bool) -> void:
+	if muzzle:
+		muzzle.visible = not dead
+	var layer: int = 0 if dead else 2
+	if head_hitbox:
+		head_hitbox.collision_layer = layer
+	if torso_hitbox:
+		torso_hitbox.collision_layer = layer
+	if legs_hitbox:
+		legs_hitbox.collision_layer = layer
 
 func _spawn_ragdoll(
 	push_dir: Vector3,
 	force_origin: Vector3 = Vector3.INF,
 	gib_force: float = 0.0,
 	blast_radius: float = 0.0,
-	blast_severity: float = 0.0
+	blast_severity: float = 0.0,
+	is_head: bool = false,
 ) -> void:
 	# Voronoi-split the blob's primitive meshes into chunks that fly apart.
 	# body_model is hidden first so the user only reads the flying debris.
@@ -1265,40 +1294,73 @@ func _spawn_ragdoll(
 	_spawn_gib_mist(mist_origin, dir_n, kb_mag, blast_radius, blast_severity)
 	if blast_radius > 0.0:
 		_spawn_blast_blood_splash(mist_origin, dir_n, blast_severity)
-	var chunk_count: int = 5
-	if blast_radius > 0.0:
-		chunk_count = clampi(int(round(5.0 + chaos * 2.0)), 5, 8)
+	# Fixed chunk_count so the gib cache stays at one key per source mesh.
+	# Varying it forced fresh synchronous bakes on the main thread (~200ms each).
+	var chunk_count: int = GIB_CHUNK_COUNT
 	var impact_blood_strength := clampf(0.18 + kb_mag * 0.12 + chaos * 0.22, 0.15, 1.0)
 
-	# One gib call per visible body surface. The blob body is just a few
-	# primitives, but this loop keeps the effect resilient if the body changes.
-	var first: bool = true
-	for src in meshes:
-		if src.mesh == null:
-			continue
-		var chunks: Array[RigidBody3D] = Gib.explode(
-			src.mesh,
-			src.global_transform,
-			scene,
-			src.material_override,
-			base_vel + Vector3(randf_range(-1.5, 1.5), 0, randf_range(-1.5, 1.5)),
-			burst_strength,
-			chunk_count,
-			14.0,
-			force_origin,
-			impact_blood_strength,
+	# Three death modes:
+	#   • Explosion (blast_radius > 0): chunk every body mesh — full disintegrate.
+	#   • Headshot: head pops off as one body, the rest stays connected.
+	#   • Regular hit: whole body tumbles as a single rigid body.
+	var local_is_authority: bool = is_multiplayer_authority() and not is_bot
+	if blast_radius > 0.0:
+		var first: bool = true
+		for src in meshes:
+			if src.mesh == null:
+				continue
+			var chunks: Array[RigidBody3D] = Gib.explode(
+				src.mesh,
+				src.global_transform,
+				scene,
+				src.material_override,
+				base_vel + Vector3(randf_range(-1.5, 1.5), 0, randf_range(-1.5, 1.5)),
+				burst_strength,
+				chunk_count,
+				14.0,
+				force_origin,
+				impact_blood_strength,
+			)
+			if chunks.is_empty():
+				continue
+			if first and local_is_authority:
+				_ragdoll_head = chunks[0]
+				if scene.has_method("show_death_effect"):
+					scene.show_death_effect(true)
+				first = false
+			for c in chunks:
+				_ragdoll_pieces.append(c)
+	else:
+		# Split head subtree from torso so headshots can launch the head alone.
+		var head_meshes: Array[MeshInstance3D] = []
+		if is_head and head_blob:
+			_collect_meshes(head_blob, head_meshes)
+		var torso_meshes: Array[MeshInstance3D] = []
+		for m in meshes:
+			if not head_meshes.has(m):
+				torso_meshes.append(m)
+		var torso_rb: RigidBody3D = Gib.body_ragdoll(
+			body_model.global_transform, torso_meshes, scene,
+			base_vel + Vector3(randf_range(-0.6, 0.6), 0, randf_range(-0.6, 0.6)),
+			4.0, 14.0,
 		)
-		if chunks.is_empty():
-			continue
-		# Death-cam follows the first chunk of the first surface (usually
-		# something from the upper body). Close enough.
-		if first and is_multiplayer_authority() and not is_bot:
-			_ragdoll_head = chunks[0]
-			if scene.has_method("show_death_effect"):
-				scene.show_death_effect(true)
-			first = false
-		for c in chunks:
-			_ragdoll_pieces.append(c)
+		if torso_rb:
+			_ragdoll_pieces.append(torso_rb)
+			if local_is_authority:
+				_ragdoll_head = torso_rb
+				if scene.has_method("show_death_effect"):
+					scene.show_death_effect(true)
+		if not head_meshes.is_empty():
+			var head_v: Vector3 = base_vel + dir_n * 6.0 + Vector3.UP * 8.0
+			var head_rb: RigidBody3D = Gib.body_ragdoll(
+				head_blob.global_transform, head_meshes, scene,
+				head_v, 18.0, 14.0,
+			)
+			if head_rb:
+				_ragdoll_pieces.append(head_rb)
+				# Camera prefers the popping head over the torso.
+				if local_is_authority:
+					_ragdoll_head = head_rb
 
 @rpc("any_peer", "call_local", "reliable")
 func clear_ragdoll() -> void:
@@ -1309,6 +1371,7 @@ func clear_ragdoll() -> void:
 		if is_instance_valid(piece):
 			piece.queue_free()
 	_ragdoll_pieces.clear()
+	_set_dead_visuals(false)
 	# Restore body visibility on every peer except the local authority
 	# (their body stays hidden in first-person, same as normal).
 	_apply_ghost_visuals()
@@ -1747,11 +1810,12 @@ func take_damage(
 	hit_dir: Vector3 = Vector3.ZERO,
 	gib_force: float = 0.0,
 	blast_radius: float = 0.0,
-	blast_severity: float = 0.0
+	blast_severity: float = 0.0,
+	is_head: bool = false,
 ) -> void:
 	if not is_multiplayer_authority():
 		return
-	_apply_damage(amount, from_id, force_origin, hit_dir, gib_force, blast_radius, blast_severity)
+	_apply_damage(amount, from_id, force_origin, hit_dir, gib_force, blast_radius, blast_severity, is_head)
 
 func _apply_damage(
 	amount: int,
@@ -1760,7 +1824,8 @@ func _apply_damage(
 	hit_dir: Vector3 = Vector3.ZERO,
 	gib_force: float = 0.0,
 	blast_radius: float = 0.0,
-	blast_severity: float = 0.0
+	blast_severity: float = 0.0,
+	is_head: bool = false,
 ) -> void:
 	if ghost_mode or frozen or health <= 0:
 		return
@@ -1810,7 +1875,7 @@ func _apply_damage(
 			upward_scale = 0.06
 		var kb_scale := clampf((ctx_force if ctx_force > 0.0 else push.length()) / Weapon.BASE_KNOCKBACK, 1.0, kb_scale_max)
 		push = push.normalized() * kb_scale + Vector3.UP * (upward_bias + upward_scale * kb_scale)
-		_ragdoll.rpc(push, force_origin, ctx_force, blast_radius, blast_severity)
+		_ragdoll.rpc(push, force_origin, ctx_force, blast_radius, blast_severity, is_head)
 		died.emit(from_id)
 		_report_death.rpc_id(1, from_id)
 
@@ -2186,7 +2251,8 @@ func _bot_physics(delta: float) -> void:
 		var game_scene: Node = get_tree().current_scene
 		if not (game_scene and game_scene.get("bots_hold_fire") == true):
 			_bot_shoot()
-		_bot_shoot_cooldown = BOT_SHOOT_INTERVAL
+		# Bots auto-fire at the weapon's natural cadence.
+		_bot_shoot_cooldown = weapon.get_fire_interval()
 
 func _tick_footsteps(delta: float) -> void:
 	if ghost_mode or not is_on_floor() or dash_timer > 0.0:
@@ -2239,22 +2305,22 @@ func _bot_shoot() -> void:
 	var bullet_speed := weapon.get_bullet_speed()
 	var time_to_hit := dist / maxf(bullet_speed, 1.0)
 
-	# Lead the target, but with a bit of "reaction lag" error (0.8x to 1.1x scaling)
-	var lead_multiplier := randf_range(0.85, 1.05)
+	# Lead the target, but with sloppier "reaction lag" so prediction whiffs.
+	var lead_multiplier := randf_range(0.55, 1.15)
 	var predicted_pos := to + target_vel * time_to_hit * lead_multiplier
 
 	var dir := (predicted_pos - from).normalized()
 
 	# --- Refined Spread ---
-	# Lower base spread, but it scales more naturally.
-	# Humans are better at close range but not 100% perfect.
-	var base_spread := 0.015 # ~0.85 degrees
+	# Even at point-blank the bot has visible wobble; spread climbs sharply
+	# with distance so long-range fights don't feel like a sniper duel.
+	var base_spread := 0.04 # ~2.3 degrees
 	var dist_factor := clampf(dist / 40.0, 0.0, 2.0)
-	var spread := base_spread + (BOT_SPREAD * 0.5 * dist_factor)
+	var spread := base_spread + (BOT_SPREAD * 0.7 * dist_factor)
 
 	# Every so often the bot whiffs harder — keeps it from feeling laser-accurate.
 	if randf() < BOT_MISS_CHANCE:
-		spread *= randf_range(2.0, 4.0)
+		spread *= randf_range(2.5, 5.0)
 
 	var yaw := randf_range(-spread, spread)
 	var pitch := randf_range(-spread, spread)

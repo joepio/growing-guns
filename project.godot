@@ -13,6 +13,7 @@ config_version=5
 config/name="JumpShoot"
 config/description="High-paced multiplayer arena shooter"
 run/main_scene="res://scenes/game.tscn"
+run/max_fps=240
 config/features=PackedStringArray("4.6", "Forward Plus")
 config/icon="res://icon.svg"
 
@@ -23,9 +24,11 @@ SFX="*res://scripts/sfx.gd"
 
 [display]
 
-window/size/viewport_width=1280
+window/size/viewport_width=1281
 window/size/viewport_height=720
+window/size/mode=3
 window/stretch/mode="canvas_items"
+window/vsync/vsync_mode=0
 
 [input]
 
@@ -100,6 +103,10 @@ tab={
 3d_physics/layer_1="world"
 3d_physics/layer_2="player"
 3d_physics/layer_3="projectile"
+
+[physics]
+
+common/physics_ticks_per_second=120
 
 [rendering]
 
