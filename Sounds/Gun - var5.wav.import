@@ -1,0 +1,24 @@
+[remap]
+
+importer="wav"
+type="AudioStreamWAV"
+uid="uid://qc4wgin8irsr"
+path="res://.godot/imported/Gun - var5.wav-5bf336291f6926ee09376a1ea93abcd9.sample"
+
+[deps]
+
+source_file="res://Sounds/Gun - var5.wav"
+dest_files=["res://.godot/imported/Gun - var5.wav-5bf336291f6926ee09376a1ea93abcd9.sample"]
+
+[params]
+
+force/8_bit=false
+force/mono=false
+force/max_rate=false
+force/max_rate_hz=44100
+edit/trim=false
+edit/normalize=false
+edit/loop_mode=0
+edit/loop_begin=0
+edit/loop_end=-1
+compress/mode=2

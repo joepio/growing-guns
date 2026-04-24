@@ -1,5 +1,7 @@
 extends CharacterBody3D
 
+const Gib := preload("res://scripts/gib.gd")
+
 # --- Movement ---
 const WALK_SPEED := 14.0
 const AIR_ACCEL := 70.0
@@ -50,8 +52,19 @@ const INVISIBLE_ALPHA := 0.06
 @onready var camera: Camera3D = $Camera
 @onready var muzzle: Node3D = $Camera/Muzzle
 @onready var body_model: Node3D = $BodyModel
-@onready var head_mesh: MeshInstance3D = $BodyModel/Head
+@onready var blob_rig: Node3D = $BodyModel/BlobRig
+@onready var blob_core: MeshInstance3D = $BodyModel/BlobRig/BlobCore
+@onready var head_blob: MeshInstance3D = $BodyModel/BlobRig/HeadBlob
+@onready var eye_left: MeshInstance3D = $BodyModel/BlobRig/HeadBlob/EyeLeft
+@onready var eye_right: MeshInstance3D = $BodyModel/BlobRig/HeadBlob/EyeRight
+@onready var pupil_left: MeshInstance3D = $BodyModel/BlobRig/HeadBlob/PupilLeft
+@onready var pupil_right: MeshInstance3D = $BodyModel/BlobRig/HeadBlob/PupilRight
+@onready var hit_eye_left: Node3D = $BodyModel/BlobRig/HeadBlob/HitEyeLeft
+@onready var hit_eye_right: Node3D = $BodyModel/BlobRig/HeadBlob/HitEyeRight
+@onready var hand_anchor: Node3D = $BodyModel/BlobRig/HandAnchor
 @onready var head_hitbox: Area3D = $HeadHitbox
+
+var _third_person_gun: Node3D = null
 @onready var torso_hitbox: Area3D = $TorsoHitbox
 @onready var legs_hitbox: Area3D = $LegsHitbox
 @onready var name_label: Label3D = $NameLabel
@@ -103,11 +116,22 @@ var _reload_audio: Node = null
 var _camera_rest_pos: Vector3
 var _landing_bump_y: float = 0.0
 var _was_on_floor: bool = true
+var _step_distance: float = 0.0
+const STEP_STRIDE := 2.2  # meters of ground travel between footstep SFX
 var _view_punch_rot: Vector3 = Vector3.ZERO
 var _view_punch_pos: Vector3 = Vector3.ZERO
 var _melee_tween: Tween = null
 var _ragdoll_head: RigidBody3D = null
 var _body_materials: Dictionary = {}
+var _blob_rig_rest_pos: Vector3 = Vector3.ZERO
+var _blob_core_rest_scale: Vector3 = Vector3.ONE
+var _head_blob_rest_pos: Vector3 = Vector3.ZERO
+var _head_blob_rest_scale: Vector3 = Vector3.ONE
+var _hand_anchor_rest_pos: Vector3 = Vector3.ZERO
+var _blob_phase: float = 0.0
+var _visual_prev_pos: Vector3 = Vector3.INF
+var _hit_face_timer: float = 0.0
+const HIT_FACE_DURATION := 0.22
 
 @export var player_id: int = 1
 @export var player_name: String = "Player"
@@ -156,7 +180,46 @@ func _ready() -> void:
 	_update_gun_visuals()
 	_update_body_scale()
 	_refresh_authority_view()
+	if blob_rig:
+		_blob_rig_rest_pos = blob_rig.position
+	if blob_core:
+		_blob_core_rest_scale = blob_core.scale
+	if head_blob:
+		_head_blob_rest_pos = head_blob.position
+		_head_blob_rest_scale = head_blob.scale
+	if hand_anchor:
+		_hand_anchor_rest_pos = hand_anchor.position
+	_visual_prev_pos = global_position
+	_set_hit_face_state(false)
+	_setup_third_person_gun()
 	add_to_group("players")
+	# Pre-bake gib chunk meshes off-thread so the first kill doesn't hitch.
+	Gib.warm_tree(body_model, 10)
+
+# Attach a gun mesh to the blob's hand anchor so third-person viewers see
+# roughly where the weapon lives. The local player keeps their first-person
+# Camera/Muzzle gun.
+func _setup_third_person_gun() -> void:
+	if hand_anchor == null:
+		return
+	var gun_root := Node3D.new()
+	gun_root.name = "ThirdPersonGun"
+	hand_anchor.add_child(gun_root)
+
+	# Simple gun stand-in — a dark metallic box hovering beside the blob body.
+	var gun := MeshInstance3D.new()
+	var body_mesh := BoxMesh.new()
+	body_mesh.size = Vector3(0.14, 0.14, 0.44)
+	gun.mesh = body_mesh
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.18, 0.18, 0.22)
+	mat.metallic = 0.8
+	mat.roughness = 0.3
+	gun.material_override = mat
+	gun.position = Vector3(0.0, -0.03, -0.18)
+	gun_root.rotation_degrees = Vector3(10.0, 0.0, 0.0)
+	gun_root.add_child(gun)
+	_third_person_gun = gun_root
 
 func _process(delta: float) -> void:
 	if _ragdoll_head and is_instance_valid(_ragdoll_head):
@@ -165,6 +228,11 @@ func _process(delta: float) -> void:
 
 	if not is_multiplayer_authority():
 		_interpolate_remote_state(delta)
+	_update_blob_motion(delta)
+	if _hit_face_timer > 0.0:
+		_hit_face_timer = maxf(0.0, _hit_face_timer - delta)
+		if _hit_face_timer <= 0.0:
+			_set_hit_face_state(false)
 	if is_bot:
 		return
 	# Re-assert camera state every frame until authority is established.
@@ -217,10 +285,77 @@ func _body_meshes() -> Array[MeshInstance3D]:
 	var out: Array[MeshInstance3D] = []
 	if body_model == null:
 		return out
-	for child in body_model.get_children():
-		if child is MeshInstance3D:
-			out.append(child)
+	_collect_meshes(body_model, out)
 	return out
+
+func _collect_meshes(node: Node, out: Array[MeshInstance3D]) -> void:
+	if node is MeshInstance3D:
+		out.append(node)
+	for child in node.get_children():
+		_collect_meshes(child, out)
+
+func _update_blob_motion(delta: float) -> void:
+	if body_model == null or blob_rig == null or blob_core == null:
+		return
+
+	var prev_pos := _visual_prev_pos
+	if prev_pos == Vector3.INF:
+		prev_pos = global_position
+	var world_delta := global_position - prev_pos
+	_visual_prev_pos = global_position
+
+	var planar_velocity := Vector3.ZERO
+	if is_multiplayer_authority() or is_bot:
+		planar_velocity = Vector3(velocity.x, 0.0, velocity.z)
+	else:
+		planar_velocity = Vector3(world_delta.x, 0.0, world_delta.z) / maxf(delta, 0.001)
+
+	var speed := planar_velocity.length()
+	var speed_ratio := clampf(speed / maxf(0.1, WALK_SPEED * weapon.move_speed_mult), 0.0, 1.8)
+	var vertical_speed := velocity.y if (is_multiplayer_authority() or is_bot) else world_delta.y / maxf(delta, 0.001)
+	var airborne := (not is_on_floor()) if (is_multiplayer_authority() or is_bot) else absf(vertical_speed) > 1.5
+	var dash_boost := 1.0 if dash_timer > 0.0 else 0.0
+
+	_blob_phase = wrapf(_blob_phase + delta * lerpf(1.8, 8.0, minf(speed_ratio, 1.0)), 0.0, TAU)
+	var bob := sin(_blob_phase) * (0.02 + 0.04 * speed_ratio) + 0.04
+	if airborne:
+		bob += 0.05
+	if dash_boost > 0.0:
+		bob += 0.03
+	var target_pos := _blob_rig_rest_pos + Vector3(0.0, bob, 0.0)
+	blob_rig.position = blob_rig.position.lerp(target_pos, clampf(delta * 10.0, 0.0, 1.0))
+
+	var local_vel := global_transform.basis.inverse() * planar_velocity
+	var target_roll := deg_to_rad(clampf(-local_vel.x * 1.3, -10.0, 10.0))
+	var target_pitch := deg_to_rad(clampf(-local_vel.z * 0.7 - vertical_speed * 1.6, -14.0, 14.0))
+	blob_rig.rotation.x = lerp_angle(blob_rig.rotation.x, target_pitch, clampf(delta * 8.0, 0.0, 1.0))
+	blob_rig.rotation.z = lerp_angle(blob_rig.rotation.z, target_roll, clampf(delta * 8.0, 0.0, 1.0))
+
+	var floor_squash := 0.12 * minf(speed_ratio, 1.0) + 0.16 * dash_boost
+	var air_stretch := 0.12 if airborne else 0.0
+	var vertical_stretch := clampf(absf(vertical_speed) / 18.0, 0.0, 0.16)
+	var target_scale := _blob_core_rest_scale
+	target_scale.x *= 1.0 + floor_squash - air_stretch * 0.35
+	target_scale.z *= 1.0 + floor_squash - air_stretch * 0.35
+	target_scale.y *= 1.0 - floor_squash * 0.75 + air_stretch + vertical_stretch
+	blob_core.scale = blob_core.scale.lerp(target_scale, clampf(delta * 10.0, 0.0, 1.0))
+
+	if head_blob:
+		var nod := sin(_blob_phase * 0.5 + 0.7) * (0.02 + 0.015 * speed_ratio)
+		var head_target_pos := _head_blob_rest_pos + Vector3(0.0, nod + air_stretch * 0.04, -0.015 * speed_ratio)
+		head_blob.position = head_blob.position.lerp(head_target_pos, clampf(delta * 8.0, 0.0, 1.0))
+		head_blob.rotation.x = lerp_angle(head_blob.rotation.x, -target_pitch * 0.25, clampf(delta * 6.0, 0.0, 1.0))
+		head_blob.rotation.z = lerp_angle(head_blob.rotation.z, -target_roll * 0.2, clampf(delta * 6.0, 0.0, 1.0))
+		var head_scale := _head_blob_rest_scale
+		head_scale.x *= 1.0 - floor_squash * 0.18 + air_stretch * 0.12
+		head_scale.z *= 1.0 - floor_squash * 0.18 + air_stretch * 0.12
+		head_scale.y *= 1.0 + floor_squash * 0.12 + air_stretch * 0.18
+		head_blob.scale = head_blob.scale.lerp(head_scale, clampf(delta * 8.0, 0.0, 1.0))
+
+	if hand_anchor:
+		var sway := sin(_blob_phase * 1.35 + 0.8) * (0.02 + 0.04 * speed_ratio)
+		var hand_target := _hand_anchor_rest_pos + Vector3(0.05 * speed_ratio, sway, -0.02 * dash_boost)
+		hand_anchor.position = hand_anchor.position.lerp(hand_target, clampf(delta * 10.0, 0.0, 1.0))
 
 func _apply_ghost_visuals() -> void:
 	if body_model == null:
@@ -257,6 +392,25 @@ func _apply_ghost_visuals() -> void:
 		else:
 			mesh.material_override = _body_materials.get(mesh, mesh.material_override)
 
+func _set_hit_face_state(active: bool) -> void:
+	if eye_left:
+		eye_left.visible = not active
+	if eye_right:
+		eye_right.visible = not active
+	if pupil_left:
+		pupil_left.visible = not active
+	if pupil_right:
+		pupil_right.visible = not active
+	if hit_eye_left:
+		hit_eye_left.visible = active
+	if hit_eye_right:
+		hit_eye_right.visible = active
+
+@rpc("any_peer", "call_local", "reliable")
+func _show_hit_face(duration: float = HIT_FACE_DURATION) -> void:
+	_hit_face_timer = maxf(_hit_face_timer, duration)
+	_set_hit_face_state(true)
+
 func _unhandled_input(event: InputEvent) -> void:
 	if not is_multiplayer_authority():
 		return
@@ -269,7 +423,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		camera.rotation.x = look_pitch + recoil_pitch
 	if event is InputEventMouseButton and event.pressed \
 			and event.button_index == MOUSE_BUTTON_LEFT \
-			and Input.mouse_mode == Input.MOUSE_MODE_VISIBLE:
+			and Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
 		var g := get_tree().current_scene
 		if g and g.has_method("is_any_modal_open") and g.is_any_modal_open():
 			return
@@ -336,6 +490,7 @@ func _physics_process(delta: float) -> void:
 			var impact_vel := absf(velocity.y)
 			# Scale bump by impact velocity (e.g. 10m/s -> 0.2m dip)
 			_landing_bump_y = clampf(impact_vel * 0.02, 0.0, 0.4)
+			if not ghost_mode: SFX.landing(impact_vel, global_position)
 
 		# Default: 1 ground jump + 1 air double-jump = 2 total.
 		# ACROBAT and similar cards extend this via weapon.extra_jumps.
@@ -415,6 +570,7 @@ func _physics_process(delta: float) -> void:
 		velocity.z = move_toward(velocity.z, 0.0, FRICTION * delta * current_walk_speed * 0.1)
 	move_and_slide()
 	_maybe_broadcast_state()
+	_tick_footsteps(delta)
 
 	# --- Combat actions ---
 	# Default is semi-auto (click per shot). The UZI card flips weapon.full_auto
@@ -615,59 +771,85 @@ func _spawn_bullet_blast(pos: Vector3, radius: float, color: Color) -> void:
 	tw.tween_property(mat, "emission_energy_multiplier", 0.0, expand_time + 0.05)
 	tw.chain().tween_callback(wave.queue_free)
 
-	# 3) Point light — costly in multiplayer, so keep it behind the cheap-VFX flag.
-	if VFX_TRANSIENT_LIGHTS:
-		var light := OmniLight3D.new()
-		light.light_color = color
-		light.light_energy = clampf(6.0 + radius * 1.2, 6.0, 22.0)
-		light.omni_range = radius * 2.5
-		light.position = pos
-		scene.add_child(light)
-		var ltw := light.create_tween()
-		ltw.tween_property(light, "light_energy", 0.0, clampf(0.12 + radius * 0.01, 0.12, 0.28))\
-			.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
-		ltw.tween_callback(light.queue_free)
+	# 3) Explosion light — always on, and notably hotter than the rifle flash.
+	var light := OmniLight3D.new()
+	light.light_color = color.lerp(Color(1.0, 0.86, 0.62), 0.45)
+	light.light_energy = clampf(12.0 + radius * 2.8, 12.0, 34.0)
+	light.omni_range = radius * 3.6
+	light.position = pos
+	scene.add_child(light)
+	var ltw := light.create_tween()
+	ltw.tween_property(light, "light_energy", 0.0, clampf(0.18 + radius * 0.02, 0.18, 0.4))\
+		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+	ltw.tween_callback(light.queue_free)
 
 	# 4) Big blasts play the full explosion SFX; smaller impacts stay visual.
 	if radius >= 3.5:
 		SFX.explosion(pos)
 
 func _spawn_muzzle_flash(color: Color = Color(1.0, 0.88, 0.45), scale_f: float = 1.0) -> void:
-	# Bright emissive sphere + point light at the barrel tip; both fade out quickly.
-	var flash := MeshInstance3D.new()
-	var sphere := SphereMesh.new()
-	sphere.radius = 0.14 * scale_f
-	sphere.height = 0.28 * scale_f
-	sphere.radial_segments = 8
-	sphere.rings = 4
-	flash.mesh = sphere
+	# Directional flash: a short starburst plus a forward flame plume reads
+	# better than a glowing orb and stays cheap enough for multiplayer.
+	var flash_root := Node3D.new()
+	flash_root.position = Vector3(0.0, 0.0, -0.35)
+	flash_root.rotation.z = randf_range(0.0, TAU)
+	muzzle.add_child(flash_root)
+
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.albedo_color = Color(color.r, color.g, color.b, 0.95)
+	mat.albedo_color = Color(color.r, color.g, color.b, 0.96)
 	mat.emission_enabled = true
 	mat.emission = color
-	mat.emission_energy_multiplier = 6.0 * scale_f
-	flash.material_override = mat
-	flash.position = Vector3(0.0, 0.0, -0.35)
-	flash.rotation = Vector3(0.0, 0.0, randf_range(0.0, TAU))
-	muzzle.add_child(flash)
+	mat.emission_energy_multiplier = 7.0 * scale_f
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 
-	var tw := flash.create_tween().set_parallel(true)
-	tw.tween_property(flash, "scale", Vector3(1.9, 1.9, 1.9), 0.06)\
-		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
-	tw.tween_property(mat, "albedo_color", Color(1, 1, 1, 0.0), 0.08)
-	tw.tween_property(mat, "emission_energy_multiplier", 0.0, 0.08)
-	if VFX_TRANSIENT_LIGHTS:
-		var light := OmniLight3D.new()
-		light.light_color = color
-		light.light_energy = 4.0 * scale_f
-		light.omni_range = 7.0 * scale_f
-		light.position = Vector3(0.0, 0.0, -0.35)
-		muzzle.add_child(light)
-		tw.tween_property(light, "light_energy", 0.0, 0.07)
-		tw.chain().tween_callback(light.queue_free)
-	tw.chain().tween_callback(flash.queue_free)
+	var cross_mesh := BoxMesh.new()
+	cross_mesh.size = Vector3(0.04 * scale_f, 0.26 * scale_f, 0.04 * scale_f)
+	for angle in [0.0, PI * 0.5]:
+		var arm := MeshInstance3D.new()
+		arm.mesh = cross_mesh
+		arm.material_override = mat
+		arm.rotation.z = angle
+		flash_root.add_child(arm)
+
+	var plume := MeshInstance3D.new()
+	var plume_mesh := BoxMesh.new()
+	plume_mesh.size = Vector3(0.07 * scale_f, 0.07 * scale_f, 0.34 * scale_f)
+	plume.mesh = plume_mesh
+	plume.material_override = mat
+	plume.position = Vector3(0.0, 0.0, -0.18 * scale_f)
+	flash_root.add_child(plume)
+
+	var tw := flash_root.create_tween().set_parallel(true)
+	tw.tween_property(flash_root, "scale", Vector3(1.35, 0.82, 1.8), 0.045)\
+		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+	tw.tween_property(flash_root, "position:z", -0.48, 0.045)\
+		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+	tw.tween_property(mat, "albedo_color", Color(1, 1, 1, 0.0), 0.06)
+	tw.tween_property(mat, "emission_energy_multiplier", 0.0, 0.06)
+	# Keep muzzle flashes bright even when the broader transient-light VFX
+	# budget is disabled; this is a tiny, short-lived light and sells the shot.
+	var light := OmniLight3D.new()
+	light.light_color = color.lerp(Color(1.0, 0.95, 0.82), 0.45)
+	light.light_energy = 5.0 * scale_f
+	light.omni_range = 7.0 * scale_f
+	light.position = Vector3(0.0, 0.0, -0.42)
+	flash_root.add_child(light)
+	tw.tween_property(light, "light_energy", 0.0, 0.07)
+	tw.chain().tween_callback(light.queue_free)
+
+	# Small bounce light slightly behind the muzzle so the first-person weapon
+	# itself catches a warm flash instead of staying flat during shots.
+	var gun_light := OmniLight3D.new()
+	gun_light.light_color = color.lerp(Color(1.0, 0.92, 0.8), 0.6)
+	gun_light.light_energy = 2.4 * scale_f
+	gun_light.omni_range = 2.2 * scale_f
+	gun_light.position = Vector3(0.0, 0.0, 0.06)
+	muzzle.add_child(gun_light)
+	tw.tween_property(gun_light, "light_energy", 0.0, 0.08)
+	tw.chain().tween_callback(gun_light.queue_free)
+	tw.chain().tween_callback(flash_root.queue_free)
 
 @rpc("any_peer", "call_local", "reliable")
 func _hit_confirm(is_headshot: bool, dmg: int = 0) -> void:
@@ -816,73 +998,48 @@ func _ragdoll(push_dir: Vector3) -> void:
 	_spawn_ragdoll(push_dir)
 
 func _spawn_ragdoll(push_dir: Vector3) -> void:
-	# Match the scene's mesh/shape sizes. Each part becomes a free-flying
-	# RigidBody3D that collides with the world but ignores players/bullets.
+	# Voronoi-split the blob's primitive meshes into chunks that fly apart.
+	# body_model is hidden first so the user only reads the flying debris.
+	# Chunks collide with world only — players and bullets ignore the corpse.
 	var scene := get_tree().current_scene
-	var bs: float = weapon.body_scale
-	var hs: float = weapon.head_scale
-	var torso_size := Vector3(0.58, 0.82, 0.34) * bs
-	var leg_size := Vector3(0.18, 0.7, 0.22) * bs
-	var arm_size := Vector3(0.15, 0.72, 0.16) * bs
-	var head_r: float = 0.28 * hs
-	# Each part: the source MeshInstance3D + the physics shape for its chunk.
-	var parts: Array = [
-		{"node": head_mesh, "shape_type": "sphere", "radius": head_r, "mass": 2.0},
-		{"node": body_model.get_node("Torso"), "shape_type": "box", "size": torso_size, "mass": 5.0},
-		{"node": body_model.get_node("LeftLeg"), "shape_type": "box", "size": leg_size, "mass": 1.5},
-		{"node": body_model.get_node("RightLeg"), "shape_type": "box", "size": leg_size, "mass": 1.5},
-		{"node": body_model.get_node("LeftArm"), "shape_type": "box", "size": arm_size, "mass": 1.2},
-		{"node": body_model.get_node("RightArm"), "shape_type": "box", "size": arm_size, "mass": 1.2},
-	]
-	for p in parts:
-		var src: MeshInstance3D = p.node
-		if src == null:
-			continue
-		var rb := RigidBody3D.new()
-		rb.mass = float(p.mass)
-		rb.collision_layer = 0           # nothing detects the corpse
-		rb.collision_mask = 1            # collide with world only
-		rb.gravity_scale = 1.0
-		scene.add_child(rb)
-		rb.global_transform = src.global_transform
+	var kb_mag: float = clampf(push_dir.length(), 1.0, 6.0)
+	var dir_n: Vector3 = push_dir.normalized() if push_dir.length_squared() > 0.01 else Vector3.UP
+	var base_vel: Vector3 = dir_n * randf_range(4.0, 8.0) * kb_mag \
+		+ Vector3.UP * randf_range(2.0, 5.0) * sqrt(kb_mag)
 
-		# For local player: track the head for death-cam
-		if is_multiplayer_authority() and not is_bot and p.node == head_mesh:
-			_ragdoll_head = rb
+	var meshes: Array[MeshInstance3D] = []
+	if body_model:
+		_collect_meshes(body_model, meshes)
+	if meshes.is_empty():
+		return
+
+	# One gib call per visible body surface. The blob body is just a few
+	# primitives, but this loop keeps the effect resilient if the body changes.
+	var first: bool = true
+	for src in meshes:
+		if src.mesh == null:
+			continue
+		var chunks: Array[RigidBody3D] = Gib.explode(
+			src.mesh,
+			src.global_transform,
+			scene,
+			src.material_override,
+			base_vel + Vector3(randf_range(-1.5, 1.5), 0, randf_range(-1.5, 1.5)),
+			3.5 * sqrt(kb_mag),
+			10,
+			14.0,
+		)
+		if chunks.is_empty():
+			continue
+		# Death-cam follows the first chunk of the first surface (usually
+		# something from the upper body). Close enough.
+		if first and is_multiplayer_authority() and not is_bot:
+			_ragdoll_head = chunks[0]
 			if scene.has_method("show_death_effect"):
 				scene.show_death_effect(true)
-
-		var mi := MeshInstance3D.new()
-		mi.mesh = src.mesh
-		mi.material_override = src.material_override
-		rb.add_child(mi)
-		var cs := CollisionShape3D.new()
-		if p.shape_type == "sphere":
-			var sh := SphereShape3D.new()
-			sh.radius = float(p.radius)
-			cs.shape = sh
-		else:
-			var sh := BoxShape3D.new()
-			sh.size = p.size
-			cs.shape = sh
-		rb.add_child(cs)
-		# push_dir carries both direction and magnitude (bigger knockback =
-		# bigger cadaver launch). Normalize, scale speeds by magnitude.
-		var kb_mag: float = clampf(push_dir.length(), 1.0, 6.0)
-		var dir_n: Vector3 = push_dir.normalized() if push_dir.length_squared() > 0.01 else Vector3.UP
-		rb.linear_velocity = dir_n * randf_range(4.0, 8.0) * kb_mag \
-			+ Vector3.UP * randf_range(2.0, 5.0) * sqrt(kb_mag) \
-			+ Vector3(randf_range(-1.5, 1.5), 0, randf_range(-1.5, 1.5))
-		rb.angular_velocity = Vector3(
-			randf_range(-8.0, 8.0),
-			randf_range(-8.0, 8.0),
-			randf_range(-8.0, 8.0),
-		) * sqrt(kb_mag)
-		_ragdoll_pieces.append(rb)
-		# Safety net — in case respawn never fires (e.g. match ends), clean up.
-		get_tree().create_timer(14.0).timeout.connect(func() -> void:
-			if is_instance_valid(rb):
-				rb.queue_free())
+			first = false
+		for c in chunks:
+			_ragdoll_pieces.append(c)
 
 @rpc("any_peer", "call_local", "reliable")
 func clear_ragdoll() -> void:
@@ -1326,6 +1483,7 @@ func _apply_damage(amount: int, from_id: int) -> void:
 	if shielded:
 		return  # SHIELD special absorbs the hit
 	health = max(0, health - amount)
+	_show_hit_face.rpc(HIT_FACE_DURATION)
 	if from_id != player_id and not is_bot:
 		_notify_damage_source(from_id)
 		SFX.hit_received()
@@ -1421,6 +1579,8 @@ func server_respawn(pos: Vector3) -> void:
 	dash_charges = MAX_DASH_CHARGES
 	dash_timer = 0.0
 	jumps_left = 2 + weapon.extra_jumps
+	_hit_face_timer = 0.0
+	_set_hit_face_state(false)
 
 	_ragdoll_head = null
 	camera.transform = Transform3D(Basis.IDENTITY, _camera_rest_pos)
@@ -1470,6 +1630,7 @@ func _broadcast_state(pos: Vector3, yaw: float) -> void:
 	if not _remote_has_target or global_position.distance_to(pos) > REMOTE_SNAP_DISTANCE:
 		global_position = pos
 		rotation.y = yaw
+		_visual_prev_pos = pos
 	_remote_target_pos = pos
 	_remote_target_yaw = yaw
 	_remote_has_target = true
@@ -1591,14 +1752,13 @@ func _update_gun_visuals() -> void:
 func _update_body_scale() -> void:
 	# BodyModel holds the visual mesh parts; hitboxes are siblings under the
 	# Player root and must be kept in sync with the visual body size + height.
-	if body_model == null or head_mesh == null:
+	if body_model == null:
 		return
 	var bs: float = maxf(0.1, weapon.body_scale)
 	var hs: float = maxf(0.1, weapon.head_scale)
 	body_model.scale = Vector3.ONE * bs
-	# Let the head ride on body_model's scale AND apply head_scale on top, so
-	# a bigger body carries a proportionally bigger head (not a shrunken one).
-	head_mesh.scale = Vector3.ONE * hs
+	# head_scale does not change the blob mesh itself; it only scales the head
+	# hitbox below, so cards like BIG HEAD still change how easy the head is to hit.
 	# Hitboxes are siblings under the Player root — shift their y so they sit
 	# where the scaled visual parts actually are, and scale them to match.
 	if head_hitbox:
@@ -1717,6 +1877,7 @@ func _bot_physics(delta: float) -> void:
 
 	move_and_slide()
 	_maybe_broadcast_state()
+	_tick_footsteps(delta)
 
 	# Fell off map — teleport back up.
 	if global_position.y < -30.0:
@@ -1724,8 +1885,24 @@ func _bot_physics(delta: float) -> void:
 		_last_sync_pos = Vector3.INF  # force resync
 
 	if _bot_shoot_cooldown <= 0.0 and _bot_has_los(_bot_target):
-		_bot_shoot()
+		# Dev toggle (F1 panel): bots keep moving/aiming but hold their fire.
+		var game_scene: Node = get_tree().current_scene
+		if not (game_scene and game_scene.get("bots_hold_fire") == true):
+			_bot_shoot()
 		_bot_shoot_cooldown = BOT_SHOOT_INTERVAL
+
+func _tick_footsteps(delta: float) -> void:
+	if ghost_mode or not is_on_floor() or dash_timer > 0.0:
+		_step_distance = 0.0
+		return
+	var moved: float = Vector2(velocity.x, velocity.z).length() * delta
+	if moved < 0.01:
+		_step_distance = 0.0
+		return
+	_step_distance += moved
+	if _step_distance >= STEP_STRIDE:
+		_step_distance = 0.0
+		SFX.footstep(global_position)
 
 func _bot_find_target() -> Node3D:
 	for p in get_parent().get_children():

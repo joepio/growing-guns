@@ -1,4 +1,4 @@
-[gd_scene load_steps=18 format=3 uid="uid://b0player01"]
+[gd_scene load_steps=20 format=3 uid="uid://b0player01"]
 
 [ext_resource type="Script" path="res://scripts/player.gd" id="1_player"]
 
@@ -6,45 +6,14 @@
 radius = 0.4
 height = 1.8
 
-[sub_resource type="StandardMaterial3D" id="Material_Body"]
-albedo_color = Color(0.9, 0.15, 0.2, 1)
-metallic = 0.0
-roughness = 0.8
-shading_mode = 1
+[sub_resource type="SphereShape3D" id="Shape_Torso"]
+radius = 0.37
 
-[sub_resource type="StandardMaterial3D" id="Material_Head"]
-albedo_color = Color(1, 0.55, 0.35, 1)
-metallic = 0.0
-roughness = 0.75
-shading_mode = 1
-
-[sub_resource type="StandardMaterial3D" id="Material_Limbs"]
-albedo_color = Color(0.55, 0.08, 0.16, 1)
-metallic = 0.0
-roughness = 0.85
-shading_mode = 1
-
-[sub_resource type="BoxMesh" id="BoxMesh_Torso"]
-size = Vector3(0.58, 0.82, 0.34)
-
-[sub_resource type="BoxMesh" id="BoxMesh_Leg"]
-size = Vector3(0.18, 0.7, 0.22)
-
-[sub_resource type="BoxMesh" id="BoxMesh_Arm"]
-size = Vector3(0.15, 0.72, 0.16)
-
-[sub_resource type="SphereMesh" id="SphereMesh_Head"]
-radius = 0.28
-height = 0.56
-
-[sub_resource type="BoxShape3D" id="Shape_Torso"]
-size = Vector3(0.72, 0.9, 0.5)
-
-[sub_resource type="BoxShape3D" id="Shape_Legs"]
-size = Vector3(0.65, 0.78, 0.44)
+[sub_resource type="SphereShape3D" id="Shape_Legs"]
+radius = 0.31
 
 [sub_resource type="SphereShape3D" id="Shape_Head"]
-radius = 0.32
+radius = 0.27
 
 [sub_resource type="BoxMesh" id="BoxMesh_Gun"]
 size = Vector3(0.15, 0.15, 0.5)
@@ -65,6 +34,51 @@ emission_enabled = true
 emission = Color(0.8, 0.95, 1, 1)
 emission_energy_multiplier = 0.4
 
+[sub_resource type="SphereMesh" id="SphereMesh_Blob"]
+radius = 0.42
+height = 0.84
+
+[sub_resource type="StandardMaterial3D" id="Material_Blob"]
+albedo_color = Color(0.2, 0.84, 0.68, 1)
+roughness = 0.95
+metallic = 0.0
+
+[sub_resource type="SphereMesh" id="SphereMesh_Eye"]
+radius = 0.055
+height = 0.11
+
+[sub_resource type="StandardMaterial3D" id="Material_Eye"]
+albedo_color = Color(0.96, 0.98, 1, 1)
+roughness = 0.7
+
+[sub_resource type="SphereMesh" id="SphereMesh_Pupil"]
+radius = 0.028
+height = 0.056
+
+[sub_resource type="StandardMaterial3D" id="Material_Pupil"]
+albedo_color = Color(0.05, 0.06, 0.08, 1)
+roughness = 0.25
+
+[sub_resource type="SphereMesh" id="SphereMesh_Face"]
+radius = 0.16
+height = 0.18
+
+[sub_resource type="StandardMaterial3D" id="Material_Face"]
+albedo_color = Color(0.9, 0.97, 0.92, 1)
+roughness = 0.85
+
+[sub_resource type="CapsuleMesh" id="CapsuleMesh_Mouth"]
+radius = 0.022
+mid_height = 0.11
+
+[sub_resource type="StandardMaterial3D" id="Material_Mouth"]
+albedo_color = Color(0.12, 0.13, 0.16, 1)
+roughness = 0.3
+
+[sub_resource type="CapsuleMesh" id="CapsuleMesh_Caret"]
+radius = 0.016
+mid_height = 0.08
+
 [sub_resource type="LabelSettings" id="LabelSettings_1"]
 font_size = 24
 outline_size = 4
@@ -80,38 +94,82 @@ shape = SubResource("CapsuleShape3D_1")
 
 [node name="BodyModel" type="Node3D" parent="."]
 
-[node name="Torso" type="MeshInstance3D" parent="BodyModel"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.12, 0)
-mesh = SubResource("BoxMesh_Torso")
-material_override = SubResource("Material_Body")
+[node name="BlobRig" type="Node3D" parent="BodyModel"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.05, 0)
 
-[node name="Head" type="MeshInstance3D" parent="BodyModel"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.86, 0)
-mesh = SubResource("SphereMesh_Head")
-material_override = SubResource("Material_Head")
+[node name="BlobCore" type="MeshInstance3D" parent="BodyModel/BlobRig"]
+transform = Transform3D(1, 0, 0, 0, 1.12, 0, 0, 0, 1, 0, 0.08, 0)
+mesh = SubResource("SphereMesh_Blob")
+material_override = SubResource("Material_Blob")
 
-[node name="LeftLeg" type="MeshInstance3D" parent="BodyModel"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.15, -0.55, 0)
-mesh = SubResource("BoxMesh_Leg")
-material_override = SubResource("Material_Limbs")
+[node name="HeadBlob" type="MeshInstance3D" parent="BodyModel/BlobRig"]
+transform = Transform3D(0.7, 0, 0, 0, 0.74, 0, 0, 0, 0.7, 0, 0.64, -0.03)
+mesh = SubResource("SphereMesh_Blob")
+material_override = SubResource("Material_Blob")
 
-[node name="RightLeg" type="MeshInstance3D" parent="BodyModel"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.15, -0.55, 0)
-mesh = SubResource("BoxMesh_Leg")
-material_override = SubResource("Material_Limbs")
+[node name="FacePlate" type="MeshInstance3D" parent="BodyModel/BlobRig/HeadBlob"]
+transform = Transform3D(1.18, 0, 0, 0, 0.9, 0, 0, 0, 0.4, 0, -0.02, -0.31)
+mesh = SubResource("SphereMesh_Face")
+material_override = SubResource("Material_Face")
 
-[node name="LeftArm" type="MeshInstance3D" parent="BodyModel"]
-transform = Transform3D(1, 0, 0, 0, 0.965926, -0.258819, 0, 0.258819, 0.965926, -0.42, 0.12, -0.02)
-mesh = SubResource("BoxMesh_Arm")
-material_override = SubResource("Material_Limbs")
+[node name="EyeLeft" type="MeshInstance3D" parent="BodyModel/BlobRig/HeadBlob"]
+transform = Transform3D(1.18, 0, 0, 0, 1.18, 0, 0, 0, 0.7, -0.14, 0.03, -0.4)
+mesh = SubResource("SphereMesh_Eye")
+material_override = SubResource("Material_Eye")
 
-[node name="RightArm" type="MeshInstance3D" parent="BodyModel"]
-transform = Transform3D(1, 0, 0, 0, 0.965926, 0.258819, 0, -0.258819, 0.965926, 0.42, 0.12, -0.02)
-mesh = SubResource("BoxMesh_Arm")
-material_override = SubResource("Material_Limbs")
+[node name="EyeRight" type="MeshInstance3D" parent="BodyModel/BlobRig/HeadBlob"]
+transform = Transform3D(1.18, 0, 0, 0, 1.18, 0, 0, 0, 0.7, 0.14, 0.03, -0.4)
+mesh = SubResource("SphereMesh_Eye")
+material_override = SubResource("Material_Eye")
+
+[node name="PupilLeft" type="MeshInstance3D" parent="BodyModel/BlobRig/HeadBlob"]
+transform = Transform3D(1, 0, 0, 0, 1.15, 0, 0, 0, 0.75, -0.14, 0.01, -0.45)
+mesh = SubResource("SphereMesh_Pupil")
+material_override = SubResource("Material_Pupil")
+
+[node name="PupilRight" type="MeshInstance3D" parent="BodyModel/BlobRig/HeadBlob"]
+transform = Transform3D(1, 0, 0, 0, 1.15, 0, 0, 0, 0.75, 0.14, 0.01, -0.45)
+mesh = SubResource("SphereMesh_Pupil")
+material_override = SubResource("Material_Pupil")
+
+[node name="HitEyeLeft" type="Node3D" parent="BodyModel/BlobRig/HeadBlob"]
+visible = false
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.14, 0.03, -0.43)
+
+[node name="StrokeTop" type="MeshInstance3D" parent="BodyModel/BlobRig/HeadBlob/HitEyeLeft"]
+transform = Transform3D(0.24, -0.14, 0, 0.12, 0.22, 0, 0, 0, 0.18, 0, 0.04, 0)
+mesh = SubResource("CapsuleMesh_Caret")
+material_override = SubResource("Material_Pupil")
+
+[node name="StrokeBottom" type="MeshInstance3D" parent="BodyModel/BlobRig/HeadBlob/HitEyeLeft"]
+transform = Transform3D(0.24, 0.14, 0, -0.12, 0.22, 0, 0, 0, 0.18, 0, -0.04, 0)
+mesh = SubResource("CapsuleMesh_Caret")
+material_override = SubResource("Material_Pupil")
+
+[node name="HitEyeRight" type="Node3D" parent="BodyModel/BlobRig/HeadBlob"]
+visible = false
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.14, 0.03, -0.43)
+
+[node name="StrokeTop" type="MeshInstance3D" parent="BodyModel/BlobRig/HeadBlob/HitEyeRight"]
+transform = Transform3D(-0.24, -0.14, 0, 0.12, -0.22, 0, 0, 0, 0.18, 0, 0.04, 0)
+mesh = SubResource("CapsuleMesh_Caret")
+material_override = SubResource("Material_Pupil")
+
+[node name="StrokeBottom" type="MeshInstance3D" parent="BodyModel/BlobRig/HeadBlob/HitEyeRight"]
+transform = Transform3D(-0.24, 0.14, 0, -0.12, -0.22, 0, 0, 0, 0.18, 0, -0.04, 0)
+mesh = SubResource("CapsuleMesh_Caret")
+material_override = SubResource("Material_Pupil")
+
+[node name="Mouth" type="MeshInstance3D" parent="BodyModel/BlobRig/HeadBlob"]
+transform = Transform3D(0, -0.3, 0, 0.52, 0, 0, 0, 0, 0.24, 0, -0.14, -0.41)
+mesh = SubResource("CapsuleMesh_Mouth")
+material_override = SubResource("Material_Mouth")
+
+[node name="HandAnchor" type="Node3D" parent="BodyModel/BlobRig"]
+transform = Transform3D(0.984808, -0.173648, 0, 0.173648, 0.984808, 0, 0, 0, 1, 0.38, 0.04, -0.02)
 
 [node name="HeadHitbox" type="Area3D" parent="." groups=["player_hitboxes", "player_head_hitboxes"]]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.86, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.64, 0)
 collision_layer = 2
 collision_mask = 0
 
@@ -119,7 +177,7 @@ collision_mask = 0
 shape = SubResource("Shape_Head")
 
 [node name="TorsoHitbox" type="Area3D" parent="." groups=["player_hitboxes"]]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.12, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.16, 0)
 collision_layer = 2
 collision_mask = 0
 
@@ -127,7 +185,7 @@ collision_mask = 0
 shape = SubResource("Shape_Torso")
 
 [node name="LegsHitbox" type="Area3D" parent="." groups=["player_hitboxes"]]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.55, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.2, 0)
 collision_layer = 2
 collision_mask = 0
 

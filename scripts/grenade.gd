@@ -156,16 +156,15 @@ func _do_vfx() -> void:
 	wtw.tween_property(wave_mat, "emission_energy_multiplier", 0.0, 0.32)
 	wtw.chain().tween_callback(wave.queue_free)
 
-	if VFX_TRANSIENT_LIGHTS:
-		var light := OmniLight3D.new()
-		light.light_color = Color(1.0, 0.65, 0.25)
-		light.light_energy = 22.0
-		light.omni_range = 16.0
-		light.position = pos
-		scene.add_child(light)
-		var ltw := light.create_tween()
-		ltw.tween_property(light, "light_energy", 0.0, 0.25).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
-		ltw.tween_callback(light.queue_free)
+	var light := OmniLight3D.new()
+	light.light_color = Color(1.0, 0.72, 0.32)
+	light.light_energy = 34.0
+	light.omni_range = 20.0
+	light.position = pos
+	scene.add_child(light)
+	var ltw := light.create_tween()
+	ltw.tween_property(light, "light_energy", 0.0, 0.32).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+	ltw.tween_callback(light.queue_free)
 
 	# --- Local camera shake with distance falloff
 	var lp: Node = scene.get("local_player")

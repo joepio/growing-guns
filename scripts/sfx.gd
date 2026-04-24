@@ -9,7 +9,8 @@ extends Node
 # audio pipeline. Pass Vector3.INF (or omit) for a plain 2D/UI sound.
 #
 # Public API: SFX.shot(w, at?), SFX.explosion(at?), SFX.melee(at?),
-# SFX.grenade_launch(at?), SFX.jump(at?), SFX.dash(at?),
+# SFX.grenade_launch(at?), SFX.jump(at?), SFX.landing(impact_vel, at?),
+# SFX.dash(at?), SFX.footstep(at?),
 # SFX.hit_received(), SFX.kill_confirm(), SFX.hitmarker(kind, dmg).
 
 const MIX_RATE := 44100.0
@@ -23,8 +24,10 @@ const DRY_RADIUS := 4.0
 var _sample_cache: Dictionary = {}
 var _hurt_sounds: Array[AudioStreamWAV] = []
 var _death_sounds: Array[AudioStreamWAV] = []
-var _gun_sound: AudioStream = null
-var _jump_sounds: Array[AudioStreamWAV] = []
+var _gun_sounds: Array[AudioStreamWAV] = []
+var _step_sounds: Array[AudioStream] = []
+var _card_pick_sound: AudioStreamWAV = null
+
 
 func _ready() -> void:
 	_ensure_reverb_bus()
@@ -40,14 +43,18 @@ func _load_assets() -> void:
 		if ResourceLoader.exists(path):
 			_death_sounds.append(load(path))
 	if ResourceLoader.exists("res://assets/audio/gun1.wav"):
-		_gun_sound = load("res://assets/audio/gun1.wav")
-	for i in range(1, 6):
-		var path := "res://assets/audio/jump%d.wav" % i
+		_gun_sounds.append(load("res://assets/audio/gun1.wav"))
+
+	if ResourceLoader.exists("res://assets/audio/Card Pick.wav"):
+		_card_pick_sound = load("res://assets/audio/Card Pick.wav")
+	for i in range(1, 14):
+		var path := "res://assets/audio/Step-%d.wav" % i
 		if ResourceLoader.exists(path):
-			_jump_sounds.append(load(path))
-	print("[SFX] loaded hurt=%d death=%d jump=%d gun1=%s" % [
-		_hurt_sounds.size(), _death_sounds.size(), _jump_sounds.size(),
-		"YES" if _gun_sound != null else "NO"])
+			_step_sounds.append(load(path))
+	print("[SFX] loaded hurt=%d death=%d step=%d gun=%d card=%s" % [
+		_hurt_sounds.size(), _death_sounds.size(),
+		_step_sounds.size(), _gun_sounds.size(),
+		"YES" if _card_pick_sound != null else "NO"])
 
 func _ensure_reverb_bus() -> void:
 	# Set up once. Project file has no bus layout, so create a dedicated
@@ -169,9 +176,9 @@ func _hitmarker_cache_key(kind: String, dmg: int) -> String:
 # -------------------- sounds --------------------
 
 func shot(w: Weapon = null, at: Vector3 = NO_POS) -> void:
-	# Use the real gun1.wav sample when available; fall back to the synth.
+	# Use a random real-gun sample when available; fall back to the synth.
 	# Higher-damage weapons pitch down subtly (heavier report).
-	if _gun_sound != null:
+	if not _gun_sounds.is_empty():
 		var pitch := 1.0
 		if w != null:
 			var dmg_ratio: float = maxf(1.0, w.get_damage() / Weapon.BASE_DAMAGE)
@@ -179,7 +186,7 @@ func shot(w: Weapon = null, at: Vector3 = NO_POS) -> void:
 			pitch = clampf(1.0 - (log(dmg_ratio) / log(2.0)) * 0.08, 0.55, 1.15)
 			# Tiny per-shot flutter so repeated shots don't sound identical.
 			pitch *= randf_range(0.97, 1.03)
-		_play_stream(_gun_sound, randf_range(-6.0, -3.0), at, pitch)
+		_play_stream(_gun_sounds.pick_random(), randf_range(-6.0, -3.0), at, pitch)
 		return
 	_play(_cached_samples(_shot_cache_key(w), Callable(self, "_synth_shot").bind(w)), randf_range(-5.5, -2.5), at)
 func grenade_launch(at: Vector3 = NO_POS) -> void:
@@ -191,10 +198,27 @@ func melee(at: Vector3 = NO_POS, damage: int = 50) -> void:
 	var key := "melee_%d" % int(round(pitch_ratio * 100.0))
 	_play(_cached_samples(key, Callable(self, "_synth_melee").bind(pitch_ratio)), -6.0, at)
 func jump(at: Vector3 = NO_POS) -> void:
-	if _jump_sounds.is_empty():
-		_play(_cached_samples("jump", Callable(self, "_synth_jump")), -12.0, at)
-	else:
-		_play_stream(_jump_sounds.pick_random(), randf_range(-14.0, -10.0), at)
+	# Jump = a thick "oof" built from two step samples layered an octave apart.
+	# Significantly louder than a footstep (~20 dB over) so the takeoff reads.
+	if _step_sounds.is_empty():
+		return
+	_play_stream(_step_sounds.pick_random(), randf_range(0.0, 3.0), at, randf_range(1.02, 1.12))
+	_play_stream(_step_sounds.pick_random(), randf_range(-4.0, -1.0), at, randf_range(0.55, 0.65))
+func landing(impact_vel: float, at: Vector3 = NO_POS) -> void:
+	# Landing = heavy step. Hard landings pitch down + get louder, and layer
+	# a sub-octave step on top for extra thud. Impact ~9 m/s is a normal
+	# jump-land, ~25 m/s is a big fall.
+	if _step_sounds.is_empty():
+		return
+	var hard: float = clampf((impact_vel - 6.0) / 19.0, 0.0, 1.0)
+	var pitch: float = lerpf(0.95, 0.55, hard)
+	var vol: float = lerpf(0.0, 8.0, hard)
+	_play_stream(_step_sounds.pick_random(), vol, at, pitch)
+	_play_stream(_step_sounds.pick_random(), vol - 4.0, at, pitch * 0.5)
+func footstep(at: Vector3 = NO_POS) -> void:
+	if _step_sounds.is_empty():
+		return
+	_play_stream(_step_sounds.pick_random(), randf_range(-22.0, -18.0), at, randf_range(0.92, 1.08))
 func dash(at: Vector3 = NO_POS) -> void:
 	_play(_cached_samples("dash", Callable(self, "_synth_dash")), -24.0, at)
 func hurt(at: Vector3 = NO_POS) -> void:
@@ -211,6 +235,9 @@ func pling(pitch_ratio: float = 1.0) -> void:
 	var key := "pling_%d" % int(round(pitch_ratio * 100.0))
 	_play(_cached_samples(key, Callable(self, "_synth_pling").bind(pitch_ratio)), -10.0)
 func card_flip(pitch_ratio: float = 1.0) -> void:
+	if _card_pick_sound:
+		_play_stream(_card_pick_sound, -4.0, NO_POS, pitch_ratio)
+		return
 	var key := "card_flip_%d" % int(round(pitch_ratio * 100.0))
 	_play(_cached_samples(key, Callable(self, "_synth_card_flip").bind(pitch_ratio)), -6.0)
 func reload(duration: float, at: Vector3 = NO_POS) -> Node:
@@ -429,21 +456,6 @@ func _reload_tap(out: PackedVector2Array, start_time: float, pitch_ratio: float,
 		var s: float = (lp_hi - lp_lo) * env * amp
 		var existing: Vector2 = out[idx]
 		out[idx] = Vector2(existing.x + s, existing.y + s)
-
-func _synth_jump() -> PackedVector2Array:
-	# Upward pitch sweep — soft, sine-based.
-	var dur := 0.10
-	var n := int(dur * MIX_RATE)
-	var out := PackedVector2Array()
-	out.resize(n)
-	for i in range(n):
-		var t := float(i) / MIX_RATE
-		var env := pow(1.0 - t / dur, 1.5)
-		var pitch := lerpf(280.0, 520.0, t / dur)
-		var tone := sin(2.0 * PI * pitch * t)
-		var s := tone * env * 0.25
-		out[i] = Vector2(s, s)
-	return out
 
 func _synth_dash() -> PackedVector2Array:
 	# Soft air whoosh — low cutoff + gentle envelope, generous headroom so

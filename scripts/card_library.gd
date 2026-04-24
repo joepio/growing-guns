@@ -95,7 +95,7 @@ static func all() -> Array:
 				"color": Color(1.0, 0.5, 0.75),
 				"apply": func(w: Weapon) -> void:
 						w.extra_projectiles += 2
-						w.mag_size_bonus -= 5
+						w.reload_mult *= 1.5
 						w.bullet_speed_mult *= 0.75
 						w.spread = max(w.spread, deg_to_rad(2.0)) + deg_to_rad(2.0),
 		},		{
@@ -287,13 +287,13 @@ static func all() -> Array:
 			"rarity": "rare",
 			"color": Color(1.0, 0.25, 0.0),
 			"apply": func(w: Weapon) -> void:
-				w.damage_mult *= 5.0
+				w.damage_mult = 5.0
 				w.mag_size_bonus = 1 - int(Weapon.BASE_MAG_SIZE) # Force to 1
-				w.reload_mult *= 0.3
-				w.bullet_speed_mult *= 0.45
-				w.bullet_scale *= 2.5
-				w.explosive_radius += 16.0
-				w.explosive_damage += 200.0
+				w.reload_mult = 0.3
+				w.bullet_speed_mult = 0.1
+				w.bullet_scale = 2.5
+				w.explosive_radius = 16.0
+				w.explosive_damage = 200.0
 				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.1, 0.0), 0.8),
 		},
 	]
