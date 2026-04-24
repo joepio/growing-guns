@@ -126,6 +126,18 @@ var _muzzle_rest_pos: Vector3
 var _walk_bob_phase: float = 0.0
 var _gun_jump_bump: float = 0.0
 var _gun_tilt_z: float = 0.0
+# Dynamic shot-to-shot spread: each fire adds weapon.recoil_per_shot, decays
+# back to zero. Combined with weapon.spread + movement bonus at fire time.
+var _recoil_spread: float = 0.0
+const RECOIL_DECAY_RATE := 4.0           # higher = recovers accuracy faster
+const MOVEMENT_SPREAD_MAX := 0.045       # rad of extra spread at full walk speed
+
+# Total effective spread used at fire time AND shown by the crosshair so the
+# UI always matches what bullets will actually do.
+func get_effective_spread() -> float:
+	var horiz_speed: float = Vector2(velocity.x, velocity.z).length()
+	var movement_spread: float = clampf(horiz_speed / WALK_SPEED, 0.0, 1.4) * MOVEMENT_SPREAD_MAX
+	return weapon.spread + movement_spread + _recoil_spread
 var _head_hitbox_rest_y: float = 0.86
 var _torso_hitbox_rest_y: float = 0.12
 var _legs_hitbox_rest_y: float = -0.55
@@ -490,6 +502,7 @@ func _physics_process(delta: float) -> void:
 	muzzle_kick_z = lerp(muzzle_kick_z, 0.0, delta * 14.0)
 	shake_amt = lerp(shake_amt, 0.0, delta * 14.0)
 	_landing_bump_y = lerp(_landing_bump_y, 0.0, delta * 10.0) # Smooth recovery
+	_recoil_spread = lerp(_recoil_spread, 0.0, clampf(delta * RECOIL_DECAY_RATE, 0.0, 1.0))
 
 	# View punch decay
 	_view_punch_pos = _view_punch_pos.lerp(Vector3.ZERO, delta * 12.0)
@@ -686,9 +699,12 @@ func _fire_rifle() -> void:
 	muzzle_kick_z = max(muzzle_kick_z, RIFLE_RECOIL_KICK * scale_f)
 	shake_amt = max(shake_amt, RIFLE_SHAKE * scale_f)
 	rotate_y(randf_range(-RIFLE_RECOIL_YAW_JITTER, RIFLE_RECOIL_YAW_JITTER) * scale_f)
+	# Snapshot the effective spread BEFORE this shot's recoil kicks in,
+	# then add the per-shot recoil so the next shot is sloppier.
+	var spread: float = get_effective_spread()
+	_recoil_spread += weapon.recoil_per_shot
 	# Multi-shot: fire N rays with random yaw+pitch spread (MULTI-SHOT card).
 	var shots: int = weapon.get_shots_per_trigger()
-	var spread: float = weapon.spread
 	var cam_right: Vector3 = camera.global_transform.basis.x
 	var cam_up: Vector3 = camera.global_transform.basis.y
 	for i in shots:
@@ -2323,9 +2339,12 @@ func _bot_physics(delta: float) -> void:
 		_last_sync_pos = Vector3.INF  # force resync
 
 	if not ghost_mode and _bot_shoot_cooldown <= 0.0 and _bot_has_los(_bot_target):
-		# Dev toggle (F1 panel): bots keep moving/aiming but hold their fire.
 		var game_scene: Node = get_tree().current_scene
-		if not (game_scene and game_scene.get("bots_hold_fire") == true):
+		# Round must be live (no shooting at corpses during card pick / match
+		# over), and the dev toggle in the F1 panel can hold fire entirely.
+		var is_playing: bool = game_scene and int(game_scene.get("state")) == 1  # State.PLAYING == 1
+		var hold_fire: bool = game_scene and game_scene.get("bots_hold_fire") == true
+		if is_playing and not hold_fire:
 			_bot_shoot()
 		# Bots auto-fire at the weapon's natural cadence.
 		_bot_shoot_cooldown = weapon.get_fire_interval()

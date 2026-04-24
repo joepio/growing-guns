@@ -289,9 +289,10 @@ func _process(delta: float) -> void:
 		_refresh_cooldowns()
 		_update_ghost_overlay()
 
-		# Update crosshair spread
+		# Crosshair reflects effective spread (base + movement + recoil) so the
+		# reticle visibly blooms when sprinting / spamming.
 		if _custom_crosshair:
-			_custom_crosshair.spread = local_player.weapon.spread
+			_custom_crosshair.spread = local_player.get_effective_spread()
 
 	if _pick_timeout_active:
 		_pick_timeout_timer -= delta
