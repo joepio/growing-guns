@@ -530,6 +530,10 @@ func _maybe_start_match() -> void:
 	state = State.PLAYING
 	current_round = 1
 	_reset_round_tracking()
+	for pid in NetworkManager.players:
+		var p := players_root.get_node_or_null(str(pid))
+		if p:
+			p.reset_weapon.rpc()
 	_start_round_now()
 
 func _start_round_now() -> void:
@@ -603,7 +607,14 @@ func _fallback_round_winner(victim_id: int) -> int:
 			return pid
 	return 0
 
+@rpc("authority", "call_local", "reliable")
+func _clear_round_projectiles() -> void:
+	for node in get_tree().get_nodes_in_group("projectiles"):
+		if is_instance_valid(node):
+			node.queue_free()
+
 func _end_round(winner_id: int) -> void:
+	_clear_round_projectiles.rpc()
 	round_winner_id = winner_id
 	if winner_id != 0:
 		round_wins[winner_id] = int(round_wins.get(winner_id, 0)) + 1
@@ -617,7 +628,6 @@ func _end_round(winner_id: int) -> void:
 				# Freeze everyone except the winner so they can celebrate
 				if int(pid) != winner_id:
 					pn.set_frozen.rpc(true)
-				pn.reset_weapon.rpc() # Reset cards immediately when match ends
 		_match_over.rpc(winner_id)
 		return
 	# Freeze the losers and wait for them to finish their picks.

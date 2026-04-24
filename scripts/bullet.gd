@@ -16,6 +16,7 @@ func setup(origin: Vector3, dir: Vector3, shooter: int, w: Weapon) -> void:
 	direction = dir.normalized()
 	shooter_id = shooter
 	weapon_stats = w
+	add_to_group("projectiles")
 	speed = w.get_bullet_speed()
 	pierce_left = w.pierce_count
 	ricochet_left = w.ricochet_count
@@ -121,10 +122,19 @@ func _handle_collision(result: Dictionary) -> void:
 		if hit_player:
 			var is_head: bool = shooter_node.call("_is_head_hit", collider)
 			var dmg: int = int(weapon_stats.get_damage() * (weapon_stats.get_headshot_mult() if is_head else 1.0))
-			hit_player.take_damage.rpc_id(hit_player.get_multiplayer_authority(), dmg, shooter_id)
-
+			var knock_dir: Vector3 = (direction + Vector3.UP * 0.18).normalized()
+			var gib_force := weapon_stats.knockback if weapon_stats.knockback > 0.0 else weapon_stats.get_damage() * 0.08
+			hit_player.take_damage.rpc_id(
+				hit_player.get_multiplayer_authority(),
+				dmg,
+				shooter_id,
+				hit_pos,
+				knock_dir,
+				gib_force,
+				0.0,
+				0.0
+			)
 			if weapon_stats.knockback > 0.0:
-				var knock_dir: Vector3 = (direction + Vector3.UP * 0.18).normalized()
 				hit_player.apply_knockback.rpc_id(hit_player.get_multiplayer_authority(), knock_dir * weapon_stats.knockback)
 
 			# Send hit confirmation ONLY to the shooter's client
