@@ -29,6 +29,12 @@ const DASH_RECHARGE_TIME := 3.0
 const GRAVITY := 30.0
 const MOUSE_SENS := 0.0022
 
+# --- First-person gun feel ---
+const GUN_BOB_AMP_Y := 0.012        # vertical bob amplitude
+const GUN_BOB_AMP_X := 0.007        # horizontal sway amplitude (half-frequency)
+const GUN_JUMP_BUMP := 0.06         # downward kick on jump, decays
+const GUN_STRAFE_TILT_DEG := 3.5    # max gun roll while strafing
+
 # --- View Feel ---
 const TILT_MAX_DEG := 2.5
 const TILT_SPEED := 6.0
@@ -44,7 +50,7 @@ const GRENADE_RELOAD := 3.0
 const GRENADE_LAUNCH_SPEED := 22.0
 const GRENADE_LAUNCH_LIFT := 4.0
 const MELEE_RELOAD := 0.5
-const MELEE_RANGE := 2.2
+const MELEE_RANGE := 3.2
 const MELEE_DAMAGE := 50
 const MELEE_BACKSTAB := 9999  # guaranteed kill
 const VFX_TRANSIENT_LIGHTS := false
@@ -117,6 +123,9 @@ var muzzle_kick_z := 0.0
 var shake_amt := 0.0
 var melee_offset := Vector3.ZERO
 var _muzzle_rest_pos: Vector3
+var _walk_bob_phase: float = 0.0
+var _gun_jump_bump: float = 0.0
+var _gun_tilt_z: float = 0.0
 var _head_hitbox_rest_y: float = 0.86
 var _torso_hitbox_rest_y: float = 0.12
 var _legs_hitbox_rest_y: float = -0.55
@@ -482,7 +491,26 @@ func _physics_process(delta: float) -> void:
 	camera.rotation.y = _view_punch_rot.y
 	camera.rotation.z = deg_to_rad(tilt_z) + _view_punch_rot.z
 
-	muzzle.position = _muzzle_rest_pos + Vector3(0.0, 0.0, muzzle_kick_z) + melee_offset + reload_offset
+	# --- Gun feel: walk bob, jump bump, strafe tilt ---
+	# Phase advances by π per STEP_STRIDE meters travelled — one bob per
+	# footstep, so the gun visibly thumps in sync with the step audio.
+	var horiz_speed: float = Vector2(velocity.x, velocity.z).length()
+	var moved_this_tick: float = horiz_speed * delta
+	var bob_intensity: float = 0.0
+	if is_on_floor() and horiz_speed > 0.5:
+		bob_intensity = clampf(horiz_speed / WALK_SPEED, 0.0, 1.4)
+		_walk_bob_phase += (moved_this_tick / STEP_STRIDE) * PI
+	var bob_y: float = sin(_walk_bob_phase) * GUN_BOB_AMP_Y * bob_intensity
+	# Horizontal sway runs at half the vertical frequency — classic figure-8 feel.
+	var bob_x: float = sin(_walk_bob_phase * 0.5) * GUN_BOB_AMP_X * bob_intensity
+	_gun_jump_bump = lerp(_gun_jump_bump, 0.0, clampf(delta * 8.0, 0.0, 1.0))
+	var input_x_tilt: float = Input.get_axis("move_right", "move_left")
+	_gun_tilt_z = lerp(_gun_tilt_z, deg_to_rad(input_x_tilt * GUN_STRAFE_TILT_DEG), clampf(delta * 8.0, 0.0, 1.0))
+
+	muzzle.position = _muzzle_rest_pos + Vector3(bob_x, bob_y - _gun_jump_bump, muzzle_kick_z) + melee_offset + reload_offset
+	# Don't fight the melee tween while it's running.
+	if not (_melee_tween and _melee_tween.is_valid()):
+		muzzle.rotation.z = _gun_tilt_z
 	# Height scales with body_scale (and the per-axis Y warp) so the viewpoint
 	# follows the taller head — SLENDERMAN sees the world from way up high.
 	var cam_y: float = (_camera_rest_pos.y * maxf(0.1, weapon.body_scale) * maxf(0.1, weapon.body_scale_axes.y)) - _landing_bump_y
@@ -516,6 +544,7 @@ func _physics_process(delta: float) -> void:
 		if is_on_floor():
 			velocity.y = JUMP_VELOCITY
 			jumps_left = 1 + weapon.extra_jumps
+			_gun_jump_bump = GUN_JUMP_BUMP
 			if not ghost_mode: SFX.jump(global_position)
 		elif is_on_wall() and wall_jump_cooldown <= 0.0:
 			var n := get_wall_normal()
@@ -524,10 +553,12 @@ func _physics_process(delta: float) -> void:
 			velocity.z += n.z * WALL_JUMP_H
 			wall_jump_cooldown = WALL_JUMP_COOLDOWN
 			jumps_left = 1 + weapon.extra_jumps  # wall-jump refreshes all air-jumps
+			_gun_jump_bump = GUN_JUMP_BUMP
 			if not ghost_mode: SFX.jump(global_position)
 		elif jumps_left > 0:
 			velocity.y = DOUBLE_JUMP_VELOCITY
 			jumps_left -= 1
+			_gun_jump_bump = GUN_JUMP_BUMP * 0.7
 			if not ghost_mode: SFX.jump(global_position)
 
 	# --- Dash ---
