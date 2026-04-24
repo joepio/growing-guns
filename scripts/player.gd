@@ -127,6 +127,9 @@ var _muzzle_rest_pos: Vector3
 var _walk_bob_phase: float = 0.0
 var _gun_jump_bump: float = 0.0
 var _gun_tilt_z: float = 0.0
+# Long barrels sit further back against the shoulder; updated when the
+# weapon changes via _update_gun_visuals.
+var _gun_pull_back: Vector3 = Vector3.ZERO
 # Dynamic shot-to-shot spread: each fire adds weapon.recoil_per_shot, decays
 # back to zero. Combined with weapon.spread + movement bonus at fire time.
 var _recoil_spread: float = 0.0
@@ -530,7 +533,7 @@ func _physics_process(delta: float) -> void:
 	var input_x_tilt: float = Input.get_axis("move_right", "move_left")
 	_gun_tilt_z = lerp(_gun_tilt_z, deg_to_rad(input_x_tilt * GUN_STRAFE_TILT_DEG), clampf(delta * 8.0, 0.0, 1.0))
 
-	muzzle.position = _muzzle_rest_pos + Vector3(bob_x, bob_y - _gun_jump_bump, muzzle_kick_z) + melee_offset + reload_offset
+	muzzle.position = _muzzle_rest_pos + Vector3(bob_x, bob_y - _gun_jump_bump, muzzle_kick_z) + melee_offset + reload_offset + _gun_pull_back
 	# Don't fight the melee tween while it's running.
 	if not (_melee_tween and _melee_tween.is_valid()):
 		muzzle.rotation.z = _gun_tilt_z
@@ -729,7 +732,9 @@ func _rifle_fired(origin: Vector3, dir: Vector3, shooter_id: int) -> void:
 	get_tree().current_scene.add_child(bullet)
 	bullet.setup(origin, dir, shooter_id, w)
 
-	_spawn_muzzle_flash(w.bullet_color, w.bullet_scale)
+	# Muzzle flash scales with bullet size AND damage so heavy rounds boom.
+	var dmg_ratio: float = clampf(w.get_damage() / Weapon.BASE_DAMAGE, 0.5, 4.0)
+	_spawn_muzzle_flash(w.bullet_color, w.bullet_scale * sqrt(dmg_ratio))
 
 func _apply_bullet_splash(pos: Vector3, radius: float, damage: float, shooter_id: int) -> void:
 	for p: Node3D in get_tree().get_nodes_in_group("players"):
@@ -2200,6 +2205,11 @@ func _update_gun_visuals() -> void:
 	# stat→geometry mapping lives in procedural_gun.gd.
 	if _procedural_gun and _procedural_gun.has_method("apply_weapon_stats"):
 		_procedural_gun.apply_weapon_stats(weapon)
+		# Long barrels = pull the gun back against the shoulder (positive Z is
+		# behind the camera). 0.5 m barrel = no offset; 1.4 m = 0.45 m back.
+		var bl: float = float(_procedural_gun.get("barrel_length"))
+		var pull: float = clampf((bl - 0.5) * 0.5, 0.0, 0.45)
+		_gun_pull_back = Vector3(0.0, 0.0, pull)
 
 	# Blade — under the gun, grows with melee damage × reach. BIG SWORD makes
 	# it very obviously a sword; default melee keeps it a small knife.

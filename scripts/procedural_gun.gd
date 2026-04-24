@@ -21,6 +21,7 @@ extends Node3D
 @export var barrel_radius: float = 0.022 : set = _set_barrel_radius
 @export var muzzle_flare: float = 1.55 : set = _set_muzzle_flare  # muzzle radius = barrel_radius × this
 @export var muzzle_length: float = 0.05 : set = _set_muzzle_length
+@export var wide_muzzle: bool = false : set = _set_wide_muzzle  # Havoc-style wide rectangular muzzle
 
 @export_group("Magazine")
 @export var mag_size: Vector3 = Vector3(0.08, 0.16, 0.06) : set = _set_mag_size
@@ -76,6 +77,7 @@ func _set_barrel_length(v: float) -> void:          barrel_length = v;        _r
 func _set_barrel_radius(v: float) -> void:          barrel_radius = v;        _rebuild()
 func _set_muzzle_flare(v: float) -> void:           muzzle_flare = v;         _rebuild()
 func _set_muzzle_length(v: float) -> void:          muzzle_length = v;        _rebuild()
+func _set_wide_muzzle(v: bool) -> void:             wide_muzzle = v;          _rebuild()
 func _set_mag_size(v: Vector3) -> void:             mag_size = v;             _rebuild()
 func _set_mag_offset_z(v: float) -> void:           mag_offset_z = v;         _rebuild()
 func _set_mag_tilt_deg(v: float) -> void:           mag_tilt_deg = v;         _rebuild()
@@ -156,14 +158,21 @@ func apply_weapon_stats(w: Weapon) -> void:
 		return
 	_suppress_rebuild = true
 
+	# Barrel length curve: a steep power so the default gun stays modest and
+	# only very tight-spread builds (SNIPER, stacked accuracy) earn the long
+	# barrel. Max ~1.4 m at spread 0; ~0.42 m at default spread.
 	var spread_factor: float = clampf(1.0 - w.spread / 0.05, 0.0, 1.0)
-	barrel_length = lerpf(0.22, 0.7, spread_factor)
+	barrel_length = lerpf(0.20, 1.4, pow(spread_factor, 10.0))
 
-	barrel_radius = clampf(0.022 * w.bullet_scale, 0.012, 0.08)
+	# Damage and bullet size both fatten the barrel — heavier rounds need a
+	# beefier barrel; the muzzle flare scales with it automatically.
+	var dmg_factor: float = clampf((w.damage_mult - 1.0) / 4.0, 0.0, 1.0)
+	var dmg_barrel_scale: float = lerpf(1.0, 1.7, dmg_factor)
+	barrel_radius = clampf(0.022 * w.bullet_scale * dmg_barrel_scale, 0.012, 0.10)
 	barrel_count = w.get_shots_per_trigger()
 
-	var dmg_factor: float = clampf((w.damage_mult - 1.0) / 4.0, 0.0, 1.0)
-	receiver_size = Vector3(0.075, 0.10, 0.26) * lerpf(1.0, 1.55, dmg_factor)
+	# Receiver stays at its authored base size — damage drives the barrel now.
+	receiver_size = Vector3(0.075, 0.10, 0.26)
 	var rounds: int = w.get_mag_size()
 	mag_drum = rounds > 30
 	if mag_drum:
@@ -181,6 +190,8 @@ func apply_weapon_stats(w: Weapon) -> void:
 	# SNIPER drops it to 0. Threshold 0.003 rad (~0.17°) fires for any sniper-
 	# class build but not casual accuracy buffs.
 	has_scope = w.spread < 0.003
+	# Very heavy hitters get a Havoc-style wide rectangular muzzle.
+	wide_muzzle = w.damage_mult >= 3.0
 
 	_suppress_rebuild = false
 	_rebuild()
@@ -225,7 +236,12 @@ func _rebuild() -> void:
 	for i in n_barrels:
 		var bx: float = (float(i) - float(n_barrels - 1) * 0.5) * barrel_pitch
 		_add_cylinder("Barrel%d" % i, barrel_radius, barrel_radius, barrel_length, Vector3(bx, 0, barrel_centre_z), darker_metal)
-		_add_cylinder("Muzzle%d" % i, muzzle_r, muzzle_r * 0.85, muzzle_length, Vector3(bx, 0, muzzle_centre_z), darker_metal)
+		if wide_muzzle:
+			# Havoc-style: a wide horizontal slab in place of the cone muzzle.
+			var slab_size := Vector3(barrel_radius * 4.5, barrel_radius * 1.6, muzzle_length)
+			_add_box("Muzzle%d" % i, slab_size, Vector3(bx, 0, muzzle_centre_z), darker_metal)
+		else:
+			_add_cylinder("Muzzle%d" % i, muzzle_r, muzzle_r * 0.85, muzzle_length, Vector3(bx, 0, muzzle_centre_z), darker_metal)
 
 	# Magazine — box (default) or drum (Tommy-gun style cylinder, axis along X)
 	# when mag_drum is on.
@@ -244,9 +260,9 @@ func _rebuild() -> void:
 		dm.radial_segments = 24
 		drum.mesh = dm
 		drum.material_override = darker_metal
-		# Cylinder default axis = Y; rotate 90° around Z so the axis lies along X
-		# (drum face visible from the side, edge from the front).
-		drum.rotation = Vector3(0, 0, PI * 0.5)
+		# Cylinder default axis = Y; rotate 90° around X so the axis lies along Z
+		# (drum face visible from the front, thin edge from the side).
+		drum.rotation = Vector3(PI * 0.5, 0, 0)
 		drum.position = Vector3(0, drum_y, mag_offset_z)
 		add_child(drum)
 		_finalize_owner(drum)
