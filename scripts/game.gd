@@ -555,8 +555,17 @@ func _start_round_now() -> void:
 		p.server_respawn.rpc_id(p.get_multiplayer_authority(), pos)
 		p.set_frozen.rpc(false)
 		p.clear_ragdoll.rpc()
+	_clear_projectiles.rpc()
 	_hide_rematch_overlay.rpc()
 	_announce.rpc("ROUND %d" % current_round, 1.4)
+
+@rpc("authority", "call_local", "reliable")
+func _clear_projectiles() -> void:
+	# Wipe in-flight bullets and grenades so leftovers from the previous round
+	# can't deal damage in the new one.
+	for node in get_tree().get_nodes_in_group("projectiles"):
+		if is_instance_valid(node):
+			node.queue_free()
 
 func _reset_round_tracking() -> void:
 	pending_picker_id = 0
@@ -611,14 +620,7 @@ func _fallback_round_winner(victim_id: int) -> int:
 			return pid
 	return 0
 
-@rpc("authority", "call_local", "reliable")
-func _clear_round_projectiles() -> void:
-	for node in get_tree().get_nodes_in_group("projectiles"):
-		if is_instance_valid(node):
-			node.queue_free()
-
 func _end_round(winner_id: int) -> void:
-	_clear_round_projectiles.rpc()
 	round_winner_id = winner_id
 	if winner_id != 0:
 		round_wins[winner_id] = int(round_wins.get(winner_id, 0)) + 1
@@ -1189,7 +1191,7 @@ func _match_over(winner_id: int) -> void:
 	_hide_card_pick() # Ensure picker is gone
 	var winner_name: String = NetworkManager.players.get(winner_id, "Player")
 	var is_me := winner_id == multiplayer.get_unique_id()
-	round_banner.text = "YOU WIN THE MATCH" if is_me else "%s WINS THE MATCH" % winner_name
+	round_banner.text = "YOU'RE THE WINNER" if is_me else "%s WINS THE MATCH" % winner_name
 	round_banner.visible = true
 	banner_timer.stop()
 	_show_rematch_overlay(winner_id)
@@ -1713,7 +1715,8 @@ func _extend_match() -> void:
 	_extend_votes.clear()
 	show_death_effect(false) # Clear blood if match continues
 
-	# Start a normal round pick flow for the loser of the last round	state = State.PICKING_CARD
+	# Start a normal round pick flow for the loser of the last round.
+	state = State.PICKING_CARD
 	_hide_rematch_overlay.rpc()
 
 	# Find who lost the last round (usually the one who triggered _match_over)

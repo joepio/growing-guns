@@ -29,10 +29,17 @@ func setup(origin: Vector3, dir: Vector3, shooter: int, w: Weapon) -> void:
 		if shooter_node and shooter_node.has_method("get_hitbox_rids"):
 			excluded_rids = shooter_node.call("get_hitbox_rids")
 
-	# Create visuals here to ensure weapon_stats is available
+	# Create visuals here to ensure weapon_stats is available.
+	# Length stretches with bullet_speed_mult so fast rounds read as streaks
+	# while sluggish ones stay chunky.
 	var mesh_inst: MeshInstance3D = MeshInstance3D.new()
 	var box: BoxMesh = BoxMesh.new()
-	box.size = Vector3(0.06, 0.06, 0.6) * weapon_stats.bullet_scale
+	var length_scale: float = clampf(weapon_stats.bullet_speed_mult, 0.5, 4.0)
+	box.size = Vector3(
+		0.06 * weapon_stats.bullet_scale,
+		0.06 * weapon_stats.bullet_scale,
+		0.6 * weapon_stats.bullet_scale * length_scale,
+	)
 	mesh_inst.mesh = box
 
 	var mat: StandardMaterial3D = StandardMaterial3D.new()
@@ -132,7 +139,8 @@ func _handle_collision(result: Dictionary) -> void:
 				knock_dir,
 				gib_force,
 				0.0,
-				0.0
+				0.0,
+				is_head
 			)
 			if weapon_stats.knockback > 0.0:
 				hit_player.apply_knockback.rpc_id(hit_player.get_multiplayer_authority(), knock_dir * weapon_stats.knockback)

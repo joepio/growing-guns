@@ -125,9 +125,9 @@ static func all() -> Array:
 				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.45, 0.08), 0.45),
 		},
 			{
-				"id": "precision",
-				"name": "PRECISION",
-				"desc": "",
+				"id": "headhunter",
+				"name": "HEADHUNTER",
+				"desc": "Deadly headshots",
 				"color": Color(0.9, 0.9, 1.0),
 				"apply": func(w: Weapon) -> void:
 					w.headshot_mult *= 2.0,

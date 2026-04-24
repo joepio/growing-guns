@@ -215,6 +215,71 @@ static func _instantiate_chunk(
 	)
 	return rb
 
+# Single rigid body containing every supplied mesh — used for non-explosive
+# deaths so the corpse tumbles as one piece. `pivot_xform` is the world
+# transform the body spawns at; child meshes get cloned into it preserving
+# their position relative to the pivot. Collision is one BoxShape3D sized
+# to the union AABB of all meshes — coarse but cheap and shape-stable.
+static func body_ragdoll(
+	pivot_xform: Transform3D,
+	meshes: Array,
+	scene: Node,
+	base_velocity: Vector3,
+	spin: float = 4.0,
+	lifetime: float = 14.0,
+) -> RigidBody3D:
+	if scene == null or meshes.is_empty():
+		return null
+	var rb := RigidBody3D.new()
+	rb.collision_layer = 0
+	rb.collision_mask = 1
+	rb.gravity_scale = 1.0
+	scene.add_child(rb)
+	rb.global_transform = pivot_xform
+
+	var inv := pivot_xform.affine_inverse()
+	var union: AABB = AABB()
+	var union_init := false
+	for src: MeshInstance3D in meshes:
+		if src.mesh == null:
+			continue
+		# Skip meshes that aren't actually rendered — lets the caller toggle
+		# state-based visuals (e.g. squinty hit eyes) before snapshotting.
+		if not src.is_visible_in_tree():
+			continue
+		var local_xform: Transform3D = inv * src.global_transform
+		var mi := MeshInstance3D.new()
+		mi.mesh = src.mesh
+		if src.material_override:
+			mi.material_override = src.material_override
+		mi.transform = local_xform
+		rb.add_child(mi)
+		var aabb_local: AABB = local_xform * src.mesh.get_aabb()
+		if union_init:
+			union = union.merge(aabb_local)
+		else:
+			union = aabb_local
+			union_init = true
+
+	if union_init:
+		var cs := CollisionShape3D.new()
+		var box := BoxShape3D.new()
+		box.size = Vector3(maxf(union.size.x, 0.1), maxf(union.size.y, 0.1), maxf(union.size.z, 0.1))
+		cs.shape = box
+		cs.position = union.position + union.size * 0.5
+		rb.add_child(cs)
+
+	rb.linear_velocity = base_velocity
+	rb.angular_velocity = Vector3(
+		randf_range(-spin, spin),
+		randf_range(-spin, spin),
+		randf_range(-spin, spin),
+	)
+	scene.get_tree().create_timer(lifetime).timeout.connect(func() -> void:
+		if is_instance_valid(rb):
+			rb.queue_free())
+	return rb
+
 static func _on_chunk_body_entered(rb: RigidBody3D, scene: Node, strength: float) -> void:
 	if rb == null or scene == null or not is_instance_valid(rb):
 		return
