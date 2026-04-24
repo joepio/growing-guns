@@ -210,6 +210,9 @@ func kill_confirm() -> void:
 func pling(pitch_ratio: float = 1.0) -> void:
 	var key := "pling_%d" % int(round(pitch_ratio * 100.0))
 	_play(_cached_samples(key, Callable(self, "_synth_pling").bind(pitch_ratio)), -10.0)
+func card_flip(pitch_ratio: float = 1.0) -> void:
+	var key := "card_flip_%d" % int(round(pitch_ratio * 100.0))
+	_play(_cached_samples(key, Callable(self, "_synth_card_flip").bind(pitch_ratio)), -6.0)
 func reload(duration: float, at: Vector3 = NO_POS) -> Node:
 	# Continuous rattle for the full reload duration. Returns the player node
 	# so the caller can stop it early (e.g. on respawn / round end).
@@ -462,6 +465,23 @@ func _synth_dash() -> PackedVector2Array:
 		var s := lp * env * 0.18
 		out[i] = Vector2(s, s)
 	return out
+func _synth_card_flip(pitch_ratio: float = 1.0) -> PackedVector2Array:
+	# A quick, airy "woosh" to sound like paper or a digital card flipping.
+	var dur := 0.12
+	var n := int(dur * MIX_RATE)
+	var out := PackedVector2Array()
+	out.resize(n)
+	var lp := 0.0
+	for i in range(n):
+		var t := float(i) / MIX_RATE
+		var env := sin(PI * clampf(t / dur, 0.0, 1.0))
+		var noise := randf_range(-1.0, 1.0)
+		var cutoff_k := lerpf(0.6, 0.1, t / dur) * pitch_ratio
+		lp = lerpf(lp, noise, clampf(cutoff_k, 0.01, 0.99))
+		var s := lp * env * 0.5
+		out[i] = Vector2(s, s)
+	return out
+
 func _synth_pling(pitch_ratio: float = 1.0) -> PackedVector2Array:
 	# Simple high-pitched sine pling with exponential decay.
 	var dur := 0.25

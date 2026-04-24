@@ -43,7 +43,9 @@ func _build_retro_filter() -> void:
 		void fragment() {
 			vec2 uv = SCREEN_UV;
 			vec2 centered_uv = uv - 0.5;
-			float dist = length(centered_uv);
+			float aspect = SCREEN_PIXEL_SIZE.y / SCREEN_PIXEL_SIZE.x;
+			vec2 aspect_uv = centered_uv * vec2(aspect, 1.0);
+			float dist = length(aspect_uv);
 			float zoom = 0.92;
 			uv = 0.5 + centered_uv * zoom * (1.0 + 0.15 * dist * dist);
 

@@ -12,7 +12,7 @@ const WALL_JUMP_H := 4.0
 const WALL_JUMP_COOLDOWN := 0.14
 const DASH_SPEED := 28.0
 const DASH_TIME := 0.18
-const MAX_DASH_CHARGES := 3
+const MAX_DASH_CHARGES := 2
 const DASH_RECHARGE_TIME := 3.0
 const GRAVITY := 30.0
 const MOUSE_SENS := 0.0022
@@ -227,8 +227,14 @@ func _apply_ghost_visuals() -> void:
 		return
 	body_model.visible = (is_bot or not is_multiplayer_authority())
 	name_label.visible = not ghost_mode and not invisible_mode and (is_bot or not is_multiplayer_authority())
-	muzzle.visible = not ghost_mode
-	for mesh in _body_meshes():
+	muzzle.visible = true # Gun always visible now, but shading changes
+
+	var gun_meshes: Array[MeshInstance3D] = []
+	if gun_body: gun_meshes.append(gun_body)
+	if gun_barrel: gun_meshes.append(gun_barrel)
+	if gun_magazine: gun_meshes.append(gun_magazine)
+
+	for mesh in _body_meshes() + gun_meshes:
 		if ghost_mode:
 			var mat := StandardMaterial3D.new()
 			mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
@@ -437,9 +443,6 @@ func _physics_process(delta: float) -> void:
 
 	if weapon.special != Weapon.SPECIAL_ZOOM:
 		is_zooming = false # Auto-cancel zoom if weapon special changes (e.g. card reset)
-	if Input.is_action_just_pressed("melee") and melee_cooldown <= 0.0 and not ghost_mode and can_fire:
-		melee_cooldown = MELEE_RELOAD
-		_swing_melee()
 
 	# --- Fell off the map ---
 	if global_position.y < -30.0:
@@ -918,6 +921,9 @@ func _use_special() -> void:
 		Weapon.SPECIAL_INVISIBLE:
 			grenade_cooldown = INVISIBLE_RELOAD * mult
 			_use_invisible()
+		Weapon.SPECIAL_SWORD:
+			grenade_cooldown = MELEE_RELOAD * mult
+			_swing_melee()
 		_:
 			grenade_cooldown = GRENADE_RELOAD * mult
 			_fire_grenade()
