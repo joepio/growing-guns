@@ -14,6 +14,12 @@ var pierce_left: int = 0
 var ricochet_left: int = 0
 var excluded_rids: Array[RID] = []
 
+# Bullet zip-by audio — triggers once when the bullet passes the closest
+# point to the local camera (within ZIP_RADIUS_SQ).
+const ZIP_RADIUS_SQ := 25.0  # 5 m
+var _zipped: bool = false
+var _prev_listener_dist_sq: float = INF
+
 # Visuals — head dot + a tracer trail that stretches as the bullet flies.
 # Fast bullets cover more distance per frame, so the trail naturally reads
 # as a long streak; slow bullets stay short and chunky.
@@ -124,8 +130,31 @@ func _physics_process(delta: float) -> void:
 		# half a length back along +Z (which is "behind" since forward is -Z).
 		_trail_inst.position = Vector3(0.0, 0.0, trail_len * 0.5)
 
+	_maybe_zip_by()
+
 	if distance_traveled > max_range:
 		queue_free()
+
+# Detect when the bullet passes its closest point to the local camera and
+# play one zip sound. Cheap: square-distance compare per tick, early-exits
+# for bullets nowhere near the listener, and at most one sound per bullet.
+func _maybe_zip_by() -> void:
+	if _zipped:
+		return
+	# Don't zip the shooter — they don't hear their own outgoing rounds.
+	if shooter_id == multiplayer.get_unique_id():
+		_zipped = true
+		return
+	var cam: Camera3D = get_viewport().get_camera_3d() if is_inside_tree() else null
+	if cam == null:
+		return
+	var d_sq: float = cam.global_position.distance_squared_to(global_position)
+	# Trigger once distance starts increasing (we just passed the closest
+	# point) AND we're inside the audible bubble.
+	if d_sq < ZIP_RADIUS_SQ and d_sq > _prev_listener_dist_sq:
+		_zipped = true
+		SFX.bullet_zip(speed, weapon_stats.bullet_scale, global_position)
+	_prev_listener_dist_sq = d_sq
 
 func _handle_collision(result: Dictionary) -> void:
 	var hit_pos: Vector3 = result.position
