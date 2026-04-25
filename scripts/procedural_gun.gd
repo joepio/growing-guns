@@ -184,8 +184,11 @@ func apply_weapon_stats(w: Weapon) -> void:
 		var mag_z: float = lerpf(0.06, 0.11, dmg_factor)
 		mag_size = Vector3(0.08, mag_h, mag_z)
 
-	has_stock = w.fire_rate_mult > 1.5
-	has_foregrip = w.fire_rate_mult > 1.5
+	# Long-barrelled guns need a shoulder stock + foregrip to brace.
+	# Threshold is roughly mid-range — short SMG / pistol stays bare,
+	# rifle-length barrels gain the bracing furniture.
+	has_stock = barrel_length > 0.55
+	has_foregrip = barrel_length > 0.55
 	# Pin-point accuracy gets a scope. Default base spread is ~0.008 rad (~0.46°);
 	# SNIPER drops it to 0. Threshold 0.003 rad (~0.17°) fires for any sniper-
 	# class build but not casual accuracy buffs.

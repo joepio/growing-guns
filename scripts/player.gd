@@ -722,16 +722,22 @@ func _fire_rifle() -> void:
 	for i in shots:
 		var dir := base_dir
 		if spread > 0.0:
-			var yaw := randf_range(-spread, spread)
-			var pitch := randf_range(-spread, spread)
-			dir = base_dir.rotated(cam_up, yaw).rotated(cam_right, pitch).normalized()
+			# Radial spread, density biased toward the centre. Uniform angle
+			# around the crosshair plus an r drawn from randf()² gives a
+			# pleasing centre-heavy circular pattern (instead of a flat square).
+			var theta: float = randf() * TAU
+			var r: float = spread * randf() * randf()
+			dir = base_dir.rotated(cam_up, r * cos(theta)).rotated(cam_right, r * sin(theta)).normalized()
 		_rifle_fired.rpc(origin, dir, player_id)
 
 @rpc("any_peer", "call_local", "reliable")
 func _rifle_fired(origin: Vector3, dir: Vector3, shooter_id: int) -> void:
 	var shooter_node: Node3D = get_parent().get_node_or_null(str(shooter_id))
 	var w: Weapon = shooter_node.weapon if shooter_node else Weapon.new()
-	SFX.shot(w, origin)
+	# `is_self` = the local human is the shooter. Their copy plays a 2D
+	# variant with its own volume curve (no 3D bus reverb / distance shaping).
+	var is_self: bool = shooter_id == multiplayer.get_unique_id()
+	SFX.shot(w, origin, is_self)
 
 	var bullet_script: GDScript = preload("res://scripts/bullet.gd")
 	var bullet := Node3D.new()
@@ -917,7 +923,7 @@ func _spawn_bullet_blast(pos: Vector3, radius: float, color: Color) -> void:
 
 	# 4) Big blasts play the full explosion SFX; smaller impacts stay visual.
 	if radius >= 3.5:
-		SFX.explosion(pos)
+		SFX.explosion(pos, radius)
 
 func apply_explosion_view_punch(pos: Vector3, radius: float, peak: float = 1.0) -> void:
 	if not is_multiplayer_authority() or camera == null:
@@ -2005,11 +2011,13 @@ func _apply_damage(
 
 @rpc("any_peer", "call_local", "unreliable")
 func _play_hurt_sound(pos: Vector3) -> void:
-	SFX.hurt(pos)
+	# `is_self` = this peer owns the player who got hit. Their copy plays a
+	# quieter 2D variant; everyone else hears the spatial 3D version.
+	SFX.hurt(pos, is_multiplayer_authority() and not is_bot)
 
 @rpc("any_peer", "call_local", "unreliable")
 func _play_death_sound(pos: Vector3) -> void:
-	SFX.death(pos)
+	SFX.death(pos, is_multiplayer_authority() and not is_bot)
 
 @rpc("any_peer", "call_local", "reliable")
 func apply_knockback(impulse: Vector3) -> void:
@@ -2395,7 +2403,13 @@ func _tick_footsteps(delta: float) -> void:
 	_step_distance += moved
 	if _step_distance >= STEP_STRIDE:
 		_step_distance = 0.0
-		SFX.footstep(global_position)
+		# Body-scale-driven footstep weight. Use the geometric mean of all
+		# three axes so SLENDERMAN-style stretch (tall, narrow) reads close
+		# to 1.0, while CHONKY (uniform 1.5×) clearly thumps deeper.
+		var axes := weapon.body_scale_axes
+		var ax: float = pow(maxf(0.05, axes.x * axes.y * axes.z), 1.0 / 3.0)
+		var size: float = weapon.body_scale * ax
+		SFX.footstep(global_position, size)
 
 func _bot_find_target() -> Node3D:
 	# Pick the nearest non-ghost player (bot or human) — bots fight everything.

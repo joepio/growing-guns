@@ -7,7 +7,9 @@
       "Bash(/Applications/Godot.app/Contents/MacOS/Godot --headless --path /Users/joep/dev/godot res://scenes/game.tscn --quit-after 2)",
       "Bash(awk 'NR==144 || NR==145 || NR==146 || NR==147 || NR==148 {printf \"%d: \", NR; for\\(i=1;i<=length\\($0\\);i++\\){c=substr\\($0,i,1\\); if\\(c==\"\\\\t\"\\) printf \"[TAB]\"; else printf \"%s\", c} printf \"\\\\n\"}' scripts/bullet.gd)",
       "Bash(/Applications/Godot.app/Contents/MacOS/Godot --headless --path /Users/joep/dev/godot --script scripts/_measure.gd)",
-      "mcp__gdcli__script_lint"
+      "mcp__gdcli__script_lint",
+      "Bash(./script_lint.sh scripts/sfx.gd scripts/audio_lab.gd)",
+      "Bash(godot --headless --check-only scripts/sfx.gd scripts/audio_lab.gd)"
     ]
   }
 }

@@ -120,7 +120,7 @@ func _explode() -> void:
 
 @rpc("authority", "call_local", "reliable")
 func _do_vfx() -> void:
-	SFX.explosion(global_position)
+	SFX.explosion(global_position, RADIUS)
 	var pos: Vector3 = global_position
 	var scene: Node = get_tree().current_scene
 	if scene and scene.has_method("trigger_explosion_sidechain"):
