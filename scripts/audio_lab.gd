@@ -211,6 +211,8 @@ func _build_ui() -> void:
 		["hit_received dB",       "hit_received_db",       -40.0,  6.0],
 		["bullet zip CLOSE dB",   "bullet_zip_close_db",   -50.0,  0.0],
 		["bullet zip FAR dB",     "bullet_zip_far_db",     -60.0,-10.0],
+		["shot wet send dB",      "shot_wet_db",           -40.0,  6.0],
+		["shot rumble dB",        "shot_rumble_db",        -40.0,  6.0],
 		["unit_size (m)",         "unit_size",               1.0, 40.0],
 	]
 	for k in knobs:
