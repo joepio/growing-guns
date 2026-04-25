@@ -503,6 +503,15 @@ func _do_spawn(id: int, pname: String, pos: Vector3, bot: bool = false) -> void:
 	p.global_position = pos
 	if id == multiplayer.get_unique_id():
 		local_player = p
+		# Attach the raytraced-audio listener under the local player's camera.
+		# Only one listener should be in the scene at a time. Owner needs a
+		# valid transform — the plugin reads owner.transform.basis.x for
+		# ambient pan and crashes if it's null.
+		var cam: Camera3D = p.get_node_or_null("Camera") as Camera3D
+		if cam:
+			var listener := RaytracedAudioListener.new()
+			cam.add_child(listener)
+			listener.owner = cam
 
 @rpc("authority", "call_local", "reliable")
 func _despawn(id: int) -> void:
@@ -1659,22 +1668,29 @@ func trigger_explosion_sidechain(pos: Vector3, radius: float, peak: float = 1.0)
 	if local_player == null or not is_instance_valid(local_player):
 		return
 	var dist := pos.distance_to(local_player.global_position)
-	var affect_radius := maxf(radius * 3.2, 8.0)
+	# Wider reach (was 3.2× radius) so distant big blasts still flash and
+	# duck exposure — bazooka at r=24 now reaches 144 m, grenade r=6 → 36 m.
+	var affect_radius := maxf(radius * 6.0, 12.0)
 	if dist > affect_radius:
 		return
-	var amount := clampf((1.0 - dist / affect_radius) * peak, 0.0, 1.0)
+	# Upper bound 3.0 so big bazookas (peak 3) at point-blank get the full
+	# blinding duck instead of being capped at "regular grenade" intensity.
+	var amount := clampf((1.0 - dist / affect_radius) * peak, 0.0, 3.0)
 	if amount <= 0.0:
 		return
 	# Exposure duck sells the "camera iris clamps down" effect while the white
 	# veil provides the immediate retinal blast.
 	_exposure_duck = maxf(_exposure_duck, amount * 0.95)
 	_exposure_duck_vel = maxf(_exposure_duck_vel, 4.6 + amount * 2.8)
-	_flash_alpha = maxf(_flash_alpha, amount * 0.55)
+	# Flash alpha capped at 0.92 so the white veil doesn't fully cover the HUD.
+	_flash_alpha = maxf(_flash_alpha, minf(amount * 0.55, 0.92))
 	_flash_alpha_vel = maxf(_flash_alpha_vel, 7.0 + amount * 4.0)
 
 func _update_explosion_sidechain(delta: float) -> void:
 	if _arena_env:
-		var target_exposure := _base_tonemap_exposure - _exposure_duck * 0.75
+		# Floor at 0.05 so a huge duck can't crash exposure to black (renders
+		# as full black). 0.05 = ~4 stops below base — still very dark.
+		var target_exposure := maxf(0.05, _base_tonemap_exposure - _exposure_duck * 0.75)
 		_arena_env.tonemap_exposure = lerpf(_arena_env.tonemap_exposure, target_exposure, clampf(delta * 20.0, 0.0, 1.0))
 	if _explosion_flash_overlay:
 		_explosion_flash_overlay.color.a = _flash_alpha

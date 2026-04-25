@@ -96,10 +96,16 @@ func _build_arena() -> void:
 func _build_camera() -> void:
 	_camera = Camera3D.new()
 	_camera.fov = 75.0
-	_camera.global_position = Vector3(0, 6, 14)
 	_camera.rotation = Vector3(_pitch, _yaw, 0)
 	add_child(_camera)
+	_camera.global_position = Vector3(0, 6, 14)
 	_camera.make_current()
+	# Raytraced-audio listener tracks the active camera. One per scene.
+	# Owner must be a node with a transform — the plugin reads
+	# owner.transform.basis.x in _update_ambient (would crash if null).
+	var listener := RaytracedAudioListener.new()
+	_camera.add_child(listener)
+	listener.owner = _camera
 
 # -------------------- bots --------------------
 
@@ -206,15 +212,6 @@ func _build_ui() -> void:
 		["bullet zip CLOSE dB",   "bullet_zip_close_db",   -50.0,  0.0],
 		["bullet zip FAR dB",     "bullet_zip_far_db",     -60.0,-10.0],
 		["unit_size (m)",         "unit_size",               1.0, 40.0],
-		["reverb unit_size (m)",  "reverb_unit_size",        1.0, 40.0],
-		["reverb send dB",        "reverb_send_db",        -30.0,  6.0],
-		["reverb room_size",      "reverb_room_size",        0.0,  1.0],
-		["reverb damping",        "reverb_damping",          0.0,  1.0],
-		["reverb wet",            "reverb_wet",              0.0,  1.0],
-		["reverb predelay (ms)",  "reverb_predelay_msec",    0.0,200.0],
-		["reverb predelay fbk",   "reverb_predelay_feedback",0.0,  0.9],
-		["reverb spread",         "reverb_spread",           0.0,  1.0],
-		["reverb hipass",         "reverb_hipass",           0.0,  1.0],
 	]
 	for k in knobs:
 		_add_slider(vb, k[0], k[1], k[2], k[3])
@@ -231,6 +228,44 @@ func _build_ui() -> void:
 	reroll_btn.focus_mode = Control.FOCUS_NONE
 	reroll_btn.pressed.connect(_reroll_all_cards)
 	hb.add_child(reroll_btn)
+
+	var solo_row := HBoxContainer.new()
+	solo_row.add_theme_constant_override("separation", 8)
+	vb.add_child(solo_row)
+	var solo_lbl := Label.new()
+	solo_lbl.text = "Solo:"
+	solo_lbl.custom_minimum_size = Vector2(48, 0)
+	solo_lbl.add_theme_font_size_override("font_size", 12)
+	solo_row.add_child(solo_lbl)
+	var solo_opt := OptionButton.new()
+	solo_opt.focus_mode = Control.FOCUS_NONE
+	# Each entry maps to the prefix matched against debug_label in sfx.gd.
+	# "" silences nothing. Anything else mutes everything that doesn't start
+	# with that prefix (so "explosion" catches both bang and rumble, etc.).
+	var solo_choices := [
+		["All sounds",   ""],
+		["shot",          "shot"],
+		["explosion",     "explosion"],
+		["footstep",      "footstep"],
+		["jump",          "jump"],
+		["landing",       "landing"],
+		["dash",          "dash"],
+		["hurt",          "hurt"],
+		["death",         "death"],
+		["hit_received",  "hit_received"],
+		["hitmarker",     "hitmarker"],
+		["bullet_zip",    "bullet_zip"],
+		["grenade_launch","grenade_launch"],
+		["melee",         "melee"],
+		["card_flip",     "card_flip"],
+		["reload",        "reload"],
+	]
+	for i in solo_choices.size():
+		solo_opt.add_item(solo_choices[i][0], i)
+	solo_opt.selected = 0
+	solo_opt.item_selected.connect(func(idx: int) -> void:
+		SFX.solo_kind = solo_choices[idx][1])
+	solo_row.add_child(solo_opt)
 
 func _toggle_firefight() -> void:
 	_firing_paused = not _firing_paused
@@ -255,13 +290,15 @@ func _add_slider(vb: VBoxContainer, label_text: String, prop: String, lo: float,
 	lbl.custom_minimum_size = Vector2(160, 0)
 	lbl.add_theme_font_size_override("font_size", 12)
 	row.add_child(lbl)
+	# Snapshot the initial (game) value so the reset button can restore it.
+	var initial: float = float(SFX.get(prop))
 	var slider := HSlider.new()
 	slider.min_value = lo
 	slider.max_value = hi
 	# Auto step: ~200 increments across the slider's range. Fine knobs
 	# (e.g. 0..0.6) get 0.003 steps; coarse dB knobs get 0.1 steps.
 	slider.step = maxf((hi - lo) / 200.0, 0.001)
-	slider.value = float(SFX.get(prop))
+	slider.value = initial
 	slider.custom_minimum_size = Vector2(140, 18)
 	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(slider)
@@ -270,7 +307,18 @@ func _add_slider(vb: VBoxContainer, label_text: String, prop: String, lo: float,
 	val_lbl.custom_minimum_size = Vector2(40, 0)
 	val_lbl.add_theme_font_size_override("font_size", 12)
 	row.add_child(val_lbl)
+	var reset_btn := Button.new()
+	reset_btn.text = "↺"
+	reset_btn.tooltip_text = "Reset to game value (%.2f)" % initial
+	reset_btn.focus_mode = Control.FOCUS_NONE
+	reset_btn.custom_minimum_size = Vector2(22, 18)
+	reset_btn.add_theme_font_size_override("font_size", 12)
+	reset_btn.visible = false
+	reset_btn.pressed.connect(func() -> void:
+		slider.value = initial)
+	row.add_child(reset_btn)
 	slider.value_changed.connect(func(v: float) -> void:
 		SFX.set(prop, v)
-		val_lbl.text = "%+.1f" % v)
+		val_lbl.text = "%+.1f" % v
+		reset_btn.visible = not is_equal_approx(v, initial))
 	vb.add_child(row)

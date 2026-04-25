@@ -17,6 +17,10 @@ config/features=PackedStringArray("4.6", "Forward Plus")
 run/max_fps=240
 config/icon="res://icon.svg"
 
+[audio]
+
+general/3d_panning_strength=1.0
+
 [autoload]
 
 NetworkManager="*res://scripts/network_manager.gd"
@@ -29,6 +33,10 @@ window/size/viewport_height=720
 window/size/mode=3
 window/stretch/mode="canvas_items"
 window/vsync/vsync_mode=0
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/raytraced_audio/plugin.cfg")
 
 [input]
 
@@ -107,6 +115,11 @@ tab={
 [physics]
 
 common/physics_ticks_per_second=120
+
+[raytraced_audio]
+
+reverb_bus=&"RaytracedReverb"
+ambient_bus=&"RaytracedAmbient"
 
 [rendering]
 

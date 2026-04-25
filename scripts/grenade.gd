@@ -126,6 +126,7 @@ func _do_vfx() -> void:
 	if scene and scene.has_method("trigger_explosion_sidechain"):
 		scene.trigger_explosion_sidechain(pos, RADIUS, 1.25)
 	_spawn_heat_distortion(scene, pos, RADIUS, 0.3, 0.055)
+	_spawn_shockwave_ring(scene, pos, RADIUS)
 
 	# --- Bright white-hot core flash (very short)
 	var core := MeshInstance3D.new()
@@ -177,7 +178,10 @@ func _do_vfx() -> void:
 	wave.position = pos
 	scene.add_child(wave)
 	var wtw := wave.create_tween().set_parallel(true)
-	var wave_expand_time := 0.18
+	# Shockwave expands at the speed of sound (343 m/s) so the visual wave
+	# arrives at distant viewers at the same instant the audio does (which is
+	# delayed by distance/343 in SFX). Min 30 ms so tiny blasts stay visible.
+	var wave_expand_time := maxf(0.03, RADIUS / 343.0)
 	var wave_target_scale := Vector3.ONE * maxf(0.01, (RADIUS * 1.05) / wave_mesh.radius)
 	wtw.tween_property(wave, "scale", wave_target_scale, wave_expand_time)\
 		.set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_IN_OUT)
@@ -188,6 +192,19 @@ func _do_vfx() -> void:
 	wtw.tween_property(wave_mat, "emission_energy_multiplier", 0.0, wave_expand_time * 0.26)\
 		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
 	wtw.chain().tween_callback(wave.queue_free)
+
+	# Brief scene-wide flash — way brighter than the warm-ember decay light
+	# below, but only ~60 ms so it reads as the moment-of-detonation spike.
+	var flash := OmniLight3D.new()
+	flash.light_color = Color(1.0, 0.98, 0.92)
+	flash.light_energy = 100.0 + RADIUS * 14.0
+	flash.omni_range = maxf(40.0, RADIUS * 6.0)
+	flash.position = pos
+	scene.add_child(flash)
+	var ftw := flash.create_tween()
+	ftw.tween_property(flash, "light_energy", 0.0, 0.06)\
+		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+	ftw.tween_callback(flash.queue_free)
 
 	var light := OmniLight3D.new()
 	var hot_color := Color(1.0, 0.97, 0.9)
@@ -274,4 +291,66 @@ func _spawn_heat_distortion(scene: Node, pos: Vector3, radius: float, duration: 
 		0.0,
 		duration * 0.7
 	).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+	tw.chain().tween_callback(shell.queue_free)
+
+# Thin-shell screen-space shockwave: a sphere expanding at the speed of sound.
+# A high-power fresnel concentrates the pixel displacement on the silhouette
+# ring, so the camera sees a thin distorted halo travelling outward.
+func _spawn_shockwave_ring(scene: Node, pos: Vector3, radius: float) -> void:
+	if scene == null:
+		return
+	var shell := MeshInstance3D.new()
+	var mesh := SphereMesh.new()
+	mesh.radius = 0.25
+	mesh.height = 0.5
+	mesh.radial_segments = 32
+	mesh.rings = 16
+	shell.mesh = mesh
+	var shader := Shader.new()
+	shader.code = """
+		shader_type spatial;
+		render_mode unshaded, cull_disabled, depth_draw_never, blend_mix;
+
+		uniform sampler2D screen_tex : hint_screen_texture, filter_linear_mipmap;
+		uniform float distortion_strength = 0.04;
+		uniform float ring_thickness = 7.0;
+		uniform float opacity = 0.85;
+
+		void fragment() {
+			// High exponent -> energy concentrated on silhouette ring only.
+			float fresnel = pow(1.0 - abs(dot(normalize(VIEW), NORMAL)), ring_thickness);
+			vec3 n = normalize((VIEW_MATRIX * vec4(NORMAL, 0.0)).xyz);
+			vec2 offset = n.xy * distortion_strength * fresnel;
+			vec3 col = texture(screen_tex, SCREEN_UV + offset).rgb;
+			ALBEDO = col;
+			ALPHA = fresnel * opacity;
+		}
+	"""
+	var mat := ShaderMaterial.new()
+	mat.shader = shader
+	mat.set_shader_parameter("distortion_strength", 0.05)
+	mat.set_shader_parameter("ring_thickness", 7.0)
+	mat.set_shader_parameter("opacity", 0.9)
+	shell.material_override = mat
+	shell.position = pos
+	scene.add_child(shell)
+	# Sound-speed expansion (matches audio delay) with a 30 ms minimum so
+	# tiny blasts remain visible.
+	var dur: float = maxf(0.03, radius / 343.0)
+	var target_scale := Vector3.ONE * maxf(0.01, (radius * 1.05) / mesh.radius)
+	var tw := shell.create_tween().set_parallel(true)
+	tw.tween_property(shell, "scale", target_scale, dur)\
+		.set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_OUT)
+	tw.tween_method(
+		func(v: float) -> void: mat.set_shader_parameter("distortion_strength", v),
+		0.05,
+		0.0,
+		dur
+	).set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_OUT)
+	tw.tween_method(
+		func(v: float) -> void: mat.set_shader_parameter("opacity", v),
+		0.9,
+		0.0,
+		dur * 0.9
+	).set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_OUT)
 	tw.chain().tween_callback(shell.queue_free)

@@ -14,15 +14,19 @@ extends Node
 # SFX.hit_received(), SFX.kill_confirm(), SFX.hitmarker(kind, dmg).
 
 const MIX_RATE := 44100.0
-# Two-bus architecture so distant sounds keep their reverb tail:
-#   dry copy → Master, fast 3D attenuation (unit_size = `unit_size`)
-#   wet copy → REVERB_BUS (pure reverb), slow 3D attenuation (reverb_unit_size)
-# Result: as a sound recedes its dry signal fades fast but the wet send only
-# fades slowly, so the wet/dry ratio rises with distance — like real space.
-const BUS_3D := "SFX3D"           # back-compat name (kept for any external refs)
-const REVERB_BUS := "SFXReverb"   # pure-wet send bus
+# 3D sounds run through RaytracedAudioPlayer3D (raytraced-audio addon): a
+# pure-GDScript wrapper over AudioStreamPlayer3D that adds a per-source
+# AudioEffectLowPassFilter animated by occlusion raycasts (the "muffled
+# behind walls" effect). The plugin auto-creates RaytracedReverb +
+# RaytracedAmbient buses on enable; players default to RaytracedReverb.
 const NO_POS := Vector3.INF
-const DRY_RADIUS := 4.0  # legacy constant — unused now, kept for compat
+# Number of distinct sample variations per radius bucket. A random variant is
+# picked per explosion call so 10 rockets/sec don't sound like the same sample
+# fired 10×. Each variant is lazily synthed + cached on first request.
+const EXPLOSION_VARIANTS := 5
+# m/s — used to delay 3D sound playback by distance/SPEED_OF_SOUND so far
+# explosions arrive late, like real physics.
+const SPEED_OF_SOUND := 343.0
 
 var _sample_cache: Dictionary = {}
 var _hurt_sounds: Array[AudioStreamWAV] = []
@@ -37,7 +41,7 @@ var shot_world_db: float = -2.5
 var shot_dmg_per_double_db: float = 6.0
 var shot_pitch_per_double: float = 0.20  # 0..1; pitch drop per damage doubling
 var explosion_bang_db: float = 12.0
-var explosion_rumble_db: float = 10.0
+var explosion_rumble_db: float = -3.0
 var footstep_db: float = -30.0
 var jump_db: float = -10.5
 var landing_max_db: float = 5.0
@@ -48,47 +52,19 @@ var death_world_db: float = -18.5
 var hit_received_db: float = -12.0
 var bullet_zip_close_db: float = -22.0
 var bullet_zip_far_db: float = -44.0
+# AudioStreamPlayer3D unit_size — distance at which the inverse-distance
+# attenuation curve starts falling off. Sounds want different values:
+# footsteps are intimate (small unit_size), explosions carry far (large).
+# The per-call attenuation_dist override lets each public function pick.
 var unit_size: float = 12.0
-# Reverb send tuning. Wet attenuates slower than dry so distant sounds keep a
-# tail, but if the gap is too big the wet drowns the direct signal at range.
-var reverb_unit_size: float = 16.0   # how slowly the wet attenuates (only modestly > unit_size)
-var reverb_send_db: float = -9.0     # dB shaved off wet copies vs dry
-
-# Live-tunable reverb params — setters push to the actual AudioEffectReverb so
-# they take effect immediately. Null-guarded for default-value init order.
-var _reverb_effect: AudioEffectReverb = null
-var reverb_room_size: float = 0.85:
-	set(v):
-		reverb_room_size = v
-		if _reverb_effect: _reverb_effect.room_size = v
-var reverb_damping: float = 0.45:
-	set(v):
-		reverb_damping = v
-		if _reverb_effect: _reverb_effect.damping = v
-var reverb_wet: float = 1.0:
-	set(v):
-		reverb_wet = v
-		if _reverb_effect: _reverb_effect.wet = v
-var reverb_predelay_msec: float = 35.0:
-	set(v):
-		reverb_predelay_msec = v
-		if _reverb_effect: _reverb_effect.predelay_msec = v
-var reverb_predelay_feedback: float = 0.4:
-	set(v):
-		reverb_predelay_feedback = v
-		if _reverb_effect: _reverb_effect.predelay_feedback = v
-var reverb_spread: float = 0.95:
-	set(v):
-		reverb_spread = v
-		if _reverb_effect: _reverb_effect.spread = v
-var reverb_hipass: float = 0.35:
-	set(v):
-		reverb_hipass = v
-		if _reverb_effect: _reverb_effect.hipass = v
+# Audio-lab solo: when non-empty, only sounds whose debug_label starts with
+# this string are played. "" = play all. Compared in _play / _play_stream;
+# inner forwarded calls have empty label, so the gate ignores them.
+var solo_kind: String = ""
 
 
 func _ready() -> void:
-	_ensure_reverb_bus()
+	_ensure_master_chain()
 	_load_assets()
 
 func _load_assets() -> void:
@@ -114,34 +90,11 @@ func _load_assets() -> void:
 		_step_sounds.size(), _gun_sounds.size(),
 		"YES" if _card_pick_sound != null else "NO"])
 
-func _ensure_reverb_bus() -> void:
-	# Set up once. The wet send is a dedicated bus carrying ONLY reverb tail
-	# (dry=0, wet=1). Sources emit a parallel "wet send" copy here whose 3D
-	# attenuation is much gentler than the dry copy on Master — so distant
-	# sounds keep their tail while the direct signal fades.
-	_ensure_master_chain()
-	if AudioServer.get_bus_index(REVERB_BUS) >= 0:
-		return
-	var idx := AudioServer.bus_count
-	AudioServer.add_bus(idx)
-	AudioServer.set_bus_name(idx, REVERB_BUS)
-	AudioServer.set_bus_send(idx, "Master")
-	var reverb := AudioEffectReverb.new()
-	reverb.predelay_msec = reverb_predelay_msec
-	reverb.predelay_feedback = reverb_predelay_feedback
-	reverb.room_size = reverb_room_size
-	reverb.damping = reverb_damping
-	reverb.spread = reverb_spread
-	reverb.hipass = reverb_hipass
-	reverb.dry = 0.0   # bus output is *only* reverb tail
-	reverb.wet = reverb_wet
-	AudioServer.add_bus_effect(idx, reverb)
-	_reverb_effect = reverb
-
-# Master chain: ear-style compressor first, then a brick-wall limiter as
-# final safety. Compressor catches every transient immediately (zero attack)
-# and releases over 200 ms, so a burst of fire ducks the whole burst — like
-# how real ears adapt to continuous loud noise.
+# Master chain: instant-attack compressor catches every transient (nothing
+# slips through to the limiter / clips), with a long release so the GR
+# follows a stacked rumble's natural decay instead of pumping back to zero.
+# Net feel: 50 simultaneous explosions → loud sustained roar that fades
+# gradually as individual rumbles end, no transient clipping in the burst.
 func _ensure_master_chain() -> void:
 	var master_idx := AudioServer.get_bus_index("Master")
 	if master_idx < 0:
@@ -151,10 +104,10 @@ func _ensure_master_chain() -> void:
 		if AudioServer.get_bus_effect(master_idx, i) is AudioEffectCompressor:
 			return
 	var comp := AudioEffectCompressor.new()
-	comp.threshold = -8.0     # start compressing at -8 dB
-	comp.ratio = 4.0          # 4:1 — clearly audible ducking on loud bursts
-	comp.attack_us = 1.0      # ~instant catching (no transient boost)
-	comp.release_ms = 200.0   # ear-like adaptation curve
+	comp.threshold = -3.0     # only catches loud / stacked sounds, NOT distant ones
+	comp.ratio = 3.0          # firm enough to tame stacks, gentle enough to keep dynamics
+	comp.attack_us = 1.0      # instant — no transient slips through to clip
+	comp.release_ms = 500.0   # long release lets stacked rumble sustain naturally
 	comp.gain = 0.0
 	comp.mix = 1.0
 	AudioServer.add_bus_effect(master_idx, comp)
@@ -175,26 +128,15 @@ func _listener_position() -> Vector3:
 
 # -------------------- dispatch --------------------
 
-func _configure_dry_player(p: AudioStreamPlayer3D) -> void:
-	# Direct/dry signal — sharp distance falloff so close sources dominate.
-	p.bus = "Master"
+func _configure_3d_player(p: AudioStreamPlayer3D) -> void:
 	p.unit_size = unit_size
 	p.max_db = 24.0
-	p.max_distance = 0.0
 	p.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
-	p.attenuation_filter_cutoff_hz = 3200.0
+	# Distance-based air absorption — distant sounds lose treble, like reality.
+	# Cutoff = 8 kHz, max -12 dB at far range; subtle but audible.
+	p.attenuation_filter_cutoff_hz = 8000.0
 	p.attenuation_filter_db = -12.0
-
-func _configure_wet_player(p: AudioStreamPlayer3D) -> void:
-	# Reverb send — gentle distance falloff so the wet tail persists at range.
-	# Lowpass set lower since long-distance reflections are already darkened.
-	p.bus = REVERB_BUS
-	p.unit_size = reverb_unit_size
-	p.max_db = 12.0
-	p.max_distance = 0.0
-	p.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
-	p.attenuation_filter_cutoff_hz = 2200.0
-	p.attenuation_filter_db = -8.0
+	# The plugin sets `bus` to RaytracedReverb itself on _enter_tree.
 
 func _log_sfx(label: String, vol_db: float, at: Vector3) -> void:
 	if label == "":
@@ -208,7 +150,7 @@ func _log_sfx(label: String, vol_db: float, at: Vector3) -> void:
 
 func _samples_to_wav(samples: PackedVector2Array) -> AudioStreamWAV:
 	# Convert in-memory PackedVector2Array → 16-bit stereo WAV so the same
-	# AudioStream resource can drive two AudioStreamPlayer3Ds (dry + wet).
+	# AudioStream resource can be fed to a RaytracedAudioPlayer3D's stream.
 	var n := samples.size()
 	var data := PackedByteArray()
 	data.resize(n * 4)
@@ -225,20 +167,30 @@ func _samples_to_wav(samples: PackedVector2Array) -> AudioStreamWAV:
 	wav.data = data
 	return wav
 
-func _play(samples: PackedVector2Array, volume_db: float = -6.0, at: Vector3 = NO_POS, debug_label: String = "") -> Node:
+func _play(samples: PackedVector2Array, volume_db: float = -6.0, at: Vector3 = NO_POS, debug_label: String = "", attenuation_dist: float = -1.0, dry: bool = false) -> Node:
+	if _solo_blocks(debug_label):
+		return null
 	_log_sfx(debug_label, volume_db, at)
 	if samples.is_empty():
 		return null
-	# Bake samples to WAV and route through _play_stream so the dry+wet
-	# dispatch is shared between sample-based and stream-based callers.
-	# Empty label avoids a second log line.
-	return _play_stream(_samples_to_wav(samples), volume_db, at, 1.0, "")
+	# Empty label avoids a second log line via _play_stream's own logger.
+	return _play_stream(_samples_to_wav(samples), volume_db, at, 1.0, "", attenuation_dist, dry)
 
-func _play_stream(stream: AudioStream, volume_db: float = -6.0, at: Vector3 = NO_POS, pitch_scale: float = 1.0, debug_label: String = "") -> Node:
+# Empty `label` is treated as a forwarded inner call (already gated upstream).
+func _solo_blocks(label: String) -> bool:
+	return solo_kind != "" and label != "" and not label.begins_with(solo_kind)
+
+# `attenuation_dist`: per-call unit_size for 3D sounds. <= 0 means use the
+# global SFX.unit_size. Sounds that should "carry" (explosions) pass a much
+# larger value than incidentals (footsteps).
+# `dry`: if true, plays through plain AudioStreamPlayer3D on Master (no muffle
+# filter, no reverb). Use for sharp transients that should hit clean.
+func _play_stream(stream: AudioStream, volume_db: float = -6.0, at: Vector3 = NO_POS, pitch_scale: float = 1.0, debug_label: String = "", attenuation_dist: float = -1.0, dry: bool = false) -> Node:
+	if _solo_blocks(debug_label):
+		return null
 	_log_sfx(debug_label, volume_db, at)
 	if stream == null:
 		return null
-	var life: float = stream.get_length() / maxf(0.1, pitch_scale) + 0.15
 	if at == NO_POS:
 		var p := AudioStreamPlayer.new()
 		p.stream = stream
@@ -246,29 +198,42 @@ func _play_stream(stream: AudioStream, volume_db: float = -6.0, at: Vector3 = NO
 		p.pitch_scale = pitch_scale
 		add_child(p)
 		p.play()
-		get_tree().create_timer(life).timeout.connect(p.queue_free)
+		var life_2d: float = stream.get_length() / maxf(0.1, pitch_scale) + 0.15
+		get_tree().create_timer(life_2d).timeout.connect(p.queue_free)
 		return p
-	# 3D — emit a dry copy on Master and a wet send copy on REVERB_BUS so
-	# the wet/dry ratio rises naturally with distance.
-	var p_dry := AudioStreamPlayer3D.new()
-	p_dry.stream = stream
-	p_dry.volume_db = volume_db
-	p_dry.pitch_scale = pitch_scale
-	_configure_dry_player(p_dry)
-	add_child(p_dry)
-	p_dry.global_position = at
-	p_dry.play()
-	get_tree().create_timer(life).timeout.connect(p_dry.queue_free)
-	var p_wet := AudioStreamPlayer3D.new()
-	p_wet.stream = stream
-	p_wet.volume_db = volume_db + reverb_send_db
-	p_wet.pitch_scale = pitch_scale
-	_configure_wet_player(p_wet)
-	add_child(p_wet)
-	p_wet.global_position = at
-	p_wet.play()
-	get_tree().create_timer(life).timeout.connect(p_wet.queue_free)
-	return p_dry
+	# 3D — delay playback by distance/SPEED_OF_SOUND so far sounds arrive late.
+	# Listener position is captured at call time; if the listener moves during
+	# the delay, attenuation still re-resolves at play time on the live position.
+	var listener_pos := _listener_position()
+	var delay: float = 0.0
+	if listener_pos != NO_POS:
+		delay = listener_pos.distance_to(at) / SPEED_OF_SOUND
+	if delay < 0.01:
+		return _spawn_3d_player(stream, volume_db, at, pitch_scale, attenuation_dist, dry)
+	get_tree().create_timer(delay).timeout.connect(func() -> void:
+		_spawn_3d_player(stream, volume_db, at, pitch_scale, attenuation_dist, dry))
+	return null
+
+func _spawn_3d_player(stream: AudioStream, volume_db: float, at: Vector3, pitch_scale: float, attenuation_dist: float, dry: bool = false) -> Node:
+	# Dry path uses plain AudioStreamPlayer3D on Master so it bypasses both
+	# the per-source muffle filter AND the RaytracedReverb bus.
+	var p: AudioStreamPlayer3D = AudioStreamPlayer3D.new() if dry else RaytracedAudioPlayer3D.new()
+	_configure_3d_player(p)
+	if dry:
+		p.bus = "Master"
+	if attenuation_dist > 0.0:
+		p.unit_size = attenuation_dist
+	p.stream = stream
+	p.volume_db = volume_db
+	p.pitch_scale = pitch_scale
+	add_child(p)
+	p.global_position = at
+	p.play()
+	# +1.5 s buffer so the shared reverb bus's tail can play out before the
+	# player is freed (and its bus removed, which would silence in-flight tail).
+	var life: float = stream.get_length() / maxf(0.1, pitch_scale) + 1.5
+	get_tree().create_timer(life).timeout.connect(p.queue_free)
+	return p
 
 func _cached_samples(key: String, generator: Callable) -> PackedVector2Array:
 	if not _sample_cache.has(key):
@@ -308,16 +273,23 @@ func shot(w: Weapon = null, at: Vector3 = NO_POS, is_self: bool = false) -> void
 	# Self vs world base levels (knobs let the audio lab tune them live).
 	var self_base: float = shot_self_db + randf_range(-1.5, 1.5)
 	var world_base: float = shot_world_db + randf_range(-1.5, 1.5)
+	# unit_size for shots — past this, treble rolls off and volume drops with
+	# inverse-distance. 6 m gives noticeable close/mid/far distinction in a
+	# typical arena while still carrying audibly to the far walls.
+	var shot_dist: float = 6.0
+	# Self shots play 3D at the muzzle (1 m from listener -> within unit_size,
+	# full volume) so they route through RaytracedReverb and pick up the
+	# environment tail. Pure 2D self-shots sounded thin / dry.
 	if not _gun_sounds.is_empty():
 		if is_self:
-			_play_stream(_gun_sounds.pick_random(), self_base + dmg_db, NO_POS, pitch, "shot_self")
+			_play_stream(_gun_sounds.pick_random(), self_base + dmg_db, at, pitch, "shot_self", shot_dist)
 		else:
-			_play_stream(_gun_sounds.pick_random(), world_base + dmg_db, at, pitch, "shot")
+			_play_stream(_gun_sounds.pick_random(), world_base + dmg_db, at, pitch, "shot", shot_dist)
 		return
 	if is_self:
-		_play(_cached_samples(_shot_cache_key(w), Callable(self, "_synth_shot").bind(w)), self_base + dmg_db, NO_POS, "shot_self")
+		_play(_cached_samples(_shot_cache_key(w), Callable(self, "_synth_shot").bind(w)), self_base + dmg_db, at, "shot_self", shot_dist)
 	else:
-		_play(_cached_samples(_shot_cache_key(w), Callable(self, "_synth_shot").bind(w)), world_base + dmg_db, at, "shot")
+		_play(_cached_samples(_shot_cache_key(w), Callable(self, "_synth_shot").bind(w)), world_base + dmg_db, at, "shot", shot_dist)
 func grenade_launch(at: Vector3 = NO_POS) -> void:
 	_play(_cached_samples("grenade_launch", Callable(self, "_synth_grenade_launch")), -6.0, at, "grenade_launch")
 
@@ -346,10 +318,22 @@ func explosion(at: Vector3 = NO_POS, radius: float = 6.0) -> void:
 	# Layered: punchy transient bang + a deep brown-noise rumble that
 	# decays longer for larger blasts. The rumble samples are bucketed
 	# by radius so we don't synth a fresh one per call.
-	_play(_cached_samples("explosion", Callable(self, "_synth_explosion")), explosion_bang_db, at, "explosion_bang")
+	# unit_size is the distance at which attenuation BEGINS — anything closer
+	# plays at full volume_db. So we want it relatively small (a grenade at
+	# 5 m and 30 m should sound very different) but scaled with radius so a
+	# bazooka still carries far before falling off.
+	var explosion_dist: float = clampf(radius * 0.8, 4.0, 24.0)
+	# Bucketed by radius (grenade vs bazooka should sound different) AND by
+	# variant — picks one of EXPLOSION_VARIANTS sample variations per call so
+	# rapid bursts don't feel like the same exact sound 10× / sec.
 	var r_bucket: int = int(round(clampf(radius, 2.0, 24.0)))
-	var rumble_key := "explosion_rumble:%d" % r_bucket
-	_play(_cached_samples(rumble_key, Callable(self, "_synth_explosion_rumble").bind(float(r_bucket))), explosion_rumble_db, at, "explosion_rumble")
+	var variant: int = randi() % EXPLOSION_VARIANTS
+	var bang_key := "explosion_bang:%d:%d" % [r_bucket, variant]
+	# Bang plays dry — routed past the reverb bus so the transient stays
+	# crisp. The rumble (next call) carries the wet/spatial character.
+	_play(_cached_samples(bang_key, Callable(self, "_synth_explosion").bind(float(r_bucket), variant)), explosion_bang_db, at, "explosion_bang", explosion_dist, true)
+	var rumble_key := "explosion_rumble:%d:%d" % [r_bucket, variant]
+	_play(_cached_samples(rumble_key, Callable(self, "_synth_explosion_rumble").bind(float(r_bucket), variant)), explosion_rumble_db, at, "explosion_rumble", explosion_dist)
 func melee(at: Vector3 = NO_POS, damage: int = 50) -> void:
 	var pitch_ratio: float = clampf(50.0 / float(damage), 0.5, 1.2)
 	var key := "melee_%d" % int(round(pitch_ratio * 100.0))
@@ -501,52 +485,100 @@ func _synth_grenade_launch() -> PackedVector2Array:
 		out[i] = Vector2(s, s)
 	return out
 
-func _synth_explosion() -> PackedVector2Array:
-	# Sub-bass thump + lowpass-swept noise tail.
-	var dur := 0.70
+func _synth_explosion(radius: float, variant: int) -> PackedVector2Array:
+	# Layered: saturated broadband click at t=0 (the "bang"), sub-bass thump,
+	# lowpass-swept noise tail. Per-variant RNG seeding + parameter jitter
+	# gives 5 distinct sample characters per radius bucket.
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash([radius, variant, "bang"])
+	var sub_freq: float = lerpf(36.0, 52.0, rng.randf())
+	var click_drive: float = lerpf(3.0, 5.5, rng.randf())
+	var click_decay: float = lerpf(55.0, 95.0, rng.randf())
+	var lp_start: float = lerpf(0.40, 0.60, rng.randf())
+	var lp_end: float = lerpf(0.012, 0.04, rng.randf())
+	# Noise-wash decay rate — separate from overall env so the lowpass-swept
+	# noise tail dies in ~150-250 ms instead of riding the full bang.
+	var noise_decay: float = lerpf(5.0, 9.0, rng.randf())
+	# Lowpass coefficients for thwack/click — keeps the transient thumpy
+	# rather than hissy (white noise has flat treble). 0.10 ≈ 700 Hz, 0.20 ≈ 1.4 kHz.
+	var thwack_cutoff_k: float = lerpf(0.10, 0.16, rng.randf())
+	var click_cutoff_k: float = lerpf(0.18, 0.28, rng.randf())
+	var dur: float = clampf(0.4 + radius * 0.08, 0.4, 1.6)
 	var n := int(dur * MIX_RATE)
 	var out := PackedVector2Array()
 	out.resize(n)
 	var lp := 0.0
+	var thwack_lp := 0.0
+	var click_lp := 0.0
 	for i in range(n):
 		var t := float(i) / MIX_RATE
-		var env := pow(1.0 - t / dur, 1.4)
-		var noise := randf_range(-1.0, 1.0)
-		var cutoff_k := lerpf(0.5, 0.03, sqrt(t / dur))
+		# Exp tail (-30 dB at ~1.4s), gentle convex shaping over the window.
+		var env := exp(-t * 2.2) * pow(1.0 - t / dur, 0.4)
+		var noise := rng.randf_range(-1.0, 1.0)
+		# Sharp impulse — the actual "crack" at t=0. Decays in ~4 ms.
+		# Lowpassed so it's a thumpy "boom", not a hissy "tap".
+		thwack_lp = lerpf(thwack_lp, rng.randf_range(-1.0, 1.0), thwack_cutoff_k)
+		var thwack := thwack_lp * 2.5 * exp(-t * 250.0)
+		# Click: tanh-saturated noise. Lowpassed before saturation so the
+		# harmonic content stays in the low/mid range (still bright from the
+		# saturation harmonics, not from raw white-noise treble).
+		click_lp = lerpf(click_lp, noise, click_cutoff_k)
+		var click := tanh(click_lp * click_drive) * exp(-t * click_decay)
+		var cutoff_k := lerpf(lp_start, lp_end, sqrt(t / dur))
 		lp = lerpf(lp, noise, cutoff_k)
-		var sub := sin(2.0 * PI * 42.0 * t) * exp(-t * 3.5)
-		var s := (lp * 0.65 + sub * 0.75) * env * 0.9
+		# Noise-wash gets its own fast decay so it doesn't dominate the tail.
+		var noise_env := exp(-t * noise_decay)
+		# cos so the sub-bass starts at peak amplitude (sin starts at 0,
+		# burying the t=0 attack). Same 3.5 decay rate.
+		var sub := cos(2.0 * PI * sub_freq * t) * exp(-t * 3.5)
+		var s := (thwack + click * 1.7 + lp * 0.40 * noise_env + sub * 0.75) * env * 0.9
 		out[i] = Vector2(s, s)
 	return out
 
 # Deep rumble layer that pairs with the transient explosion bang. Brown-noise
 # generated by integrating white noise, then aggressively low-passed. Bigger
 # radius → longer duration AND lower-frequency rumble.
-func _synth_explosion_rumble(radius: float) -> PackedVector2Array:
-	# Short audio rumble — the long-decay reverb on BUS_3D carries the tail
-	# from there, so we don't need to bake a multi-second sample.
-	var dur: float = clampf(0.35 + radius * 0.06, 0.35, 1.4)
+func _synth_explosion_rumble(radius: float, variant: int) -> PackedVector2Array:
+	# Quadratic length scaling: tiny pops stay tiny, big bazookas get the
+	# full multi-second roar. Per-variant jitter on cutoff, attack, and
+	# decay rate so 5 stacked rumbles aren't identical.
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash([radius, variant, "rumble"])
+	var r_norm: float = clampf(radius, 2.0, 24.0) / 24.0
+	var dur: float = clampf(0.3 + r_norm * r_norm * 4.7, 0.3, 5.0)
 	var n: int = int(dur * MIX_RATE)
 	var out := PackedVector2Array()
 	out.resize(n)
-	# Bigger blast = lower cutoff = deeper rumble. Range ~60 Hz → 180 Hz.
-	var cutoff: float = clampf(220.0 - radius * 7.0, 55.0, 200.0)
+	# Bigger blast = lower cutoff = deeper rumble. Per-variant ±15 Hz wobble.
+	var cutoff_base: float = clampf(220.0 - radius * 7.0, 55.0, 200.0)
+	var cutoff: float = cutoff_base + rng.randf_range(-15.0, 15.0)
 	var lp_k: float = clampf(TAU * cutoff / MIX_RATE, 0.005, 0.4)
 	var brown: float = 0.0
 	var lp: float = 0.0
-	# Slow attack so the rumble swells in rather than slapping at t=0.
-	var attack_dur: float = 0.08
+	# Variant jitter: attack and decay rate vary subtly per variant.
+	var attack_dur: float = lerpf(0.05, 0.12, rng.randf())
+	var decay_rate: float = lerpf(1.5, 2.2, rng.randf())
+	# Last 0.4 s linearly tapers the envelope to literal zero so the buffer
+	# doesn't end on a non-zero sample (which would click).
+	var release_dur: float = 0.4
+	# Per-sample gain. Bazooka-class blasts (large radius) have a longer +
+	# deeper rumble whose total acoustic energy would otherwise drown the
+	# bang. sqrt(6/radius) keeps small blasts at full level (radius=6 -> 1.5)
+	# and trims big ones (radius=24 -> ~0.75).
+	var gain: float = 1.5 * sqrt(6.0 / maxf(6.0, radius))
 	for i in range(n):
 		var t: float = float(i) / MIX_RATE
 		var attack: float = clampf(t / attack_dur, 0.0, 1.0)
-		# Long exponential decay tied to total duration.
-		var decay: float = exp(-t * (3.0 / dur))
-		var env: float = attack * decay
+		# Slower decay than 3.0/dur so the body of each rumble persists
+		# longer; stacked rumbles overlap into a sustained roar.
+		var decay: float = exp(-t * (decay_rate / dur))
+		var release: float = clampf((dur - t) / release_dur, 0.0, 1.0)
+		var env: float = attack * decay * release
 		# Brown noise: integrated white noise with a tiny leak so it can't
 		# drift into DC offset territory.
-		brown = brown * 0.998 + randf_range(-1.0, 1.0) * 0.03
+		brown = brown * 0.998 + rng.randf_range(-1.0, 1.0) * 0.03
 		lp = lerpf(lp, brown, lp_k)
-		var s: float = lp * env * 1.5
+		var s: float = lp * env * gain
 		# Soft-clip stray peaks so the integrator can't blow up the buffer.
 		s = tanh(s)
 		out[i] = Vector2(s, s)
