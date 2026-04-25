@@ -99,6 +99,10 @@ var _exposure_duck: float = 0.0
 var _exposure_duck_vel: float = 0.0
 var _flash_alpha: float = 0.0
 var _flash_alpha_vel: float = 0.0
+# Target the alpha lerps TOWARD on the rise — instant set on _flash_alpha
+# tears visibly with vsync off (a single frame jumping 0 -> 0.8 splits the
+# screen). Ramping over a couple frames keeps per-frame change small.
+var _flash_alpha_target: float = 0.0
 
 var _dash_segments: Array[ProgressBar] = []
 var _dash_text_hbox: Control = null
@@ -1656,13 +1660,19 @@ func _build_death_overlay() -> void:
 	$HUD.move_child(_death_overlay, 1)
 
 func _build_explosion_flash_overlay() -> void:
+	# Dedicated CanvasLayer above HUD so the flash covers ability bars, health,
+	# scoreboard etc. Otherwise the flash sits behind those widgets and you
+	# only see white bars in the gaps between them.
+	var flash_layer := CanvasLayer.new()
+	flash_layer.name = "ExplosionFlashLayer"
+	flash_layer.layer = 50  # well above HUD's default layer (1)
+	add_child(flash_layer)
 	_explosion_flash_overlay = ColorRect.new()
 	_explosion_flash_overlay.name = "ExplosionFlashOverlay"
 	_explosion_flash_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	_explosion_flash_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_explosion_flash_overlay.color = Color(1.0, 0.96, 0.88, 0.0)
-	$HUD.add_child(_explosion_flash_overlay)
-	$HUD.move_child(_explosion_flash_overlay, 1)
+	flash_layer.add_child(_explosion_flash_overlay)
 
 func trigger_explosion_sidechain(pos: Vector3, radius: float, peak: float = 1.0) -> void:
 	if local_player == null or not is_instance_valid(local_player):
@@ -1682,8 +1692,10 @@ func trigger_explosion_sidechain(pos: Vector3, radius: float, peak: float = 1.0)
 	# veil provides the immediate retinal blast.
 	_exposure_duck = maxf(_exposure_duck, amount * 0.95)
 	_exposure_duck_vel = maxf(_exposure_duck_vel, 4.6 + amount * 2.8)
-	# Flash alpha capped at 0.92 so the white veil doesn't fully cover the HUD.
-	_flash_alpha = maxf(_flash_alpha, minf(amount * 0.55, 0.92))
+	# Flash target capped at 0.92 so the white veil doesn't fully cover the HUD.
+	# Alpha lerps to this target over a few frames in _update_explosion_sidechain
+	# so the rise doesn't tear with vsync off.
+	_flash_alpha_target = maxf(_flash_alpha_target, minf(amount * 0.55, 0.92))
 	_flash_alpha_vel = maxf(_flash_alpha_vel, 7.0 + amount * 4.0)
 
 func _update_explosion_sidechain(delta: float) -> void:
@@ -1692,10 +1704,14 @@ func _update_explosion_sidechain(delta: float) -> void:
 		# as full black). 0.05 = ~4 stops below base — still very dark.
 		var target_exposure := maxf(0.05, _base_tonemap_exposure - _exposure_duck * 0.75)
 		_arena_env.tonemap_exposure = lerpf(_arena_env.tonemap_exposure, target_exposure, clampf(delta * 20.0, 0.0, 1.0))
+	# Lerp alpha toward the target on the rise (smooth attack so any tearing
+	# shows minimal per-frame contrast), then move_toward 0 on the decay as
+	# the target also decays. Attack rate ~25 reaches 80% of target in ~60 ms.
+	_flash_alpha = lerpf(_flash_alpha, _flash_alpha_target, clampf(delta * 25.0, 0.0, 1.0))
 	if _explosion_flash_overlay:
 		_explosion_flash_overlay.color.a = _flash_alpha
 	_exposure_duck = move_toward(_exposure_duck, 0.0, _exposure_duck_vel * delta)
-	_flash_alpha = move_toward(_flash_alpha, 0.0, _flash_alpha_vel * delta)
+	_flash_alpha_target = move_toward(_flash_alpha_target, 0.0, _flash_alpha_vel * delta)
 
 func show_death_effect(show: bool) -> void:
 	if _death_overlay == null: return
