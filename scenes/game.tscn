@@ -5,18 +5,6 @@
 [ext_resource type="Script" uid="uid://dwdfqr76hp64y" path="res://scripts/hit_marker.gd" id="3_hit"]
 [ext_resource type="Script" uid="uid://drgwakc2d3shj" path="res://scripts/damage_indicator.gd" id="4_dmg"]
 
-[sub_resource type="StyleBoxFlat" id="Style_HP"]
-bg_color = Color(0, 0, 0, 0.55)
-border_width_left = 2
-border_width_top = 2
-border_width_right = 2
-border_width_bottom = 2
-border_color = Color(1, 0.2, 0.3, 0.8)
-corner_radius_top_left = 4
-corner_radius_top_right = 4
-corner_radius_bottom_right = 4
-corner_radius_bottom_left = 4
-
 [node name="Game" type="Node3D" unique_id=1481980306]
 script = ExtResource("1_game")
 
@@ -62,11 +50,12 @@ offset_top = -60.0
 offset_right = 200.0
 offset_bottom = -20.0
 grow_vertical = 0
-theme_override_styles/panel = SubResource("Style_HP")
 
 [node name="HealthLabel" type="Label" parent="HUD/HealthPanel" unique_id=443572165]
 layout_mode = 2
 theme_override_colors/font_color = Color(1, 0.3, 0.3, 1)
+theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
+theme_override_constants/outline_size = 4
 theme_override_font_sizes/font_size = 28
 text = "HP  100"
 horizontal_alignment = 1
@@ -95,7 +84,7 @@ layout_mode = 2
 theme_override_colors/font_color = Color(1, 0.9, 0.5, 1)
 theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
 theme_override_constants/outline_size = 3
-theme_override_font_sizes/font_size = 14
+theme_override_font_sizes/font_size = 20
 text = "LMB  RIFLE"
 horizontal_alignment = 1
 
@@ -115,7 +104,7 @@ layout_mode = 2
 theme_override_colors/font_color = Color(0.7, 1, 0.4, 1)
 theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
 theme_override_constants/outline_size = 3
-theme_override_font_sizes/font_size = 14
+theme_override_font_sizes/font_size = 20
 text = "RMB  GRENADE"
 horizontal_alignment = 1
 
@@ -135,7 +124,7 @@ layout_mode = 2
 theme_override_colors/font_color = Color(0.6, 0.9, 1, 1)
 theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
 theme_override_constants/outline_size = 3
-theme_override_font_sizes/font_size = 14
+theme_override_font_sizes/font_size = 20
 text = "SHIFT  DASH"
 horizontal_alignment = 1
 
@@ -155,7 +144,7 @@ layout_mode = 2
 theme_override_colors/font_color = Color(1, 0.4, 0.9, 1)
 theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
 theme_override_constants/outline_size = 3
-theme_override_font_sizes/font_size = 14
+theme_override_font_sizes/font_size = 20
 text = "F  MELEE"
 horizontal_alignment = 1
 
@@ -178,7 +167,7 @@ grow_horizontal = 0
 theme_override_colors/font_color = Color(1, 0.8, 0.4, 1)
 theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
 theme_override_constants/outline_size = 4
-theme_override_font_sizes/font_size = 18
+theme_override_font_sizes/font_size = 24
 text = "— ROUNDS —"
 
 [node name="RoundBanner" type="Label" parent="HUD" unique_id=933426930]
@@ -244,7 +233,7 @@ horizontal_alignment = 1
 [node name="Subtitle" type="Label" parent="HUD/CardPickOverlay/Center/VBox" unique_id=1669747753]
 layout_mode = 2
 theme_override_colors/font_color = Color(0.8, 0.8, 0.9, 1)
-theme_override_font_sizes/font_size = 18
+theme_override_font_sizes/font_size = 22
 text = "you lost the round — choose an upgrade"
 horizontal_alignment = 1
 
