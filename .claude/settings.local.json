@@ -9,7 +9,9 @@
       "Bash(/Applications/Godot.app/Contents/MacOS/Godot --headless --path /Users/joep/dev/godot --script scripts/_measure.gd)",
       "mcp__gdcli__script_lint",
       "Bash(./script_lint.sh scripts/sfx.gd scripts/audio_lab.gd)",
-      "Bash(godot --headless --check-only scripts/sfx.gd scripts/audio_lab.gd)"
+      "Bash(godot --headless --check-only scripts/sfx.gd scripts/audio_lab.gd)",
+      "Bash(gh api *)",
+      "Bash(python3 -c \"import sys, json; data = json.load\\(sys.stdin\\); [print\\(item['name'], item['type']\\) for item in data]\")"
     ]
   }
 }

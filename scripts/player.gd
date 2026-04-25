@@ -6,6 +6,8 @@ const Gib := preload("res://scripts/gib.gd")
 # instead of per explosion (each Shader.new() triggers a compile = stutter).
 static var _heat_shader: Shader = null
 static var _heat_mesh: SphereMesh = null
+static var _shock_shader: Shader = null
+static var _shock_mesh: SphereMesh = null
 
 # Single chunk count used for every ragdoll. Must match Gib.warm_tree() in
 # _ready() — the gib cache is keyed by [mesh, chunk_count], so any mismatch
@@ -830,13 +832,19 @@ func _spawn_bullet_blast(pos: Vector3, radius: float, color: Color) -> void:
 	# point light — stacked EXPLOSIVE ROUNDS cards should feel earth-shaking.
 	var scene: Node = get_tree().current_scene
 	if scene and scene.has_method("trigger_explosion_sidechain"):
-		scene.trigger_explosion_sidechain(pos, radius, clampf(radius / 5.0, 0.35, 1.0))
+		# Uncap so big bazookas push exposure WAY down (was 1.0 cap → all
+		# explosions ducked the same). Peak ~3 at radius 15+ feels properly
+		# blinding for the biggest blasts.
+		scene.trigger_explosion_sidechain(pos, radius, clampf(radius / 5.0, 0.35, 3.0))
 	var local_player: Node = scene.get("local_player") if scene else null
 	if local_player and is_instance_valid(local_player) and local_player.has_method("apply_explosion_view_punch"):
-		local_player.apply_explosion_view_punch(pos, radius, clampf(radius / 5.0, 0.45, 1.0))
+		# Allow peak > 1.0 for big blasts — uncapping makes a bazooka register
+		# noticeably harder than a small grenade-class burst.
+		local_player.apply_explosion_view_punch(pos, radius, clampf(radius / 5.0, 0.45, 1.6))
 	var r_norm: float = clampf(radius / 6.0, 0.4, 2.8)
 	var expand_time: float = clampf(0.1 + radius * 0.012, 0.12, 0.24)
 	_spawn_heat_distortion(scene, pos, radius, expand_time, clampf(radius * 0.012, 0.025, 0.06))
+	_spawn_shockwave_ring(scene, pos, radius)
 
 	# 1) Fireball volume. Grow linearly to the effective radius while the
 	# emitted light drops fast; opacity ramps up as the blast front arrives.
@@ -890,15 +898,32 @@ func _spawn_bullet_blast(pos: Vector3, radius: float, color: Color) -> void:
 	scene.add_child(wave)
 	var tw := wave.create_tween().set_parallel(true)
 	var wave_target_scale := Vector3.ONE * maxf(0.01, (radius * 1.08) / wm.radius)
-	tw.tween_property(wave, "scale", wave_target_scale, expand_time)\
+	# Shockwave expands at the speed of sound (343 m/s) so visual + audio
+	# arrive together at distant viewers (audio is delayed dist/343 in SFX).
+	# Min 30 ms so tiny blasts remain perceptible.
+	var wave_expand_time: float = maxf(0.03, radius / 343.0)
+	tw.tween_property(wave, "scale", wave_target_scale, wave_expand_time)\
 		.set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_IN_OUT)
-	tw.tween_property(mat, "albedo_color", Color(1.0, 0.42, 0.08, 0.13), expand_time * 0.5)\
+	tw.tween_property(mat, "albedo_color", Color(1.0, 0.42, 0.08, 0.13), wave_expand_time * 0.5)\
 		.set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_IN_OUT)
-	tw.tween_property(mat, "albedo_color", Color(0.82, 0.08, 0.01, 0.0), expand_time * 0.5)\
-		.set_delay(expand_time * 0.5).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
-	tw.tween_property(mat, "emission_energy_multiplier", 0.0, expand_time * 0.28)\
+	tw.tween_property(mat, "albedo_color", Color(0.82, 0.08, 0.01, 0.0), wave_expand_time * 0.5)\
+		.set_delay(wave_expand_time * 0.5).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	tw.tween_property(mat, "emission_energy_multiplier", 0.0, wave_expand_time * 0.28)\
 		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
 	tw.chain().tween_callback(wave.queue_free)
+
+	# Brief scene-wide flash — way brighter than the warm-ember decay light
+	# below, but only ~60 ms so it reads as the moment-of-detonation spike.
+	var flash := OmniLight3D.new()
+	flash.light_color = Color(1.0, 0.98, 0.92)
+	flash.light_energy = 100.0 + radius * 14.0
+	flash.omni_range = maxf(40.0, radius * 6.0)
+	flash.position = pos
+	scene.add_child(flash)
+	var ftw := flash.create_tween()
+	ftw.tween_property(flash, "light_energy", 0.0, 0.06)\
+		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+	ftw.tween_callback(flash.queue_free)
 
 	# 3) Explosion light — extremely bright at ignition, then it collapses fast.
 	var light := OmniLight3D.new()
@@ -935,10 +960,29 @@ func apply_explosion_view_punch(pos: Vector3, radius: float, peak: float = 1.0) 
 	var effect_radius := maxf(radius * 5.0, radius + 1.0)
 	if dist >= effect_radius:
 		return
-	# Curve the falloff so the strong punch is reserved for ~2× radius and
-	# everything beyond that decays into a fainter shake (still visible).
+	# Speed-of-sound delay so the shake arrives in sync with the audio + the
+	# visual shockwave shell (both also delayed by dist/343).
+	var delay: float = dist / 343.0
+	if delay < 0.01:
+		_do_explosion_view_punch(pos, radius, peak)
+	else:
+		get_tree().create_timer(delay).timeout.connect(func() -> void:
+			if is_instance_valid(self):
+				_do_explosion_view_punch(pos, radius, peak))
+
+func _do_explosion_view_punch(pos: Vector3, radius: float, peak: float) -> void:
+	if camera == null:
+		return
+	# Recompute distance — the player may have moved during the propagation.
+	var to_player := global_position - pos
+	var dist: float = to_player.length()
+	var effect_radius := maxf(radius * 5.0, radius + 1.0)
+	if dist >= effect_radius:
+		return
+	# Linear-ish falloff (was pow 1.6 — too steep for big blasts at range).
+	# Now a 24m bazooka at 60m still hits at strength ~0.5 * peak.
 	var linear: float = clampf(1.0 - dist / effect_radius, 0.0, 1.0)
-	var strength: float = pow(linear, 1.6) * peak
+	var strength: float = pow(linear, 1.0) * peak
 	if strength <= 0.0:
 		return
 	var away_dir := to_player.normalized() if dist > 0.001 else Vector3.UP
@@ -1015,6 +1059,71 @@ func _spawn_heat_distortion(scene: Node, pos: Vector3, radius: float, duration: 
 		0.0,
 		duration * 0.72
 	).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+	tw.chain().tween_callback(shell.queue_free)
+
+# Thin-shell screen-space shockwave: sphere expanding at the speed of sound.
+# High-power fresnel concentrates the pixel displacement on the silhouette
+# ring so the camera sees a thin distorted halo travelling outward — the
+# "shock front" — while the heat distortion handles the slower bloom.
+func _spawn_shockwave_ring(scene: Node, pos: Vector3, radius: float) -> void:
+	if scene == null:
+		return
+	var shell := MeshInstance3D.new()
+	if _shock_mesh == null:
+		_shock_mesh = SphereMesh.new()
+		_shock_mesh.radius = 0.25
+		_shock_mesh.height = 0.5
+		_shock_mesh.radial_segments = 32
+		_shock_mesh.rings = 16
+	shell.mesh = _shock_mesh
+	if _shock_shader == null:
+		_shock_shader = Shader.new()
+		_shock_shader.code = """
+			shader_type spatial;
+			render_mode unshaded, cull_disabled, depth_draw_never, blend_mix;
+
+			uniform sampler2D screen_tex : hint_screen_texture, filter_linear_mipmap;
+			uniform float distortion_strength = 0.05;
+			uniform float ring_thickness = 7.0;
+			uniform float opacity = 0.9;
+
+			void fragment() {
+				// High exponent -> energy concentrated on silhouette ring only.
+				float fresnel = pow(1.0 - abs(dot(normalize(VIEW), NORMAL)), ring_thickness);
+				vec3 n = normalize((VIEW_MATRIX * vec4(NORMAL, 0.0)).xyz);
+				vec2 offset = n.xy * distortion_strength * fresnel;
+				vec3 col = texture(screen_tex, SCREEN_UV + offset).rgb;
+				ALBEDO = col;
+				ALPHA = fresnel * opacity;
+			}
+		"""
+	var mat := ShaderMaterial.new()
+	mat.shader = _shock_shader
+	mat.set_shader_parameter("distortion_strength", 0.05)
+	mat.set_shader_parameter("ring_thickness", 7.0)
+	mat.set_shader_parameter("opacity", 0.9)
+	shell.material_override = mat
+	shell.position = pos
+	scene.add_child(shell)
+	# Sound-speed expansion (matches audio delay) with 30 ms minimum so
+	# tiny blasts remain visible.
+	var dur: float = maxf(0.03, radius / 343.0)
+	var target_scale := Vector3.ONE * maxf(0.01, (radius * 1.05) / _shock_mesh.radius)
+	var tw := shell.create_tween().set_parallel(true)
+	tw.tween_property(shell, "scale", target_scale, dur)\
+		.set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_OUT)
+	tw.tween_method(
+		func(v: float) -> void: mat.set_shader_parameter("distortion_strength", v),
+		0.05,
+		0.0,
+		dur
+	).set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_OUT)
+	tw.tween_method(
+		func(v: float) -> void: mat.set_shader_parameter("opacity", v),
+		0.9,
+		0.0,
+		dur * 0.9
+	).set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_OUT)
 	tw.chain().tween_callback(shell.queue_free)
 
 func _spawn_muzzle_flash(color: Color = Color(1.0, 0.88, 0.45), scale_f: float = 1.0) -> void:
