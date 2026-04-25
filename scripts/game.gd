@@ -933,7 +933,7 @@ func _make_card_button(card_id: String, card: Dictionary, clickable: bool) -> Co
 	title.text = card.name.to_upper()
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	title.add_theme_font_size_override("font_size", 18) # Slightly smaller to fit
+	title.add_theme_font_size_override("font_size", 22)
 	title.add_theme_color_override("font_color", Color.WHITE if rarity != "rare" else Color(1.0, 0.95, 0.8))
 	v_content.add_child(title)
 
@@ -941,7 +941,7 @@ func _make_card_button(card_id: String, card: Dictionary, clickable: bool) -> Co
 	desc.text = card.desc
 	desc.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	desc.add_theme_font_size_override("font_size", 13)
+	desc.add_theme_font_size_override("font_size", 16)
 	desc.add_theme_color_override("font_color", Color(0.9, 0.9, 0.9))
 	v_content.add_child(desc)
 
@@ -954,8 +954,8 @@ func _make_card_button(card_id: String, card: Dictionary, clickable: bool) -> Co
 		var slbl := Label.new()
 		slbl.text = diff_line
 		slbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		slbl.add_theme_font_size_override("font_size", 10)
-		slbl.add_theme_color_override("font_color", Color(0.7, 0.8, 1.0, 0.7))
+		slbl.add_theme_font_size_override("font_size", 14)
+		slbl.add_theme_color_override("font_color", Color(0.75, 0.85, 1.0, 0.85))
 		stats_vbox.add_child(slbl)
 
 	# Holographic effects for rare
