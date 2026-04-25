@@ -10,6 +10,7 @@ const SHAKE_STRENGTH := 0.16     # max camera-shake amplitude (m) at the epicent
 const VFX_TRANSIENT_LIGHTS := false
 const MINE_TRIGGER_RADIUS := 1.25
 const MINE_LIFETIME := 10.0        # mines self-detonate if nobody wanders in
+const SPEED_OF_SOUND := 343.0      # m/s — same constant as audio + visuals use
 
 @export var shooter_id: int = 1
 @export var is_mine: bool = false
@@ -102,20 +103,47 @@ func _explode() -> void:
 			dir = Vector3.UP
 
 		var impulse: Vector3 = (dir * kb_force * falloff) + (Vector3.UP * kb_force * 0.4 * falloff)
-		if dmg > 0:
-			p.take_damage.rpc_id(
-				p.get_multiplayer_authority(),
-				dmg,
-				shooter_id,
-				global_position,
-				dir,
-				impulse.length(),
-				RADIUS,
-				falloff
-			)
-			if p.player_id != shooter_id and shooter_node and is_instance_valid(shooter_node):
-				shooter_node._hit_confirm.rpc_id(shooter_node.get_multiplayer_authority(), false, dmg, p.global_position + Vector3.UP * 0.6)
-		p.apply_knockback.rpc_id(p.get_multiplayer_authority(), impulse)
+		# Damage / knockback / hitmarker arrive when the shockwave reaches the
+		# target — same dist/SPEED_OF_SOUND delay used by the audio + visual
+		# shockwave shell. Captured locals so the timer lambda has its own
+		# values per-target.
+		var ep_pos: Vector3 = global_position
+		var c_dmg := dmg
+		var c_dir := dir
+		var c_imp := impulse
+		var c_kb_len := impulse.length()
+		var c_falloff := falloff
+		var target_player := p
+		var target_authority: int = p.get_multiplayer_authority()
+		var target_pos: Vector3 = p.global_position
+		var target_delay: float = dist / SPEED_OF_SOUND
+		var apply_target := func() -> void:
+			if not is_instance_valid(target_player):
+				return
+			if c_dmg > 0:
+				target_player.take_damage.rpc_id(
+					target_authority, c_dmg, shooter_id, ep_pos,
+					c_dir, c_kb_len, RADIUS, c_falloff)
+			target_player.apply_knockback.rpc_id(target_authority, c_imp)
+		if target_delay < 0.01:
+			apply_target.call()
+		else:
+			get_tree().create_timer(target_delay).timeout.connect(apply_target)
+		# Hitmarker arrives when the shockwave reaches the SHOOTER (different
+		# distance from the explosion than the target).
+		if c_dmg > 0 and p.player_id != shooter_id and shooter_node and is_instance_valid(shooter_node):
+			var sn := shooter_node
+			var sn_authority: int = sn.get_multiplayer_authority()
+			var hit_pos: Vector3 = target_pos + Vector3.UP * 0.6
+			var local_dmg := c_dmg
+			var shooter_delay: float = ep_pos.distance_to(sn.global_position) / SPEED_OF_SOUND
+			var fire_hitmarker := func() -> void:
+				if is_instance_valid(sn):
+					sn._hit_confirm.rpc_id(sn_authority, false, local_dmg, hit_pos)
+			if shooter_delay < 0.01:
+				fire_hitmarker.call()
+			else:
+				get_tree().create_timer(shooter_delay).timeout.connect(fire_hitmarker)
 	_do_vfx.rpc()
 
 @rpc("authority", "call_local", "reliable")

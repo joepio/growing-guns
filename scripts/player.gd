@@ -655,8 +655,21 @@ func _physics_process(delta: float) -> void:
 		rifle_cooldown = weapon.get_fire_interval()
 		mag -= 1
 		_fire_rifle()
+		# Schedule the bolt-cycling click for the gap before the next shot.
+		# Skip on very fast weapons (uzi-class) where the click would just
+		# muddy the rapid bang stream.
+		var fi: float = weapon.get_fire_interval()
+		if fi >= 0.18:
+			var click_delay: float = minf(fi * 0.45, 0.13)
+			get_tree().create_timer(click_delay).timeout.connect(func() -> void:
+				if is_instance_valid(self) and muzzle:
+					SFX.next_round(muzzle.global_position))
 		if mag <= 0:
 			_start_reload()
+	elif Input.is_action_just_pressed("shoot") and can_fire and not ghost_mode and (reloading or mag <= 0):
+		# Trigger pulled while the gun isn't ready — the dull "click of nothing".
+		if muzzle:
+			SFX.empty_chamber(muzzle.global_position)
 	if Input.is_action_just_pressed("reload") and not ghost_mode and can_fire:
 		_start_reload()
 	if Input.is_action_just_pressed("shoot_grenade") and not ghost_mode and can_fire:

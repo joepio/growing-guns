@@ -108,6 +108,8 @@ var _dash_segments: Array[ProgressBar] = []
 var _dash_text_hbox: Control = null
 
 func _ready() -> void:
+	# F2 brings up the live audio-tuning panel — same sliders as audio_lab.
+	add_child(AudioSettingsPanel.new())
 
 	# --- Ability Bar Redesign ---
 	# Hide legacy components
@@ -1365,11 +1367,15 @@ func _build_ghost_overlay() -> void:
 	# Move to the background of the HUD so it doesn't affect other UI elements
 	$HUD.move_child(_ghost_overlay, 0)
 
+var _retro_material: ShaderMaterial = null
+
 func _apply_retro_shader(node: Control) -> void:
 	var shader := Shader.new()
 	shader.code = "
 		shader_type canvas_item;
 		uniform sampler2D screen_texture : hint_screen_texture, repeat_disable, filter_nearest;
+		uniform vec2 mouse_uv = vec2(-1.0);  // mouse position in pre-distortion UV (0..1)
+		uniform float cursor_visible = 0.0;  // 0 = hidden, 1 = drawn
 
 		const float bayer[16] = {
 			0.0/16.0, 8.0/16.0, 2.0/16.0, 10.0/16.0,
@@ -1415,13 +1421,31 @@ func _apply_retro_shader(node: Control) -> void:
 			float levels = 32.0;
 			float vignette = clamp(1.0 - dist * 1.4, 0.0, 1.0);
 			color = floor(color * levels + threshold + 0.5) / levels;
-			color *= mix(0.7, 1.0, vignette);			COLOR.rgb = color;
+			color *= mix(0.7, 1.0, vignette);
+
+			// In-shader cursor: drawn at the pre-distortion UV that this
+			// fragment is displaying, so it lives on the warped surface and
+			// stays aligned with the warped UI underneath. `mouse_uv` is the
+			// undistorted mouse position from Godot. Compare against `uv`
+			// (the un-warped UV this fragment shows) to find the on-screen
+			// pixel that visually represents the mouse position.
+			if (cursor_visible > 0.5) {
+				vec2 d = (uv - mouse_uv) * res;  // pixel offset in unwarped space
+				// Triangle arrow: tip at (0,0), 12 px tall pointing down-right.
+				bool arrow = d.x >= 0.0 && d.y >= 0.0 && (d.x + d.y) <= 12.0;
+				bool outline = d.x >= -1.5 && d.y >= -1.5 && (d.x + d.y) <= 13.5 && !arrow;
+				if (arrow) color = vec3(1.0);
+				else if (outline) color = vec3(0.05);
+			}
+
+			COLOR.rgb = color;
 			COLOR.a = 1.0;
 		}
 	"
 	var mat := ShaderMaterial.new()
 	mat.shader = shader
 	node.material = mat
+	_retro_material = mat
 
 # Custom in-HUD cursor so the retro/fisheye shader distorts the cursor along
 # with the rest of the UI. The OS cursor is hidden (MOUSE_MODE_HIDDEN) in
@@ -1445,13 +1469,23 @@ func _build_custom_cursor() -> void:
 	$HUD.add_child(_custom_cursor)
 
 func _update_custom_cursor() -> void:
-	if _custom_cursor == null:
+	# Polygon cursor in HUD is no longer used — the retro shader now renders
+	# the cursor itself (in-shader) so it gets the fisheye distortion applied
+	# correctly. This keeps the polygon hidden so it doesn't double-up.
+	if _custom_cursor != null:
+		_custom_cursor.visible = false
+	# Drive the retro shader's cursor uniforms — visible whenever the mouse
+	# is uncaptured (menus / panels), positioned at the live mouse coords.
+	if _retro_material == null:
 		return
-	# Only show when the OS cursor is hidden (menu context). In captured or
-	# fully-visible modes we leave the OS cursor alone.
-	_custom_cursor.visible = Input.mouse_mode == Input.MOUSE_MODE_HIDDEN
-	if _custom_cursor.visible:
-		_custom_cursor.position = get_viewport().get_mouse_position()
+	var show: bool = Input.mouse_mode != Input.MOUSE_MODE_CAPTURED
+	_retro_material.set_shader_parameter("cursor_visible", 1.0 if show else 0.0)
+	if show:
+		var vp := get_viewport()
+		var size: Vector2 = vp.get_visible_rect().size
+		if size.x > 0.0 and size.y > 0.0:
+			var mp := vp.get_mouse_position()
+			_retro_material.set_shader_parameter("mouse_uv", Vector2(mp.x / size.x, mp.y / size.y))
 
 func _build_retro_filter() -> void:
 	var cl := CanvasLayer.new()
