@@ -256,9 +256,13 @@ static func gib_body_ragdoll(
 	if scene == null or meshes.is_empty():
 		return null
 	var rb := RigidBody3D.new()
-	rb.collision_layer = 0
+	# Layer 2 + "corpses" group so bullets can still hit a downed body — the
+	# corpse accumulates damage and disintegrates at CORPSE_DISINTEGRATE_DMG.
+	rb.collision_layer = 2
 	rb.collision_mask = 1
 	rb.gravity_scale = 1.0
+	rb.add_to_group("corpses")
+	rb.set_meta("dmg_taken", 0.0)
 	scene.add_child(rb)
 	# Keep the rigid body itself orthonormal (physics doesn't like non-uniform
 	# scale on bodies), but bake any pivot warp INTO the cloned mesh transforms
@@ -308,6 +312,61 @@ static func gib_body_ragdoll(
 		if is_instance_valid(rb):
 			rb.queue_free())
 	return rb
+
+# Cumulative damage at which a still-intact corpse falls apart into chunks.
+const CORPSE_DISINTEGRATE_DMG := 50.0
+
+# Bullet hit a non-disintegrated ragdoll body. Sprays blood on the wound,
+# accumulates damage, and disintegrates the corpse once the running total
+# crosses the threshold. Cosmetic-only — runs independently on each peer
+# (the ragdoll itself was already a per-peer simulation).
+static func hit_corpse(rb: RigidBody3D, hit_pos: Vector3, dir: Vector3, dmg: float) -> void:
+	if rb == null or not is_instance_valid(rb):
+		return
+	var scene: Node = rb.get_tree().current_scene
+	if scene == null:
+		return
+	# Squirt of blood at the wound + a faint mist behind so the impact reads
+	# from any angle.
+	spawn_blood(scene, hit_pos, dir, 0.7)
+	var splash_dir: Vector3 = dir.normalized() if dir.length_squared() > 0.001 else Vector3.UP
+	_gib_spawn_blood_splat(scene, hit_pos, -splash_dir, splash_dir, 0.5)
+	# Push the body slightly so heavy rounds visibly shove the corpse.
+	rb.apply_central_impulse(splash_dir * clampf(dmg * 0.05, 0.5, 4.0))
+	var taken: float = float(rb.get_meta("dmg_taken", 0.0)) + dmg
+	rb.set_meta("dmg_taken", taken)
+	if taken >= CORPSE_DISINTEGRATE_DMG:
+		disintegrate_corpse(rb, splash_dir)
+
+# Voronoi-shatter every mesh of an intact ragdoll body and free the body.
+# Carries the rigid body's current velocity into the chunks so the burst
+# continues whatever motion the corpse already had.
+static func disintegrate_corpse(rb: RigidBody3D, push_dir: Vector3 = Vector3.ZERO) -> void:
+	if rb == null or not is_instance_valid(rb):
+		return
+	var scene: Node = rb.get_tree().current_scene
+	if scene == null:
+		return
+	var carry: Vector3 = rb.linear_velocity + push_dir.normalized() * 4.0
+	for child in rb.get_children():
+		if not (child is MeshInstance3D):
+			continue
+		var mi := child as MeshInstance3D
+		if mi.mesh == null or not mi.is_visible_in_tree():
+			continue
+		gib_explode(
+			mi.mesh,
+			mi.global_transform,
+			scene,
+			mi.material_override,
+			carry + Vector3(randf_range(-1.0, 1.0), randf_range(0.4, 1.4), randf_range(-1.0, 1.0)),
+			3.2,
+			GIB_CHUNK_COUNT,
+			14.0,
+			rb.global_position,
+			0.6,
+		)
+	rb.queue_free()
 
 static func _gib_on_chunk_body_entered(rb: RigidBody3D, scene: Node, strength: float) -> void:
 	if rb == null or scene == null or not is_instance_valid(rb):

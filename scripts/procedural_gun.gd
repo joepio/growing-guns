@@ -48,6 +48,15 @@ extends Node3D
 @export var has_stock: bool = true : set = _set_has_stock
 @export var has_foregrip: bool = true : set = _set_has_foregrip
 
+@export_group("Charging Handle")
+# Bolt / charging handle: a small cylinder sitting in a slot on top of the
+# receiver. Snaps fully back the instant the gun fires, then slides forward
+# to rest over bolt_cycle_time. Visible as the gun "cycling" between shots.
+@export var bolt_travel: float = 0.035    # how far back it slides (metres)
+@export var bolt_cycle_time: float = 0.08 # seconds to slide back to rest
+@export var bolt_radius: float = 0.009
+@export var bolt_length: float = 0.055
+
 @export_group("Heat")
 # Barrels glow when fired a lot. add_heat() pumps in per-shot heat (Player
 # scales it by damage_mult); we decay exponentially each frame and map the
@@ -161,6 +170,17 @@ var _barrel_material: StandardMaterial3D = null
 var _receiver_material: StandardMaterial3D = null
 var _heat_light: OmniLight3D = null
 
+# --- Bolt / charging handle state ---
+# `_bolt_back` is the current backward offset (0 = rest, bolt_travel = max).
+# Snaps to bolt_travel on cycle_bolt(), decays linearly back to zero over
+# `_bolt_cycle_seconds` (Player passes the current fire interval, so the
+# bolt arrives at rest exactly as the next shot snaps it back again).
+# Two bolts (left + right) cycle in lock-step, so a single offset drives both.
+var _bolts: Array[MeshInstance3D] = []
+var _bolt_rest_z: float = 0.0
+var _bolt_back: float = 0.0
+var _bolt_cycle_seconds: float = 0.08
+
 func _ready() -> void:
 	_rebuild()
 	_request_preview()
@@ -168,14 +188,35 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	if Engine.is_editor_hint():
 		return
-	if heat <= 0.0:
-		return
-	# Exponential decay — feels snappier than linear and matches how a hot
+	# Heat — exponential decay. Snappier than linear and matches how a hot
 	# object actually radiates away energy.
-	heat *= exp(-heat_decay_per_sec * delta)
-	if heat < 0.001:
-		heat = 0.0
-	_update_heat_visual()
+	if heat > 0.0:
+		heat *= exp(-heat_decay_per_sec * delta)
+		if heat < 0.001:
+			heat = 0.0
+		_update_heat_visual()
+	# Bolt — linear return from full back to rest. Snap-back is instant on
+	# cycle_bolt(); only the forward stroke needs to be animated here.
+	if _bolts.size() > 0 and _bolt_back > 0.0:
+		var return_speed: float = bolt_travel / maxf(0.001, _bolt_cycle_seconds)
+		_bolt_back = maxf(0.0, _bolt_back - return_speed * delta)
+		var z: float = _bolt_rest_z + _bolt_back
+		for b in _bolts:
+			b.position = Vector3(b.position.x, b.position.y, z)
+
+# Called by Player on every shot — slams the bolt to its rear stop. The
+# forward return happens in _process so rapid fire keeps it pinned back.
+# `cycle_seconds` is the time the bolt should take to return to rest;
+# pass the weapon's current fire interval so it arrives just as the next
+# shot snaps it back again. <= 0 falls back to the bolt_cycle_time export.
+func cycle_bolt(cycle_seconds: float = -1.0) -> void:
+	if _bolts.size() == 0:
+		return
+	_bolt_back = bolt_travel
+	_bolt_cycle_seconds = cycle_seconds if cycle_seconds > 0.0 else bolt_cycle_time
+	var z: float = _bolt_rest_z + _bolt_back
+	for b in _bolts:
+		b.position = Vector3(b.position.x, b.position.y, z)
 
 # Called by Player on every shot. amount is typically a small base value
 # scaled by damage_mult so heavy-hitting builds heat up faster.
@@ -312,6 +353,34 @@ func _rebuild() -> void:
 	# Sight rail (thin slab on top of receiver)
 	var rail_y: float = effective_receiver_size.y * 0.5 + sight_rail_height * 0.5
 	_add_box("SightRail", Vector3(effective_receiver_size.x * 0.8, sight_rail_height, effective_receiver_size.z * 0.85), Vector3(0, rail_y, 0), darker_metal)
+
+	# Charging handle (bolt) — recessed slot on each side of the receiver,
+	# axis parallel to the barrel, mirrored. Both bolts cycle together via
+	# cycle_bolt + _process. Slot is a thin near-black box sunk into the
+	# side; bolt is a bright-steel cylinder protruding from it.
+	var slot_x_abs: float = effective_receiver_size.x * 0.5
+	var slot_depth_z: float = effective_receiver_size.z * 0.55
+	var slot_h: float = effective_receiver_size.y * 0.35
+	var slot_thickness: float = 0.012
+	var slot_z: float = effective_receiver_size.z * 0.05
+	var slot_mat := _make_material(receiver_color * 0.25, 0.4, 0.85)  # dark recess
+	var bolt_mat := _make_material(Color(0.55, 0.57, 0.62), 0.95, 0.18)  # bright steel
+	# Rest position: forward end of the slot so backward travel stays inside it.
+	_bolt_rest_z = slot_z - slot_depth_z * 0.5 + bolt_length * 0.5
+	_bolts.clear()
+	for side in [-1.0, 1.0]:
+		var sign_str: String = "L" if side < 0.0 else "R"
+		_add_box("BoltSlot" + sign_str,
+			Vector3(slot_thickness, slot_h, slot_depth_z),
+			Vector3(side * (slot_x_abs + slot_thickness * 0.5), 0, slot_z),
+			slot_mat)
+		var bolt := _add_cylinder("ChargingHandle" + sign_str,
+			bolt_radius, bolt_radius, bolt_length,
+			Vector3(side * (slot_x_abs + slot_thickness + bolt_radius), 0, _bolt_rest_z),
+			bolt_mat)
+		# Re-apply current back-offset so a rebuild mid-cycle doesn't pop the bolt.
+		bolt.position.z = _bolt_rest_z + _bolt_back
+		_bolts.append(bolt)
 
 	# Barrels + muzzles — laid out side by side, centred on x = 0.
 	var receiver_front_z: float = -effective_receiver_size.z * 0.5

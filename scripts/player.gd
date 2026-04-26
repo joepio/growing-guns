@@ -801,6 +801,11 @@ func _fire_rifle() -> void:
 	# steady-state into a red glow; the base gun stays under the threshold.
 	if _procedural_gun and _procedural_gun.has_method("add_heat"):
 		_procedural_gun.add_heat(weapon.damage_mult * float(shots))
+	# Cycle the bolt — charging handles on the receiver snap back on every
+	# trigger pull and slide forward over the fire interval, arriving at
+	# rest exactly as the next shot snaps them back again.
+	if _procedural_gun and _procedural_gun.has_method("cycle_bolt"):
+		_procedural_gun.cycle_bolt(weapon.get_fire_interval())
 
 @rpc("any_peer", "call_local", "reliable")
 func _rifle_fired(origin: Vector3, dir: Vector3, shooter_id: int) -> void:
