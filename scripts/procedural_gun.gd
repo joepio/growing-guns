@@ -49,13 +49,16 @@ extends Node3D
 @export var has_foregrip: bool = true : set = _set_has_foregrip
 
 @export_group("Charging Handle")
-# Bolt / charging handle: a small cylinder sitting in a slot on top of the
-# receiver. Snaps fully back the instant the gun fires, then slides forward
-# to rest over bolt_cycle_time. Visible as the gun "cycling" between shots.
-@export var bolt_travel: float = 0.035    # how far back it slides (metres)
-@export var bolt_cycle_time: float = 0.08 # seconds to slide back to rest
+# Bolt / charging handle: a small cylindrical knob sticking out sideways
+# from a slot in the receiver (axis perpendicular to the barrel, like an
+# AK charging handle). Snaps fully back the instant the gun fires, then
+# slides forward to rest over bolt_cycle_time.
+# bolt_travel is expressed as a fraction of the receiver length so it
+# scales with whatever receiver size the weapon stats produce.
+@export var bolt_travel_frac: float = 0.8 # travel = receiver_z * this
+@export var bolt_cycle_time: float = 0.08 # fallback cycle (Player normally passes fire interval)
 @export var bolt_radius: float = 0.009
-@export var bolt_length: float = 0.055
+@export var bolt_length: float = 0.04     # how far the knob sticks out sideways
 
 @export_group("Heat")
 # Barrels glow when fired a lot. add_heat() pumps in per-shot heat (Player
@@ -171,14 +174,16 @@ var _receiver_material: StandardMaterial3D = null
 var _heat_light: OmniLight3D = null
 
 # --- Bolt / charging handle state ---
-# `_bolt_back` is the current backward offset (0 = rest, bolt_travel = max).
-# Snaps to bolt_travel on cycle_bolt(), decays linearly back to zero over
+# `_bolt_back` is the current backward offset (0 = rest, _bolt_travel = max).
+# Snaps to _bolt_travel on cycle_bolt(), decays linearly back to zero over
 # `_bolt_cycle_seconds` (Player passes the current fire interval, so the
 # bolt arrives at rest exactly as the next shot snaps it back again).
+# Travel is computed at rebuild time from receiver size × bolt_travel_frac.
 # Two bolts (left + right) cycle in lock-step, so a single offset drives both.
 var _bolts: Array[MeshInstance3D] = []
 var _bolt_rest_z: float = 0.0
 var _bolt_back: float = 0.0
+var _bolt_travel: float = 0.0
 var _bolt_cycle_seconds: float = 0.08
 
 func _ready() -> void:
@@ -198,7 +203,7 @@ func _process(delta: float) -> void:
 	# Bolt — linear return from full back to rest. Snap-back is instant on
 	# cycle_bolt(); only the forward stroke needs to be animated here.
 	if _bolts.size() > 0 and _bolt_back > 0.0:
-		var return_speed: float = bolt_travel / maxf(0.001, _bolt_cycle_seconds)
+		var return_speed: float = _bolt_travel / maxf(0.001, _bolt_cycle_seconds)
 		_bolt_back = maxf(0.0, _bolt_back - return_speed * delta)
 		var z: float = _bolt_rest_z + _bolt_back
 		for b in _bolts:
@@ -212,7 +217,7 @@ func _process(delta: float) -> void:
 func cycle_bolt(cycle_seconds: float = -1.0) -> void:
 	if _bolts.size() == 0:
 		return
-	_bolt_back = bolt_travel
+	_bolt_back = _bolt_travel
 	_bolt_cycle_seconds = cycle_seconds if cycle_seconds > 0.0 else bolt_cycle_time
 	var z: float = _bolt_rest_z + _bolt_back
 	for b in _bolts:
@@ -354,32 +359,41 @@ func _rebuild() -> void:
 	var rail_y: float = effective_receiver_size.y * 0.5 + sight_rail_height * 0.5
 	_add_box("SightRail", Vector3(effective_receiver_size.x * 0.8, sight_rail_height, effective_receiver_size.z * 0.85), Vector3(0, rail_y, 0), darker_metal)
 
-	# Charging handle (bolt) — recessed slot on each side of the receiver,
-	# axis parallel to the barrel, mirrored. Both bolts cycle together via
-	# cycle_bolt + _process. Slot is a thin near-black box sunk into the
-	# side; bolt is a bright-steel cylinder protruding from it.
+	# Charging handle (bolt) — a horizontal knob sticking out perpendicular
+	# to the barrel from a slot on each side of the receiver, mirrored.
+	# AK-style: the cylinder's axis runs along X (sideways), and the knob
+	# slides along Z when fired. Both bolts cycle together via cycle_bolt
+	# + _process.
+	_bolt_travel = effective_receiver_size.z * clampf(bolt_travel_frac, 0.0, 0.95)
 	var slot_x_abs: float = effective_receiver_size.x * 0.5
-	var slot_depth_z: float = effective_receiver_size.z * 0.55
-	var slot_h: float = effective_receiver_size.y * 0.35
+	# Slot just barely contains the bolt's full Z-range (bolt diameter at
+	# each end). slot_z_center sits in the middle so travel is symmetric
+	# around the receiver centre.
+	var slot_depth_z: float = _bolt_travel + bolt_radius * 2.0
+	var slot_z_center: float = 0.0
+	var slot_h: float = bolt_radius * 2.4   # slot just taller than the knob
 	var slot_thickness: float = 0.012
-	var slot_z: float = effective_receiver_size.z * 0.05
 	var slot_mat := _make_material(receiver_color * 0.25, 0.4, 0.85)  # dark recess
 	var bolt_mat := _make_material(Color(0.55, 0.57, 0.62), 0.95, 0.18)  # bright steel
-	# Rest position: forward end of the slot so backward travel stays inside it.
-	_bolt_rest_z = slot_z - slot_depth_z * 0.5 + bolt_length * 0.5
+	# Rest position: forward end of the slot, so the bolt has _bolt_travel
+	# worth of room to slide back into.
+	_bolt_rest_z = slot_z_center - _bolt_travel * 0.5
 	_bolts.clear()
 	for side in [-1.0, 1.0]:
 		var sign_str: String = "L" if side < 0.0 else "R"
 		_add_box("BoltSlot" + sign_str,
 			Vector3(slot_thickness, slot_h, slot_depth_z),
-			Vector3(side * (slot_x_abs + slot_thickness * 0.5), 0, slot_z),
+			Vector3(side * (slot_x_abs + slot_thickness * 0.5), 0, slot_z_center),
 			slot_mat)
+		# _add_cylinder lays the axis along Z; rotate 90° around Y to swing
+		# the axis to X, so the knob protrudes sideways from the receiver.
 		var bolt := _add_cylinder("ChargingHandle" + sign_str,
 			bolt_radius, bolt_radius, bolt_length,
-			Vector3(side * (slot_x_abs + slot_thickness + bolt_radius), 0, _bolt_rest_z),
+			Vector3(side * (slot_x_abs + slot_thickness + bolt_length * 0.5), 0, _bolt_rest_z),
 			bolt_mat)
+		bolt.rotation = Vector3(PI * 0.5, PI * 0.5, 0)
 		# Re-apply current back-offset so a rebuild mid-cycle doesn't pop the bolt.
-		bolt.position.z = _bolt_rest_z + _bolt_back
+		bolt.position = Vector3(bolt.position.x, bolt.position.y, _bolt_rest_z + _bolt_back)
 		_bolts.append(bolt)
 
 	# Barrels + muzzles — laid out side by side, centred on x = 0.
