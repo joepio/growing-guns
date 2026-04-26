@@ -1,18 +1,8 @@
 extends CharacterBody3D
 
-const Gib := preload("res://scripts/gib.gd")
-
-# Heat-distortion shader & sphere mesh are immutable; build once per process
-# instead of per explosion (each Shader.new() triggers a compile = stutter).
-static var _heat_shader: Shader = null
-static var _heat_mesh: SphereMesh = null
-static var _shock_shader: Shader = null
-static var _shock_mesh: SphereMesh = null
-
-# Single chunk count used for every ragdoll. Must match Gib.warm_tree() in
-# _ready() — the gib cache is keyed by [mesh, chunk_count], so any mismatch
-# forces a synchronous main-thread bake (~200ms per surface).
-const GIB_CHUNK_COUNT := 5
+# All ragdoll, death, impact, and gore logic lives in scripts/violence.gd.
+# The @rpc methods + a few thin wrappers stay here because they need to live
+# on this Node, but their bodies just delegate to Violence.
 
 # --- Movement ---
 const WALK_SPEED := 14.0
@@ -30,6 +20,8 @@ const MAX_DASH_CHARGES := 2
 const DASH_RECHARGE_TIME := 3.0
 const GRAVITY := 30.0
 const MOUSE_SENS := 0.0022
+const CONTROLLER_LOOK_SENS := 3.0
+const CONTROLLER_LOOK_DEADZONE := 0.18
 
 # --- First-person gun feel ---
 const GUN_BOB_AMP_Y := 0.012        # vertical bob amplitude
@@ -194,6 +186,7 @@ var _bot_jump_cooldown: float = 0.0
 var _bot_dash_cooldown: float = 0.0
 
 var health: int = MAX_HEALTH
+var god_mode: bool = false
 
 signal died(killer_id: int)
 signal cooldowns_changed  # emitted on local player for HUD
@@ -232,7 +225,7 @@ func _ready() -> void:
 	_setup_third_person_gun()
 	add_to_group("players")
 	# Pre-bake gib chunk meshes off-thread so the first kill doesn't hitch.
-	Gib.warm_tree(body_model, GIB_CHUNK_COUNT)
+	Violence.gib_warm_tree(body_model, Violence.GIB_CHUNK_COUNT)
 
 # Attach a gun mesh to the blob's hand anchor so third-person viewers see
 # roughly where the weapon lives. The local player keeps their first-person
@@ -331,14 +324,8 @@ func _body_meshes() -> Array[MeshInstance3D]:
 	var out: Array[MeshInstance3D] = []
 	if body_model == null:
 		return out
-	_collect_meshes(body_model, out)
+	Violence.collect_meshes(body_model, out)
 	return out
-
-func _collect_meshes(node: Node, out: Array[MeshInstance3D]) -> void:
-	if node is MeshInstance3D:
-		out.append(node)
-	for child in node.get_children():
-		_collect_meshes(child, out)
 
 func _update_blob_motion(delta: float) -> void:
 	if body_model == null or blob_rig == null or blob_core == null:
@@ -439,23 +426,12 @@ func _apply_ghost_visuals() -> void:
 			mesh.material_override = _body_materials.get(mesh, mesh.material_override)
 
 func _set_hit_face_state(active: bool) -> void:
-	if eye_left:
-		eye_left.visible = not active
-	if eye_right:
-		eye_right.visible = not active
-	if pupil_left:
-		pupil_left.visible = not active
-	if pupil_right:
-		pupil_right.visible = not active
-	if hit_eye_left:
-		hit_eye_left.visible = active
-	if hit_eye_right:
-		hit_eye_right.visible = active
+	Violence.set_hit_face_state(self, active)
 
 @rpc("any_peer", "call_local", "reliable")
 func _show_hit_face(duration: float = HIT_FACE_DURATION) -> void:
 	_hit_face_timer = maxf(_hit_face_timer, duration)
-	_set_hit_face_state(true)
+	Violence.set_hit_face_state(self, true)
 
 func _unhandled_input(event: InputEvent) -> void:
 	if not is_multiplayer_authority():
@@ -515,6 +491,20 @@ func _physics_process(delta: float) -> void:
 	# View punch decay
 	_view_punch_pos = _view_punch_pos.lerp(Vector3.ZERO, delta * 12.0)
 	_view_punch_rot = _view_punch_rot.lerp(Vector3.ZERO, delta * 12.0)
+
+	if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+		var look_input := Vector2(
+			Input.get_joy_axis(0, JOY_AXIS_RIGHT_X),
+			Input.get_joy_axis(0, JOY_AXIS_RIGHT_Y)
+		)
+		if look_input.length() > CONTROLLER_LOOK_DEADZONE:
+			var look_mag := inverse_lerp(CONTROLLER_LOOK_DEADZONE, 1.0, minf(look_input.length(), 1.0))
+			var look_dir := look_input.normalized() * look_mag
+			var sens := CONTROLLER_LOOK_SENS
+			if is_zooming:
+				sens *= 0.4
+			rotate_y(-look_dir.x * sens * delta)
+			look_pitch = clamp(look_pitch - look_dir.y * sens * delta, -1.4, 1.4)
 
 	camera.rotation.x = look_pitch + recoil_pitch + _view_punch_rot.x
 	camera.rotation.y = _view_punch_rot.y
@@ -841,319 +831,12 @@ func get_hitbox_rids() -> Array[RID]:
 	return rids
 
 func _spawn_bullet_blast(pos: Vector3, radius: float, color: Color) -> void:
-	# Bigger blasts expand further, hold a hotter core, and pump a brighter
-	# point light — stacked EXPLOSIVE ROUNDS cards should feel earth-shaking.
 	var scene: Node = get_tree().current_scene
-	if scene and scene.has_method("trigger_explosion_sidechain"):
-		# Uncap so big bazookas push exposure WAY down (was 1.0 cap → all
-		# explosions ducked the same). Peak ~3 at radius 15+ feels properly
-		# blinding for the biggest blasts.
-		scene.trigger_explosion_sidechain(pos, radius, clampf(radius / 5.0, 0.35, 3.0))
-	var local_player: Node = scene.get("local_player") if scene else null
-	if local_player and is_instance_valid(local_player) and local_player.has_method("apply_explosion_view_punch"):
-		# Allow peak > 1.0 for big blasts — uncapping makes a bazooka register
-		# noticeably harder than a small grenade-class burst.
-		local_player.apply_explosion_view_punch(pos, radius, clampf(radius / 5.0, 0.45, 1.6))
-	var r_norm: float = clampf(radius / 6.0, 0.4, 2.8)
-	var expand_time: float = clampf(0.1 + radius * 0.012, 0.12, 0.24)
-	_spawn_heat_distortion(scene, pos, radius, expand_time, clampf(radius * 0.012, 0.025, 0.06))
-	_spawn_shockwave_ring(scene, pos, radius)
-
-	# 1) Fireball volume. Grow linearly to the effective radius while the
-	# emitted light drops fast; opacity ramps up as the blast front arrives.
-	var core := MeshInstance3D.new()
-	var cm := SphereMesh.new()
-	cm.radius = 0.25
-	cm.height = 0.5
-	core.mesh = cm
-	var cmat := StandardMaterial3D.new()
-	cmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	cmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	cmat.albedo_color = Color(1.0, 0.96, 0.86, 0.08)
-	cmat.emission_enabled = true
-	cmat.emission = Color(1.0, 0.88, 0.4)
-	cmat.emission_energy_multiplier = 14.0
-	cmat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	core.material_override = cmat
-	core.position = pos
-	scene.add_child(core)
-	var ctw := core.create_tween().set_parallel(true)
-	var core_target_scale := Vector3.ONE * maxf(0.01, radius / cm.radius)
-	ctw.tween_property(core, "scale", core_target_scale, expand_time)\
-		.set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_IN_OUT)
-	ctw.tween_property(cmat, "albedo_color", Color(1.0, 0.62, 0.18, 0.34), expand_time * 0.52)\
-		.set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_IN_OUT)
-	ctw.tween_property(cmat, "albedo_color", Color(0.95, 0.12, 0.02, 0.0), expand_time * 0.48)\
-		.set_delay(expand_time * 0.52).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
-	ctw.tween_property(cmat, "emission", Color(1.0, 0.34, 0.08), expand_time * 0.65)\
-		.set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_IN_OUT)
-	ctw.tween_property(cmat, "emission_energy_multiplier", 0.0, expand_time * 0.34)\
-		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
-	ctw.chain().tween_callback(core.queue_free)
-
-	# 2) Dense blast shell. The border of the effective radius reads as a
-	# briefly opaque wall rather than a faint transparent puff.
-	var wave := MeshInstance3D.new()
-	var wm := SphereMesh.new()
-	wm.radius = 0.2
-	wm.height = 0.4
-	wave.mesh = wm
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.albedo_color = Color(1.0, 0.5, 0.14, 0.02)
-	mat.emission_enabled = true
-	mat.emission = color.lerp(Color(1.0, 0.45, 0.08), 0.6)
-	mat.emission_energy_multiplier = 4.0
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	wave.material_override = mat
-	wave.position = pos
-	scene.add_child(wave)
-	var tw := wave.create_tween().set_parallel(true)
-	var wave_target_scale := Vector3.ONE * maxf(0.01, (radius * 1.08) / wm.radius)
-	# Shockwave expands at the speed of sound (343 m/s) so visual + audio
-	# arrive together at distant viewers (audio is delayed dist/343 in SFX).
-	# Min 30 ms so tiny blasts remain perceptible.
-	var wave_expand_time: float = maxf(0.03, radius / 343.0)
-	tw.tween_property(wave, "scale", wave_target_scale, wave_expand_time)\
-		.set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_IN_OUT)
-	tw.tween_property(mat, "albedo_color", Color(1.0, 0.42, 0.08, 0.13), wave_expand_time * 0.5)\
-		.set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_IN_OUT)
-	tw.tween_property(mat, "albedo_color", Color(0.82, 0.08, 0.01, 0.0), wave_expand_time * 0.5)\
-		.set_delay(wave_expand_time * 0.5).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
-	tw.tween_property(mat, "emission_energy_multiplier", 0.0, wave_expand_time * 0.28)\
-		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
-	tw.chain().tween_callback(wave.queue_free)
-
-	# Brief scene-wide flash — way brighter than the warm-ember decay light
-	# below, but only ~60 ms so it reads as the moment-of-detonation spike.
-	var flash := OmniLight3D.new()
-	flash.light_color = Color(1.0, 0.98, 0.92)
-	flash.light_energy = 100.0 + radius * 14.0
-	flash.omni_range = maxf(40.0, radius * 6.0)
-	flash.position = pos
-	scene.add_child(flash)
-	var ftw := flash.create_tween()
-	ftw.tween_property(flash, "light_energy", 0.0, 0.06)\
-		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
-	ftw.tween_callback(flash.queue_free)
-
-	# Bright core glow — small range, longer duration than the scene flash.
-	# Reads as the white-hot fireball center hanging around as the blast
-	# evolves, distinct from the scene-wide initial spike.
-	var core_light := OmniLight3D.new()
-	core_light.light_color = color.lerp(Color(1.0, 0.95, 0.78), 0.7)
-	core_light.light_energy = 60.0 + radius * 8.0
-	core_light.omni_range = maxf(8.0, radius * 1.4)
-	core_light.position = pos
-	scene.add_child(core_light)
-	var ctlw := core_light.create_tween()
-	ctlw.tween_property(core_light, "light_color", color.lerp(Color(1.0, 0.55, 0.18), 0.5), 0.12)\
-		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
-	ctlw.parallel().tween_property(core_light, "light_energy", 0.0, 0.32)\
-		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
-	ctlw.tween_callback(core_light.queue_free)
-
-	# 3) Explosion light — extremely bright at ignition, then it collapses fast.
-	var light := OmniLight3D.new()
-	var hot_color := color.lerp(Color(1.0, 0.98, 0.9), 0.72)
-	var warm_color := color.lerp(Color(1.0, 0.6, 0.18), 0.5)
-	var ember_color := color.lerp(Color(0.9, 0.16, 0.04), 0.38)
-	light.light_color = hot_color
-	light.light_energy = clampf(20.0 + radius * 4.5, 20.0, 48.0)
-	light.omni_range = radius * 4.2
-	light.position = pos
-	scene.add_child(light)
-	var light_dur := clampf(0.1 + radius * 0.012, 0.1, 0.22)
-	var ltw := light.create_tween()
-	ltw.set_parallel(true)
-	ltw.tween_property(light, "light_color", warm_color, light_dur * 0.28)\
-		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
-	ltw.tween_property(light, "light_color", ember_color, light_dur * 0.72)\
-		.set_delay(light_dur * 0.28).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
-	ltw.tween_property(light, "light_energy", 0.0, light_dur)\
-		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
-	ltw.tween_callback(light.queue_free)
-
-	# 4) Big blasts play the full explosion SFX; smaller impacts stay visual.
-	if radius >= 3.5:
-		SFX.explosion(pos, radius)
+	var lp: Node = scene.get("local_player") if scene else null
+	Violence.spawn_bullet_blast(scene, pos, radius, color, lp)
 
 func apply_explosion_view_punch(pos: Vector3, radius: float, peak: float = 1.0) -> void:
-	if not is_multiplayer_authority() or camera == null:
-		return
-	var to_player := global_position - pos
-	var dist: float = to_player.length()
-	# Felt-radius is 5× the visible blast — distant players still get a
-	# tremor; nearby players get a real kick.
-	var effect_radius := maxf(radius * 5.0, radius + 1.0)
-	if dist >= effect_radius:
-		return
-	# Speed-of-sound delay so the shake arrives in sync with the audio + the
-	# visual shockwave shell (both also delayed by dist/343).
-	var delay: float = dist / 343.0
-	if delay < 0.01:
-		_do_explosion_view_punch(pos, radius, peak)
-	else:
-		get_tree().create_timer(delay).timeout.connect(func() -> void:
-			if is_instance_valid(self):
-				_do_explosion_view_punch(pos, radius, peak))
-
-func _do_explosion_view_punch(pos: Vector3, radius: float, peak: float) -> void:
-	if camera == null:
-		return
-	# Recompute distance — the player may have moved during the propagation.
-	var to_player := global_position - pos
-	var dist: float = to_player.length()
-	var effect_radius := maxf(radius * 5.0, radius + 1.0)
-	if dist >= effect_radius:
-		return
-	# Linear-ish falloff (was pow 1.6 — too steep for big blasts at range).
-	# Now a 24m bazooka at 60m still hits at strength ~0.5 * peak.
-	var linear: float = clampf(1.0 - dist / effect_radius, 0.0, 1.0)
-	var strength: float = pow(linear, 1.0) * peak
-	if strength <= 0.0:
-		return
-	var away_dir := to_player.normalized() if dist > 0.001 else Vector3.UP
-	var local_dir: Vector3 = global_transform.basis.inverse() * away_dir
-	_view_punch_pos += local_dir * (0.09 + 0.33 * strength)
-	_view_punch_rot += Vector3(
-		-local_dir.y * (0.045 + 0.165 * strength),
-		local_dir.x * (0.018 + 0.084 * strength),
-		-local_dir.x * (0.024 + 0.114 * strength)
-	)
-	shake_amt = max(shake_amt, 0.015 + 0.15 * strength)
-
-func _spawn_heat_distortion(scene: Node, pos: Vector3, radius: float, duration: float, strength: float) -> void:
-	if scene == null:
-		return
-	var shell := MeshInstance3D.new()
-	if _heat_mesh == null:
-		_heat_mesh = SphereMesh.new()
-		_heat_mesh.radius = 0.22
-		_heat_mesh.height = 0.44
-		_heat_mesh.radial_segments = 20
-		_heat_mesh.rings = 10
-	shell.mesh = _heat_mesh
-	if _heat_shader == null:
-		_heat_shader = Shader.new()
-		_heat_shader.code = """
-			shader_type spatial;
-			render_mode unshaded, cull_disabled, depth_draw_never;
-
-			uniform sampler2D screen_tex : hint_screen_texture, filter_linear_mipmap;
-			uniform float distortion_strength = 0.04;
-			uniform float zoom_strength = 0.015;
-			uniform float opacity = 0.18;
-
-			void fragment() {
-				vec3 n = normalize((VIEW_MATRIX * vec4(NORMAL, 0.0)).xyz);
-				float fresnel = pow(1.0 - abs(dot(normalize(VIEW), NORMAL)), 2.4);
-				vec2 offset = n.xy * distortion_strength * fresnel;
-				vec2 zoom = (SCREEN_UV - vec2(0.5)) * zoom_strength * fresnel;
-				vec2 uv = SCREEN_UV - zoom + offset;
-				vec3 col = texture(screen_tex, uv).rgb;
-				ALBEDO = col;
-				ALPHA = opacity * fresnel;
-			}
-		"""
-	var mat := ShaderMaterial.new()
-	mat.shader = _heat_shader
-	mat.set_shader_parameter("distortion_strength", strength * 2.4)
-	mat.set_shader_parameter("zoom_strength", strength * 0.9)
-	mat.set_shader_parameter("opacity", 0.34)
-	shell.material_override = mat
-	shell.position = pos
-	scene.add_child(shell)
-
-	var target_scale := Vector3.ONE * maxf(0.01, (radius * 1.85) / _heat_mesh.radius)
-	var tw := shell.create_tween().set_parallel(true)
-	tw.tween_property(shell, "scale", target_scale, duration)\
-		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
-	tw.tween_method(
-		func(v: float) -> void: mat.set_shader_parameter("distortion_strength", v),
-		strength,
-		0.0,
-		duration * 0.85
-	).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
-	tw.tween_method(
-		func(v: float) -> void: mat.set_shader_parameter("zoom_strength", v),
-		strength * 0.35,
-		0.0,
-		duration * 0.85
-	).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
-	tw.tween_method(
-		func(v: float) -> void: mat.set_shader_parameter("opacity", v),
-		0.34,
-		0.0,
-		duration * 0.72
-	).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
-	tw.chain().tween_callback(shell.queue_free)
-
-# Thin-shell screen-space shockwave: sphere expanding at the speed of sound.
-# High-power fresnel concentrates the pixel displacement on the silhouette
-# ring so the camera sees a thin distorted halo travelling outward — the
-# "shock front" — while the heat distortion handles the slower bloom.
-func _spawn_shockwave_ring(scene: Node, pos: Vector3, radius: float) -> void:
-	if scene == null:
-		return
-	var shell := MeshInstance3D.new()
-	if _shock_mesh == null:
-		_shock_mesh = SphereMesh.new()
-		_shock_mesh.radius = 0.25
-		_shock_mesh.height = 0.5
-		_shock_mesh.radial_segments = 32
-		_shock_mesh.rings = 16
-	shell.mesh = _shock_mesh
-	if _shock_shader == null:
-		_shock_shader = Shader.new()
-		_shock_shader.code = """
-			shader_type spatial;
-			render_mode unshaded, cull_disabled, depth_draw_never, blend_mix;
-
-			uniform sampler2D screen_tex : hint_screen_texture, filter_linear_mipmap;
-			uniform float distortion_strength = 0.05;
-			uniform float ring_thickness = 7.0;
-			uniform float opacity = 0.9;
-
-			void fragment() {
-				// High exponent -> energy concentrated on silhouette ring only.
-				float fresnel = pow(1.0 - abs(dot(normalize(VIEW), NORMAL)), ring_thickness);
-				vec3 n = normalize((VIEW_MATRIX * vec4(NORMAL, 0.0)).xyz);
-				vec2 offset = n.xy * distortion_strength * fresnel;
-				vec3 col = texture(screen_tex, SCREEN_UV + offset).rgb;
-				ALBEDO = col;
-				ALPHA = fresnel * opacity;
-			}
-		"""
-	var mat := ShaderMaterial.new()
-	mat.shader = _shock_shader
-	mat.set_shader_parameter("distortion_strength", 0.05)
-	mat.set_shader_parameter("ring_thickness", 7.0)
-	mat.set_shader_parameter("opacity", 0.9)
-	shell.material_override = mat
-	shell.position = pos
-	scene.add_child(shell)
-	# Sound-speed expansion (matches audio delay) with 30 ms minimum so
-	# tiny blasts remain visible.
-	var dur: float = maxf(0.03, radius / 343.0)
-	var target_scale := Vector3.ONE * maxf(0.01, (radius * 1.05) / _shock_mesh.radius)
-	var tw := shell.create_tween().set_parallel(true)
-	tw.tween_property(shell, "scale", target_scale, dur)\
-		.set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_OUT)
-	tw.tween_method(
-		func(v: float) -> void: mat.set_shader_parameter("distortion_strength", v),
-		0.05,
-		0.0,
-		dur
-	).set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_OUT)
-	tw.tween_method(
-		func(v: float) -> void: mat.set_shader_parameter("opacity", v),
-		0.9,
-		0.0,
-		dur * 0.9
-	).set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_OUT)
-	tw.chain().tween_callback(shell.queue_free)
+	Violence.apply_explosion_view_punch(self, pos, radius, peak)
 
 func _spawn_muzzle_flash(color: Color = Color(1.0, 0.88, 0.45), scale_f: float = 1.0) -> void:
 	# Directional flash: a short starburst plus a forward flame plume reads
@@ -1246,217 +929,12 @@ func confirm_kill() -> void:
 		g.show_hitmarker("kill")
 
 func _spawn_impact(pos: Vector3, color: Color = Color(1.0, 0.9, 0.3), scale_f: float = 1.0, dmg_ratio: float = 1.0) -> void:
-	var scene := get_tree().current_scene
-	# Heavier guns leave a bigger crater of dust + a brighter spark, and once
-	# damage is very high we add a second "heat flash" — as if the slug is
-	# hot enough to burn the ground it lands in.
-	var sz: float = scale_f * sqrt(dmg_ratio)
-	var spark_boost: float = lerpf(1.0, 2.5, clampf((dmg_ratio - 1.0) / 4.0, 0.0, 1.0))
-
-	# Heavy hits flash a brief colored point light at the impact. Pistol-base
-	# shots stay dark so the GPU doesn't burn cycles on every plink.
-	if dmg_ratio > 1.4:
-		var light := OmniLight3D.new()
-		light.light_color = color
-		light.light_energy = 3.5 * scale_f * spark_boost
-		light.omni_range = 2.2 * sz
-		light.position = pos
-		scene.add_child(light)
-		var ltw := light.create_tween()
-		ltw.tween_property(light, "light_energy", 0.0, 0.12) \
-			.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
-		ltw.tween_callback(light.queue_free)
-
-	# Heat flash: a very brief, almost-white burst for very-high-damage hits.
-	if dmg_ratio > 2.2:
-		var heat := OmniLight3D.new()
-		heat.light_color = Color(1.0, 0.88, 0.65)
-		heat.light_energy = 6.0 + 3.0 * dmg_ratio
-		heat.omni_range = 1.4 + 0.45 * dmg_ratio
-		heat.position = pos
-		scene.add_child(heat)
-		var htw := heat.create_tween()
-		htw.tween_property(heat, "light_energy", 0.0, 0.08) \
-			.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
-		htw.tween_callback(heat.queue_free)
-
-	# A handful of dust particles scattering outward and falling.
-	var dust_count: int = min(VFX_MAX_IMPACT_DUST, int(round(5.0 * sqrt(dmg_ratio))))
-	for i in dust_count:
-		var dust := MeshInstance3D.new()
-		var m := SphereMesh.new()
-		m.radius = 0.035 * sz
-		m.height = 0.07 * sz
-		m.radial_segments = 6
-		m.rings = 3
-		dust.mesh = m
-		var mat := StandardMaterial3D.new()
-		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		mat.albedo_color = Color(0.72, 0.66, 0.55, 0.75)
-		dust.material_override = mat
-		dust.position = pos
-		scene.add_child(dust)
-		var dir := Vector3(
-			randf_range(-1.0, 1.0),
-			randf_range(0.1, 1.0),
-			randf_range(-1.0, 1.0),
-		).normalized()
-		var end := pos + dir * randf_range(0.25, 0.7) * sz
-		var tw := dust.create_tween().set_parallel(true)
-		tw.tween_property(dust, "position", end, 0.35) \
-			.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
-		tw.tween_property(mat, "albedo_color", Color(0.72, 0.66, 0.55, 0.0), 0.4)
-		tw.chain().tween_callback(dust.queue_free)
+	Violence.spawn_impact(get_tree().current_scene, pos, color, scale_f, dmg_ratio, VFX_MAX_IMPACT_DUST)
 
 func _spawn_blood(pos: Vector3, dir: Vector3, dmg_ratio: float) -> void:
-	# Dark-red cloud with a short red-lit core. Spatter biases in the bullet's
-	# travel direction (through the body) plus a random scatter cone.
-	var scene := get_tree().current_scene
-	var sz: float = sqrt(dmg_ratio)
-	var count: int = min(VFX_MAX_BLOOD_DROPS, int(round(8.0 * sz)))
+	Violence.spawn_blood(get_tree().current_scene, pos, dir, dmg_ratio, VFX_MAX_BLOOD_DROPS)
 
-	# Hard hits emit a brief deep-red flash on the wound site.
-	if dmg_ratio > 1.4:
-		var light := OmniLight3D.new()
-		light.light_color = Color(0.8, 0.05, 0.05)
-		light.light_energy = 2.5 * sz
-		light.omni_range = 1.3 * sz
-		light.position = pos
-		scene.add_child(light)
-		var lt := light.create_tween()
-		lt.tween_property(light, "light_energy", 0.0, 0.18)\
-			.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
-		lt.tween_callback(light.queue_free)
-
-	for i in count:
-		var drop := MeshInstance3D.new()
-		var m := SphereMesh.new()
-		m.radius = randf_range(0.04, 0.09) * sz
-		m.height = m.radius * 2.0
-		m.radial_segments = 5
-		m.rings = 3
-		drop.mesh = m
-		var mat := StandardMaterial3D.new()
-		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		var shade := randf_range(0.28, 0.55)
-		mat.albedo_color = Color(shade, 0.03, 0.02, 0.9)
-		drop.material_override = mat
-		drop.position = pos
-		scene.add_child(drop)
-		var scatter := Vector3(randf_range(-0.8, 0.8), randf_range(-0.3, 0.9),
-			randf_range(-0.8, 0.8)).normalized()
-		var spray: Vector3 = (dir * randf_range(0.3, 0.9) + scatter * randf_range(0.4, 1.1)).normalized()
-		var travel := randf_range(0.45, 1.2) * sz
-		var end := pos + spray * travel + Vector3.DOWN * 0.25 * sz
-		var dur := randf_range(0.35, 0.55)
-		var tw := drop.create_tween().set_parallel(true)
-		tw.tween_property(drop, "position", end, dur)\
-			.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
-		tw.tween_property(mat, "albedo_color", Color(shade, 0.03, 0.02, 0.0), dur * 1.1)
-		tw.chain().tween_callback(drop.queue_free)
-
-func _spawn_gib_mist(
-	pos: Vector3,
-	dir: Vector3,
-	intensity: float,
-	blast_radius: float = 0.0,
-	blast_severity: float = 0.0
-) -> void:
-	var scene := get_tree().current_scene
-	if scene == null:
-		return
-	var dir_n := dir.normalized() if dir.length_squared() > 0.001 else Vector3.UP
-	var chaos := blast_severity * clampf(intensity / maxf(Weapon.BASE_KNOCKBACK, 0.001), 0.6, 2.4)
-	var count: int = clampi(int(round(8.0 + intensity * 2.5 + blast_radius * 0.25 + chaos * 10.0)), 8, 28)
-	var spread: float = 0.45 + blast_radius * 0.03 + chaos * 0.14
-	var base_travel: float = 0.9 + intensity * 0.22 + blast_radius * 0.05 + chaos * 0.9
-	var base_size: float = 0.12 + intensity * 0.018 + chaos * 0.04
-
-	for i in count:
-		var puff := MeshInstance3D.new()
-		var mesh := SphereMesh.new()
-		mesh.radius = randf_range(base_size * 0.6, base_size * 1.2)
-		mesh.height = mesh.radius * 2.0
-		mesh.radial_segments = 6
-		mesh.rings = 4
-		puff.mesh = mesh
-		var mat := StandardMaterial3D.new()
-		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-		var shade := randf_range(0.28, 0.52)
-		mat.albedo_color = Color(shade, 0.02, 0.02, randf_range(0.2, 0.42))
-		mat.emission_enabled = true
-		mat.emission = Color(0.4, 0.02, 0.02)
-		mat.emission_energy_multiplier = 0.1
-		puff.material_override = mat
-		puff.position = pos + Vector3(
-			randf_range(-0.08, 0.08),
-			randf_range(-0.08, 0.08),
-			randf_range(-0.08, 0.08)
-		)
-		scene.add_child(puff)
-
-		var scatter := Vector3(
-			randf_range(-spread, spread),
-			randf_range(-0.22, 0.45),
-			randf_range(-spread, spread)
-		)
-		var travel_dir := (dir_n + scatter).normalized()
-		var end := puff.position + travel_dir * randf_range(base_travel * 0.65, base_travel * 1.2)
-		var dur := randf_range(0.35, 0.68)
-		var tw := puff.create_tween().set_parallel(true)
-		tw.tween_property(puff, "position", end, dur)\
-			.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
-		tw.tween_property(puff, "scale", Vector3.ONE * randf_range(1.8, 2.8), dur)\
-			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
-		tw.tween_property(mat, "albedo_color", Color(shade, 0.02, 0.02, 0.0), dur)\
-			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
-		tw.chain().tween_callback(puff.queue_free)
-
-func _spawn_blast_blood_splash(pos: Vector3, dir: Vector3, severity: float) -> void:
-	if severity <= 0.08:
-		return
-	var scene := get_tree().current_scene
-	if scene == null:
-		return
-	var dir_n := dir.normalized() if dir.length_squared() > 0.001 else Vector3.UP
-	var count := clampi(int(round(5.0 + severity * 10.0)), 5, 14)
-	for i in count:
-		var splash := MeshInstance3D.new()
-		var mesh := SphereMesh.new()
-		mesh.radius = randf_range(0.06, 0.12) * lerpf(0.9, 1.5, severity)
-		mesh.height = mesh.radius * 2.0
-		mesh.radial_segments = 5
-		mesh.rings = 3
-		splash.mesh = mesh
-		var mat := StandardMaterial3D.new()
-		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-		mat.albedo_color = Color(randf_range(0.3, 0.46), 0.02, 0.02, randf_range(0.18, 0.34))
-		splash.material_override = mat
-		splash.position = pos
-		scene.add_child(splash)
-		var scatter := Vector3(
-			randf_range(-0.9, 0.9),
-			randf_range(-0.25, 0.85),
-			randf_range(-0.9, 0.9)
-		)
-		var end := pos + (dir_n + scatter).normalized() * randf_range(0.6, 1.5) * lerpf(0.8, 1.8, severity)
-		var dur := randf_range(0.22, 0.42)
-		var tw := splash.create_tween().set_parallel(true)
-		tw.tween_property(splash, "position", end, dur)\
-			.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
-		tw.tween_property(splash, "scale", Vector3.ONE * randf_range(1.2, 1.9), dur)\
-			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
-		tw.tween_property(mat, "albedo_color", Color(mat.albedo_color.r, 0.02, 0.02, 0.0), dur)\
-			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
-		tw.chain().tween_callback(splash.queue_free)
-
-# -------------------- RAGDOLL --------------------
+# -------------------- RAGDOLL / DEATH --------------------
 
 @rpc("any_peer", "call_local", "reliable")
 func _ragdoll(
@@ -1467,145 +945,20 @@ func _ragdoll(
 	blast_severity: float = 0.0,
 	is_head: bool = false,
 ) -> void:
-	# Switch to the squinty `>_<` face so the cloned ragdoll meshes inherit
-	# that state. Done BEFORE hiding the body so visibility checks during
-	# cloning still reflect the (about-to-be-hidden) authored tree.
-	_set_hit_face_state(true)
-	_hit_face_timer = 0.0  # don't let _process auto-revert on the dead body
-	_spawn_ragdoll(push_dir, force_origin, gib_force, blast_radius, blast_severity, is_head)
-	# Every peer simulates its own corpse — cosmetic desync is fine.
-	body_model.visible = false
-	_set_dead_visuals(true)
+	Violence.do_ragdoll(self, push_dir, force_origin, gib_force, blast_radius, blast_severity, is_head)
 
 # Hide the first-person gun mesh and turn off the hit areas so a corpse
-# can't be shot or seen with a floating gun.
+# can't be shot or seen with a floating gun. Wrapper kept because the
+# server_respawn() path also flips visuals back on.
 func _set_dead_visuals(dead: bool) -> void:
-	if muzzle:
-		muzzle.visible = not dead
-	var layer: int = 0 if dead else 2
-	if head_hitbox:
-		head_hitbox.collision_layer = layer
-	if torso_hitbox:
-		torso_hitbox.collision_layer = layer
-	if legs_hitbox:
-		legs_hitbox.collision_layer = layer
-
-func _spawn_ragdoll(
-	push_dir: Vector3,
-	force_origin: Vector3 = Vector3.INF,
-	gib_force: float = 0.0,
-	blast_radius: float = 0.0,
-	blast_severity: float = 0.0,
-	is_head: bool = false,
-) -> void:
-	# Voronoi-split the blob's primitive meshes into chunks that fly apart.
-	# body_model is hidden first so the user only reads the flying debris.
-	# Chunks collide with world only — players and bullets ignore the corpse.
-	var scene := get_tree().current_scene
-	var inferred_force: float = push_dir.length()
-	if gib_force > 0.0:
-		inferred_force = maxf(inferred_force, gib_force)
-	var kb_mag: float = clampf(sqrt(maxf(inferred_force, 1.0)), 1.0, 2.6)
-	var dir_n: Vector3 = push_dir.normalized() if push_dir.length_squared() > 0.01 else Vector3.UP
-	var chaos := 0.0
-	if blast_radius > 0.0:
-		chaos = clampf(blast_severity * clampf(gib_force / maxf(Weapon.BASE_KNOCKBACK, 0.001), 0.6, 1.8), 0.0, 1.1)
-	var blast_lift := 0.2
-	if blast_radius > 0.0:
-		blast_lift = 0.2 + chaos * 0.06
-	var base_vel: Vector3 = dir_n * randf_range(2.2, 3.9) * kb_mag * (1.0 + chaos * 0.18) \
-		+ Vector3.UP * randf_range(1.2, 2.8) * kb_mag * (1.0 + blast_lift)
-	var burst_strength: float = 1.45 * kb_mag
-	if blast_radius > 0.0:
-		burst_strength *= 1.0 + clampf(blast_radius / 12.0, 0.0, 0.25) + chaos * 0.2
-
-	var meshes: Array[MeshInstance3D] = []
-	if body_model:
-		_collect_meshes(body_model, meshes)
-	if meshes.is_empty():
-		return
-	var mist_origin := force_origin if force_origin != Vector3.INF else global_position + Vector3.UP * 0.4
-	_spawn_gib_mist(mist_origin, dir_n, kb_mag, blast_radius, blast_severity)
-	if blast_radius > 0.0:
-		_spawn_blast_blood_splash(mist_origin, dir_n, blast_severity)
-	# Fixed chunk_count so the gib cache stays at one key per source mesh.
-	# Varying it forced fresh synchronous bakes on the main thread (~200ms each).
-	var chunk_count: int = GIB_CHUNK_COUNT
-	var impact_blood_strength := clampf(0.18 + kb_mag * 0.12 + chaos * 0.22, 0.15, 1.0)
-
-	# Three death modes:
-	#   • Explosion (blast_radius > 0): chunk every body mesh — full disintegrate.
-	#   • Headshot: head pops off as one body, the rest stays connected.
-	#   • Regular hit: whole body tumbles as a single rigid body.
-	var local_is_authority: bool = is_multiplayer_authority() and not is_bot
-	if blast_radius > 0.0:
-		var first: bool = true
-		for src in meshes:
-			if src.mesh == null:
-				continue
-			var chunks: Array[RigidBody3D] = Gib.explode(
-				src.mesh,
-				src.global_transform,
-				scene,
-				src.material_override,
-				base_vel + Vector3(randf_range(-1.5, 1.5), 0, randf_range(-1.5, 1.5)),
-				burst_strength,
-				chunk_count,
-				14.0,
-				force_origin,
-				impact_blood_strength,
-			)
-			if chunks.is_empty():
-				continue
-			if first and local_is_authority:
-				_ragdoll_head = chunks[0]
-				if scene.has_method("show_death_effect"):
-					scene.show_death_effect(true)
-				first = false
-			for c in chunks:
-				_ragdoll_pieces.append(c)
-	else:
-		# Split head subtree from torso so headshots can launch the head alone.
-		var head_meshes: Array[MeshInstance3D] = []
-		if is_head and head_blob:
-			_collect_meshes(head_blob, head_meshes)
-		var torso_meshes: Array[MeshInstance3D] = []
-		for m in meshes:
-			if not head_meshes.has(m):
-				torso_meshes.append(m)
-		var torso_rb: RigidBody3D = Gib.body_ragdoll(
-			body_model.global_transform, torso_meshes, scene,
-			base_vel + Vector3(randf_range(-0.6, 0.6), 0, randf_range(-0.6, 0.6)),
-			4.0, 14.0,
-		)
-		if torso_rb:
-			_ragdoll_pieces.append(torso_rb)
-			if local_is_authority:
-				_ragdoll_head = torso_rb
-				if scene.has_method("show_death_effect"):
-					scene.show_death_effect(true)
-		if not head_meshes.is_empty():
-			var head_v: Vector3 = base_vel + dir_n * 6.0 + Vector3.UP * 8.0
-			var head_rb: RigidBody3D = Gib.body_ragdoll(
-				head_blob.global_transform, head_meshes, scene,
-				head_v, 18.0, 14.0,
-			)
-			if head_rb:
-				_ragdoll_pieces.append(head_rb)
-				# Camera prefers the popping head over the torso.
-				if local_is_authority:
-					_ragdoll_head = head_rb
+	Violence.set_dead_visuals(self, dead)
 
 @rpc("any_peer", "call_local", "reliable")
 func clear_ragdoll() -> void:
 	var sender := multiplayer.get_remote_sender_id()
 	if sender != 1 and sender != 0:
 		return
-	for piece in _ragdoll_pieces:
-		if is_instance_valid(piece):
-			piece.queue_free()
-	_ragdoll_pieces.clear()
-	_set_dead_visuals(false)
+	Violence.clear_ragdoll(self)
 	# Restore body visibility on every peer except the local authority
 	# (their body stays hidden in first-person, same as normal).
 	_apply_ghost_visuals()
@@ -2095,7 +1448,7 @@ func _apply_damage(
 	blast_severity: float = 0.0,
 	is_head: bool = false,
 ) -> void:
-	if ghost_mode or frozen or health <= 0:
+	if ghost_mode or frozen or health <= 0 or god_mode:
 		return
 	if shielded:
 		return  # SHIELD special absorbs the hit
@@ -2162,9 +1515,7 @@ func apply_knockback(impulse: Vector3) -> void:
 	var sender := multiplayer.get_remote_sender_id()
 	if sender != 1 and sender != 0:
 		return
-	if ghost_mode or frozen or not is_multiplayer_authority():
-		return
-	velocity += impulse
+	Violence.apply_knockback(self, impulse)
 
 func _notify_damage_source(from_id: int) -> void:
 	var attacker := get_parent().get_node_or_null(str(from_id))

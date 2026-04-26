@@ -4,25 +4,65 @@ enum Type { SHIFT, LMB, RMB }
 @export var icon_type: Type = Type.LMB
 @export var icon_color: Color = Color.WHITE
 
+static var use_controller_icons := false
+
+func _ready() -> void:
+	add_to_group("hud_input_icons")
+	_refresh_input_device()
+
+func _refresh_input_device() -> void:
+	for child in get_children():
+		if child is Label:
+			child.visible = false
+	queue_redraw()
+
 func _draw() -> void:
-	match icon_type:
-		Type.SHIFT:
-			_draw_shift_icon()
-		Type.LMB:
-			_draw_mouse_icon(true)
-		Type.RMB:
-			_draw_mouse_icon(false)
+	if use_controller_icons:
+		match icon_type:
+			Type.SHIFT:
+				_draw_button_label("LS")
+			Type.LMB:
+				_draw_trigger_label("RT")
+			Type.RMB:
+				_draw_button_label("RB/B")
+	else:
+		match icon_type:
+			Type.SHIFT:
+				_draw_key_label("SHIFT")
+			Type.LMB:
+				_draw_mouse_icon(true)
+			Type.RMB:
+				_draw_mouse_icon(false)
 
-func _draw_shift_icon() -> void:
-	var pad := 4.0
+func _draw_key_label(text: String) -> void:
 	var r := Rect2(Vector2.ZERO, size)
-	# Draw the keycap box
 	draw_rect(r, icon_color, false, 1.5)
+	_draw_centered_text(text, 10)
 
-	# Draw the text manually or use a child label?
-	# For simplicity and style consistency, let's just use the draw_string
-	# (Note: Requires a font, but we can just use a tiny child Label in the setup)
-	pass
+func _draw_button_label(text: String) -> void:
+	var rect := Rect2(Vector2(1.0, 1.0), size - Vector2(2.0, 2.0))
+	draw_rect(rect, Color(icon_color.r, icon_color.g, icon_color.b, 0.12), true)
+	draw_rect(rect, icon_color, false, 1.5)
+	_draw_centered_text(text, 10)
+
+func _draw_trigger_label(text: String) -> void:
+	var top := size.y * 0.18
+	var rect := Rect2(Vector2(1.0, top), Vector2(size.x - 2.0, size.y - top - 1.0))
+	draw_rect(rect, Color(icon_color.r, icon_color.g, icon_color.b, 0.12), true)
+	draw_rect(rect, icon_color, false, 1.5)
+	draw_line(Vector2(size.x * 0.25, top), Vector2(size.x * 0.75, top), icon_color, 1.5)
+	_draw_centered_text(text, 10)
+
+func _draw_centered_text(text: String, font_size: int) -> void:
+	var font := get_theme_default_font()
+	if font == null:
+		return
+	var text_size := font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size)
+	var pos := Vector2(
+		(size.x - text_size.x) * 0.5,
+		(size.y - text_size.y) * 0.5 + font.get_ascent(font_size)
+	)
+	draw_string(font, pos, text, HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size, icon_color)
 
 func _draw_mouse_icon(left_filled: bool) -> void:
 	var w := size.x
