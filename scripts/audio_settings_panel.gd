@@ -19,6 +19,7 @@ const KNOBS: Array = [
 	["death SELF dB",         "death_self_db",         -50.0,   0.0],
 	["death world dB",        "death_world_db",        -40.0,   6.0],
 	["hit_received dB",       "hit_received_db",       -40.0,   6.0],
+	["impact dB",             "impact_db",             -40.0,   6.0],
 	["bullet zip CLOSE dB",   "bullet_zip_close_db",   -50.0,   0.0],
 	["bullet zip FAR dB",     "bullet_zip_far_db",     -60.0, -10.0],
 	["bullet zip base Hz",    "bullet_zip_base_hz",    200.0, 5000.0],
@@ -45,6 +46,7 @@ const SOLO_CHOICES: Array = [
 	["hit_received",   "hit_received"],
 	["hitmarker",      "hitmarker"],
 	["bullet_zip",     "bullet_zip"],
+	["impact",         "impact"],
 	["grenade_launch", "grenade_launch"],
 	["melee",          "melee"],
 	["card_flip",      "card_flip"],
@@ -153,7 +155,7 @@ func _build_ui() -> void:
 	vb.add_child(sep)
 
 	for k in KNOBS:
-		_add_slider(vb, k[0], k[1], k[2], k[3])
+		add_sfx_slider(vb, k[0], k[1], k[2], k[3])
 
 	var solo_row := HBoxContainer.new()
 	solo_row.add_theme_constant_override("separation", 8)
@@ -165,11 +167,7 @@ func _build_ui() -> void:
 	solo_row.add_child(solo_lbl)
 	var solo_opt := OptionButton.new()
 	solo_opt.focus_mode = Control.FOCUS_NONE
-	for i in SOLO_CHOICES.size():
-		solo_opt.add_item(SOLO_CHOICES[i][0], i)
-	solo_opt.selected = 0
-	solo_opt.item_selected.connect(func(idx: int) -> void:
-		SFX.solo_kind = SOLO_CHOICES[idx][1])
+	populate_solo_dropdown(solo_opt)
 	solo_row.add_child(solo_opt)
 
 	# Re-center on viewport size changes (window resize, fullscreen toggle).
@@ -267,18 +265,31 @@ func _make_comp_toggle(label_text: String, effect_idx: int) -> Button:
 			AudioServer.set_bus_effect_enabled(idx, effect_idx, on))
 	return btn
 
-func _add_slider(vb: VBoxContainer, label_text: String, prop: String, lo: float, hi: float) -> void:
+# Shared slider row builder. Static so any host (action_lab, this F2 panel,
+# future tuners) drops a row in without re-implementing the layout.
+# `label_min_width` defaults to 170 to match the F2 panel; the action_lab uses
+# a slightly tighter 160 because its panel is narrower.
+static func add_sfx_slider(
+	vb: VBoxContainer,
+	label_text: String,
+	prop: String,
+	lo: float,
+	hi: float,
+	label_min_width: float = 170.0,
+) -> void:
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 8)
 	var lbl := Label.new()
 	lbl.text = label_text
-	lbl.custom_minimum_size = Vector2(170, 0)
+	lbl.custom_minimum_size = Vector2(label_min_width, 0)
 	lbl.add_theme_font_size_override("font_size", 12)
 	row.add_child(lbl)
 	var initial: float = float(SFX.get(prop))
 	var slider := HSlider.new()
 	slider.min_value = lo
 	slider.max_value = hi
+	# Auto step: ~200 increments across the slider's range. Fine knobs
+	# (e.g. 0..0.6) get 0.003 steps; coarse dB knobs get 0.1 steps.
 	slider.step = maxf((hi - lo) / 200.0, 0.001)
 	slider.value = initial
 	slider.custom_minimum_size = Vector2(150, 18)
@@ -304,3 +315,12 @@ func _add_slider(vb: VBoxContainer, label_text: String, prop: String, lo: float,
 		val_lbl.text = "%+.1f" % v
 		reset_btn.visible = not is_equal_approx(v, initial))
 	vb.add_child(row)
+
+# Populate an OptionButton with SOLO_CHOICES and wire selection to SFX.solo_kind.
+# Hosts call this after creating the OptionButton — they own positioning + label.
+static func populate_solo_dropdown(opt: OptionButton) -> void:
+	for i in SOLO_CHOICES.size():
+		opt.add_item(SOLO_CHOICES[i][0], i)
+	opt.selected = 0
+	opt.item_selected.connect(func(idx: int) -> void:
+		SFX.solo_kind = SOLO_CHOICES[idx][1])

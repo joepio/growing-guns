@@ -796,6 +796,11 @@ func _fire_rifle() -> void:
 			var r: float = spread * randf() * randf()
 			dir = base_dir.rotated(cam_up, r * cos(theta)).rotated(cam_right, r * sin(theta)).normalized()
 		_rifle_fired.rpc(origin, dir, player_id)
+	# Barrel overheating — pump in heat per shot, scaled by damage. Cooldown
+	# happens passively in procedural_gun._process. Heavy / fast builds
+	# steady-state into a red glow; the base gun stays under the threshold.
+	if _procedural_gun and _procedural_gun.has_method("add_heat"):
+		_procedural_gun.add_heat(weapon.damage_mult * float(shots))
 
 @rpc("any_peer", "call_local", "reliable")
 func _rifle_fired(origin: Vector3, dir: Vector3, shooter_id: int) -> void:

@@ -12,7 +12,10 @@
       "Bash(godot --headless --check-only scripts/sfx.gd scripts/action_lab.gd)",
       "Bash(gh api *)",
       "Bash(python3 -c \"import sys, json; data = json.load\\(sys.stdin\\); [print\\(item['name'], item['type']\\) for item in data]\")",
-      "Bash(git mv *)"
+      "Bash(git mv *)",
+      "Bash(/Applications/Godot.app/Contents/MacOS/Godot --headless --check-only --script scripts/procedural_gun.gd --quit)",
+      "Bash(/Applications/Godot.app/Contents/MacOS/Godot --headless --check-only --quit)",
+      "Bash(/Applications/Godot.app/Contents/MacOS/Godot --headless --check-only)"
     ]
   }
 }
