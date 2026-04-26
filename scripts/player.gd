@@ -806,9 +806,12 @@ func _fire_rifle() -> void:
 	# rest exactly as the next shot snaps them back again.
 	if _procedural_gun and _procedural_gun.has_method("cycle_bolt"):
 		_procedural_gun.cycle_bolt(weapon.get_fire_interval())
-	# Eject a brass casing from the top-right of the receiver per shot.
+	# Eject one brass casing per bullet — multi-barrel / multi-shot weapons
+	# spit out a small burst from the same ejection port. The per-casing
+	# velocity jitter inside eject_casing() keeps them from clumping.
 	if _procedural_gun and _procedural_gun.has_method("eject_casing"):
-		_procedural_gun.eject_casing()
+		for _i in shots:
+			_procedural_gun.eject_casing()
 
 @rpc("any_peer", "call_local", "reliable")
 func _rifle_fired(origin: Vector3, dir: Vector3, shooter_id: int) -> void:

@@ -415,8 +415,11 @@ func apply_weapon_stats(w: Weapon) -> void:
 	barrel_radius = clampf(0.022 * w.bullet_scale * dmg_barrel_scale, 0.012, 0.10)
 	barrel_count = w.get_shots_per_trigger()
 
-	# Receiver stays at its authored base size — damage drives the barrel now.
-	receiver_size = Vector3(0.075, 0.10, 0.26)
+	# Receiver grows with damage — heavy rounds need a deeper, taller chamber.
+	# X (width) auto-expands later to wrap multi-barrel layouts. Y (height)
+	# scales up to ~1.6×; Z (length) up to ~2.1×, which also lengthens the
+	# bolt slot, casing length, and stock offset that derive from it.
+	receiver_size = Vector3(0.075, lerpf(0.10, 0.16, dmg_factor), lerpf(0.26, 0.55, dmg_factor))
 	var rounds: int = w.get_mag_size()
 	mag_drum = rounds > 30
 	if mag_drum:
