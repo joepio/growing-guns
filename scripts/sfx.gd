@@ -83,9 +83,12 @@ var _hdr_max_spl: float = HDR_FLOOR_DB
 var big_tail_send_db: float = -24.0  # per-source send level into the bus
 var big_tail_min_db: float = -50.0   # bus output during silence
 var big_tail_max_db: float = -10.0   # bus output at peak intensity (~165 SPL)
-# Intensity ramps to 1.0 on a peak event (165+ SPL), decays back to 0 over
-# ~3 s. Slow enough that a grenade's tail has time to develop.
-const BIG_TAIL_DECAY := 0.18
+# Intensity ramps to 1.0 on a peak event (165+ SPL). Slow exponential decay
+# (rate 0.10 → half-life ~7 s, audible to ~15 s) so the reverb tail has
+# time to actually play out audibly instead of being muted by the bus
+# closing too fast.
+const BIG_TAIL_DECAY_RATE := 0.10
+const BIG_TAIL_FLOOR := 0.002  # snap-to-zero threshold so it actually settles
 var _big_tail_intensity: float = 0.0
 # AudioStreamPlayer3D unit_size — distance at which the inverse-distance
 # attenuation curve starts falling off. Sounds want different values:
@@ -108,9 +111,11 @@ func _process(delta: float) -> void:
 	# release rate. New plays push the max back up via _hdr_blocks().
 	if _hdr_max_spl > HDR_FLOOR_DB:
 		_hdr_max_spl = maxf(HDR_FLOOR_DB, _hdr_max_spl - HDR_RELEASE_DB_PER_SEC * delta)
-	# Slow-release big-tail intensity (separate from HDR so single events
-	# hold the bus open long enough for a tail to form).
-	_big_tail_intensity = maxf(0.0, _big_tail_intensity - BIG_TAIL_DECAY * delta)
+	# Exponential big-tail intensity decay — smooth ease-out so the bus
+	# closes gradually instead of cutting the reverb tail abruptly.
+	_big_tail_intensity *= exp(-BIG_TAIL_DECAY_RATE * delta)
+	if _big_tail_intensity < BIG_TAIL_FLOOR:
+		_big_tail_intensity = 0.0
 	var idx := AudioServer.get_bus_index("BigTailReverb")
 	if idx >= 0:
 		AudioServer.set_bus_volume_db(idx, lerpf(big_tail_min_db, big_tail_max_db, _big_tail_intensity))
@@ -233,10 +238,13 @@ func _ensure_big_tail_bus() -> void:
 	# Godot's reverb gets at high room_size with non-zero feedback.
 	rev.predelay_msec = 60.0
 	rev.predelay_feedback = 0.0
-	rev.room_size = 0.92     # big hall, but pulled back from 0.96 ring
+	# Larger room → longer natural reverb tail (~3-4 s vs ~1.5 s at 0.92).
+	# Means even brief inputs (small explosion's short rumble) produce an
+	# audible tail since the bus stays open via slow intensity decay.
+	rev.room_size = 0.97
 	# damping high → high frequencies decay FAST, lows linger. Mimics how
 	# distant boom reverb sounds in real life (air absorbs treble first).
-	rev.damping = 0.90
+	rev.damping = 0.85
 	rev.spread = 0.85
 	# hipass at 0 → keep the low end intact, since that's what we want to tail.
 	rev.hipass = 0.0
@@ -564,23 +572,10 @@ func explosion(at: Vector3 = NO_POS, radius: float = 6.0) -> void:
 	_play(bang_samples, explosion_bang_db + explosion_wet_db, at, "", bang_dist, false, ex_spl)
 	var rumble_key := "explosion_rumble:%d:%d" % [r_bucket, variant]
 	_play(_cached_samples(rumble_key, Callable(self, "_synth_explosion_rumble").bind(float(r_bucket), variant)), explosion_rumble_db, at, "explosion_rumble", rumble_dist, false, ex_spl)
-	# Distance-bucketed bandpass click. Picks one of 5 frequency buckets based
-	# on listener distance — close pops bright, far pops bass — modelling the
-	# air-absorption shift in perceived peak frequency.
-	var listener := _listener_position()
-	if listener != NO_POS:
-		var listener_dist: float = listener.distance_to(at)
-		# Buckets: 0..5m=0, 5..15m=1, 15..30m=2, 30..60m=3, 60+m=4.
-		var click_bucket: int = 0
-		if listener_dist > 60.0: click_bucket = 4
-		elif listener_dist > 30.0: click_bucket = 3
-		elif listener_dist > 15.0: click_bucket = 2
-		elif listener_dist > 5.0: click_bucket = 1
-		var click_variant: int = randi() % EXPLOSION_VARIANTS
-		var click_key := "ex_click:%d:%d" % [click_bucket, click_variant]
-		var click_samples := _cached_samples(click_key, Callable(self, "_synth_distance_click").bind(click_bucket, click_variant))
-		_play(click_samples, explosion_bang_db - 4.0, at, "explosion_click", bang_dist, true, ex_spl)
-		_play(click_samples, explosion_bang_db - 4.0 + explosion_wet_db, at, "", bang_dist, false, ex_spl)
+	# (The distance-bucketed bandpass click was removed — its high-Q resonator
+	# rang at ~350 Hz at mid-range distances and read as a tonal "pong". The
+	# air-absorption filter on the regular 3D player handles the distance
+	# frequency shift more naturally via lowpass.)
 func melee(at: Vector3 = NO_POS, damage: int = 50) -> void:
 	var pitch_ratio: float = clampf(50.0 / float(damage), 0.5, 1.2)
 	var key := "melee_%d" % int(round(pitch_ratio * 100.0))
@@ -709,11 +704,12 @@ func _synth_shot(w: Weapon, variant: int) -> PackedVector2Array:
 	# sweep into a punchy "boom" instead of a chirp.
 	var kick_f0: float = 220.0 * lerpf(0.88, 1.12, rng.randf())
 	var kick_f1: float = clampf(55.0 / sqrt(dmg_ratio), 28.0, 80.0) * lerpf(0.92, 1.10, rng.randf())
-	# High-velocity → faster sweep + faster kick decay → less body sustain,
-	# more "snap". Low-velocity guns sustain the body longer for a "boom".
-	var kick_sweep_rate: float = lerpf(70.0, 95.0, rng.randf()) * sqrt(velocity)
-	var kick_decay: float = clampf(35.0 / sqrt(dmg_ratio), 10.0, 40.0) * sqrt(velocity)
-	var kick_gain: float = lerpf(0.55, 0.95, clampf((dmg_ratio - 1.0) / 3.0, 0.0, 1.0)) / sqrt(velocity)
+	# Kick body is DAMAGE-driven only — velocity governs the transient/noise
+	# crispness, but the deep kick should grow with damage regardless of
+	# velocity. Sniper still gets a proper boom; SMG stays light.
+	var kick_sweep_rate: float = lerpf(70.0, 95.0, rng.randf())
+	var kick_decay: float = clampf(35.0 / sqrt(dmg_ratio), 10.0, 40.0)
+	var kick_gain: float = lerpf(0.55, 1.10, clampf((dmg_ratio - 1.0) / 3.0, 0.0, 1.0))
 
 	# High-velocity guns are SHORTER overall — the entire bang collapses.
 	# Slow guns: full duration. Sniper at velocity ~3: dur cut to ~half.
@@ -844,15 +840,16 @@ func _synth_explosion(radius: float, variant: int) -> PackedVector2Array:
 	var thwack_drive: float = lerpf(4.0, 8.0, rng.randf())
 	var dur_jit: float = lerpf(0.92, 1.10, rng.randf())
 
-	# Kick drum parameters — same shape as gun's kick but f1 clamped higher
-	# (50 Hz min) so big blasts thump in the audible range, not sub-plonk.
-	# Body decays in 30-50 ms — pure attack, no sustain.
+	# Kick drum — match gun's kick parameters exactly (just driven by radius
+	# instead of damage). Earlier the explosion kick was clamped higher
+	# (50 Hz min) and slower-decaying, which made it read as a tonal "pong".
+	# Now: deep floor (28 Hz), fast snap (10-40 ms), gun-equivalent gain.
 	var r_norm: float = clampf(radius / 6.0, 0.3, 4.0)
-	var kick_f0: float = 220.0 * lerpf(0.85, 1.15, rng.randf())
-	var kick_f1: float = clampf(60.0 / sqrt(r_norm), 50.0, 95.0) * lerpf(0.92, 1.10, rng.randf())
+	var kick_f0: float = 220.0 * lerpf(0.88, 1.12, rng.randf())
+	var kick_f1: float = clampf(55.0 / sqrt(r_norm), 28.0, 80.0) * lerpf(0.92, 1.10, rng.randf())
 	var kick_sweep_rate: float = lerpf(70.0, 95.0, rng.randf())
-	var kick_decay: float = clampf(40.0 / sqrt(r_norm), 18.0, 45.0)
-	var kick_gain: float = lerpf(0.7, 1.05, clampf((r_norm - 1.0) / 3.0, 0.0, 1.0))
+	var kick_decay: float = clampf(35.0 / sqrt(r_norm), 10.0, 40.0)
+	var kick_gain: float = lerpf(0.55, 0.95, clampf((r_norm - 1.0) / 3.0, 0.0, 1.0))
 
 	# Sub-bass rumble: heavily lowpassed noise (~35-65 Hz) for inharmonic
 	# body. Bigger blasts get lower cutoffs and slower decay → fatter rumble.
@@ -965,9 +962,10 @@ func _synth_explosion_rumble(radius: float, variant: int) -> PackedVector2Array:
 	# Variant jitter: attack and decay rate vary subtly per variant.
 	var attack_dur: float = lerpf(0.05, 0.12, rng.randf())
 	var decay_rate: float = lerpf(1.5, 2.2, rng.randf())
-	# Last 0.4 s linearly tapers the envelope to literal zero so the buffer
-	# doesn't end on a non-zero sample (which would click).
-	var release_dur: float = 0.4
+	# Long, smoothstepped release so the rumble eases off subtly instead of
+	# tapering to silence over 0.4 s (which sounded like an abrupt cut at the
+	# tail-end). 1.2 s release with an S-curve = gradual fade-out.
+	var release_dur: float = minf(1.2, dur * 0.45)
 	# Per-sample gain. Bazooka-class blasts (large radius) have a longer +
 	# deeper rumble whose total acoustic energy would otherwise drown the
 	# bang. sqrt(6/radius) keeps small blasts at full level (radius=6 -> 1.5)
@@ -979,7 +977,10 @@ func _synth_explosion_rumble(radius: float, variant: int) -> PackedVector2Array:
 		# Slower decay than 3.0/dur so the body of each rumble persists
 		# longer; stacked rumbles overlap into a sustained roar.
 		var decay: float = exp(-t * (decay_rate / dur))
-		var release: float = clampf((dur - t) / release_dur, 0.0, 1.0)
+		# Smoothstep for the release so the rolloff is gentle at both ends
+		# (no audible "knee" at the start of the fade or at the end).
+		var release_lin: float = clampf((dur - t) / release_dur, 0.0, 1.0)
+		var release: float = release_lin * release_lin * (3.0 - 2.0 * release_lin)
 		var env: float = attack * decay * release
 		# Brown noise: integrated white noise with a tiny leak so it can't
 		# drift into DC offset territory.
