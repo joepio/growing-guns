@@ -198,6 +198,22 @@ func _handle_collision(result: Dictionary) -> void:
 		return
 
 	var dmg_ratio: float = clampf(weapon_stats.get_damage() / Weapon.BASE_DAMAGE, 0.5, 5.0)
+
+	# Corpse hits run cosmetic-only on every peer (no networked health change).
+	# The corpse accumulates damage and disintegrates at CORPSE_DISINTEGRATE_DMG.
+	if collider and collider.is_in_group("corpses"):
+		var corpse_dmg: float = weapon_stats.get_damage()
+		Violence.hit_corpse(collider as RigidBody3D, hit_pos, direction, corpse_dmg)
+		# Bullet stops on corpse — same as hitting a wall. Explosive rounds
+		# still detonate below.
+		if weapon_stats.explosive_radius > 0.0:
+			shooter_node.call("_spawn_bullet_blast", hit_pos, weapon_stats.explosive_radius, weapon_stats.bullet_color)
+			if multiplayer.is_server():
+				var splash_pos: Vector3 = hit_pos + normal * 0.1
+				shooter_node.call("_apply_bullet_splash", splash_pos, weapon_stats.explosive_radius, weapon_stats.explosive_damage, shooter_id)
+		queue_free()
+		return
+
 	var hit_player: Node3D = shooter_node.call("_player_from_hit_collider", collider)
 
 	if hit_player and hit_player.get("ghost_mode") == true:

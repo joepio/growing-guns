@@ -15,7 +15,8 @@
       "Bash(git mv *)",
       "Bash(/Applications/Godot.app/Contents/MacOS/Godot --headless --check-only --script scripts/procedural_gun.gd --quit)",
       "Bash(/Applications/Godot.app/Contents/MacOS/Godot --headless --check-only --quit)",
-      "Bash(/Applications/Godot.app/Contents/MacOS/Godot --headless --check-only)"
+      "Bash(/Applications/Godot.app/Contents/MacOS/Godot --headless --check-only)",
+      "Bash(/Applications/Godot.app/Contents/MacOS/Godot --headless --quit-after 2)"
     ]
   }
 }
