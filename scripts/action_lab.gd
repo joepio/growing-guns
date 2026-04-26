@@ -194,31 +194,10 @@ func _build_ui() -> void:
 	title.add_theme_color_override("font_color", Color(1, 0.95, 0.6))
 	vb.add_child(title)
 
-	var knobs := [
-		["shot self dB",          "shot_self_db",          -40.0,  6.0],
-		["shot world dB",         "shot_world_db",         -30.0, 12.0],
-		["shot dmg / doubling",   "shot_dmg_per_double_db", 0.0,  18.0],
-		["shot pitch / doubling", "shot_pitch_per_double",  0.0,   0.6],
-		["explosion bang dB",     "explosion_bang_db",     -10.0, 24.0],
-		["explosion rumble dB",   "explosion_rumble_db",   -10.0, 24.0],
-		["footstep dB",           "footstep_db",           -50.0,-10.0],
-		["jump dB",               "jump_db",               -30.0,  6.0],
-		["landing max dB",        "landing_max_db",        -10.0, 18.0],
-		["hurt SELF dB",          "hurt_self_db",          -50.0,  0.0],
-		["hurt world dB",         "hurt_world_db",         -40.0,  6.0],
-		["death SELF dB",         "death_self_db",         -50.0,  0.0],
-		["death world dB",        "death_world_db",        -40.0,  6.0],
-		["hit_received dB",       "hit_received_db",       -40.0,  6.0],
-		["bullet zip CLOSE dB",   "bullet_zip_close_db",   -50.0,  0.0],
-		["bullet zip FAR dB",     "bullet_zip_far_db",     -60.0,-10.0],
-		["bullet zip base Hz",    "bullet_zip_base_hz",    200.0,5000.0],
-		["bullet zip speed Hz",   "bullet_zip_speed_hz",     0.0,3000.0],
-		["shot wet send dB",      "shot_wet_db",           -40.0,  6.0],
-		["shot rumble dB",        "shot_rumble_db",        -40.0,  6.0],
-		["unit_size (m)",         "unit_size",               1.0, 40.0],
-	]
-	for k in knobs:
-		_add_slider(vb, k[0], k[1], k[2], k[3])
+	# Slider list is shared with the F2 AudioSettingsPanel — single source of
+	# truth in AudioSettingsPanel.KNOBS.
+	for k in AudioSettingsPanel.KNOBS:
+		AudioSettingsPanel.add_sfx_slider(vb, k[0], k[1], k[2], k[3], 160.0)
 
 	var hb := HBoxContainer.new()
 	vb.add_child(hb)
@@ -243,32 +222,8 @@ func _build_ui() -> void:
 	solo_row.add_child(solo_lbl)
 	var solo_opt := OptionButton.new()
 	solo_opt.focus_mode = Control.FOCUS_NONE
-	# Each entry maps to the prefix matched against debug_label in sfx.gd.
-	# "" silences nothing. Anything else mutes everything that doesn't start
-	# with that prefix (so "explosion" catches both bang and rumble, etc.).
-	var solo_choices := [
-		["All sounds",   ""],
-		["shot",          "shot"],
-		["explosion",     "explosion"],
-		["footstep",      "footstep"],
-		["jump",          "jump"],
-		["landing",       "landing"],
-		["dash",          "dash"],
-		["hurt",          "hurt"],
-		["death",         "death"],
-		["hit_received",  "hit_received"],
-		["hitmarker",     "hitmarker"],
-		["bullet_zip",    "bullet_zip"],
-		["grenade_launch","grenade_launch"],
-		["melee",         "melee"],
-		["card_flip",     "card_flip"],
-		["reload",        "reload"],
-	]
-	for i in solo_choices.size():
-		solo_opt.add_item(solo_choices[i][0], i)
-	solo_opt.selected = 0
-	solo_opt.item_selected.connect(func(idx: int) -> void:
-		SFX.solo_kind = solo_choices[idx][1])
+	# Solo list is shared with the F2 AudioSettingsPanel.
+	AudioSettingsPanel.populate_solo_dropdown(solo_opt)
 	solo_row.add_child(solo_opt)
 
 func _toggle_firefight() -> void:
@@ -285,44 +240,3 @@ func _reroll_all_cards() -> void:
 		if b.has_method("reset_weapon"):
 			b.call("reset_weapon")
 		_apply_random_cards(b)
-
-func _add_slider(vb: VBoxContainer, label_text: String, prop: String, lo: float, hi: float) -> void:
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 8)
-	var lbl := Label.new()
-	lbl.text = label_text
-	lbl.custom_minimum_size = Vector2(160, 0)
-	lbl.add_theme_font_size_override("font_size", 12)
-	row.add_child(lbl)
-	# Snapshot the initial (game) value so the reset button can restore it.
-	var initial: float = float(SFX.get(prop))
-	var slider := HSlider.new()
-	slider.min_value = lo
-	slider.max_value = hi
-	# Auto step: ~200 increments across the slider's range. Fine knobs
-	# (e.g. 0..0.6) get 0.003 steps; coarse dB knobs get 0.1 steps.
-	slider.step = maxf((hi - lo) / 200.0, 0.001)
-	slider.value = initial
-	slider.custom_minimum_size = Vector2(140, 18)
-	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	row.add_child(slider)
-	var val_lbl := Label.new()
-	val_lbl.text = "%+.1f" % slider.value
-	val_lbl.custom_minimum_size = Vector2(40, 0)
-	val_lbl.add_theme_font_size_override("font_size", 12)
-	row.add_child(val_lbl)
-	var reset_btn := Button.new()
-	reset_btn.text = "↺"
-	reset_btn.tooltip_text = "Reset to game value (%.2f)" % initial
-	reset_btn.focus_mode = Control.FOCUS_NONE
-	reset_btn.custom_minimum_size = Vector2(22, 18)
-	reset_btn.add_theme_font_size_override("font_size", 12)
-	reset_btn.visible = false
-	reset_btn.pressed.connect(func() -> void:
-		slider.value = initial)
-	row.add_child(reset_btn)
-	slider.value_changed.connect(func(v: float) -> void:
-		SFX.set(prop, v)
-		val_lbl.text = "%+.1f" % v
-		reset_btn.visible = not is_equal_approx(v, initial))
-	vb.add_child(row)

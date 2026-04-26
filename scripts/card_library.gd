@@ -185,6 +185,7 @@ static func all() -> Array:
 						w.full_auto = true
 						w.fire_rate_mult *= 3.0
 						w.mag_size_bonus += 20
+						w.damage_mult *= 0.7
 						w.spread += deg_to_rad(2.5)
 						w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.55, 0.15), 0.5),
 		},		{

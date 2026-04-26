@@ -48,6 +48,17 @@ extends Node3D
 @export var has_stock: bool = true : set = _set_has_stock
 @export var has_foregrip: bool = true : set = _set_has_foregrip
 
+@export_group("Heat")
+# Barrels glow when fired a lot. add_heat() pumps in per-shot heat (Player
+# scales it by damage_mult); we decay exponentially each frame and map the
+# resulting 0..1+ value through a blackbody-like emission curve.
+@export var heat_glow_threshold: float = 0.15      # below this, barrel stays cold (subtle floor)
+@export var heat_decay_per_sec: float = 0.3        # exponential decay rate
+@export var heat_max_emission_energy: float = 6.0  # emission_energy_multiplier at heat=1
+@export var heat_emits_light: bool = true          # OmniLight at muzzle, runtime only
+@export var heat_add_factor: float = 0.01           # The amount of heat added per shot (depends on damage)
+const RECEIVER_HEAT_FRACTION := 0.1  # receiver glows at 40% of barrel intensity
+
 @export_group("Indicator (Emissive)")
 @export var indicator_color: Color = Color(0.4, 1.0, 0.95) : set = _set_indicator_color
 @export var indicator_size: Vector3 = Vector3(0.012, 0.012, 0.05) : set = _set_indicator_size
@@ -142,9 +153,74 @@ func _apply_preview() -> void:
 
 var _suppress_rebuild: bool = false
 
+# --- Heat state ---
+# Barrel material is rebuilt with the rest of the gun, but heat persists
+# across rebuilds so swapping cards mid-spam doesn't cool the gun instantly.
+var heat: float = 0.0
+var _barrel_material: StandardMaterial3D = null
+var _receiver_material: StandardMaterial3D = null
+var _heat_light: OmniLight3D = null
+
 func _ready() -> void:
 	_rebuild()
 	_request_preview()
+
+func _process(delta: float) -> void:
+	if Engine.is_editor_hint():
+		return
+	if heat <= 0.0:
+		return
+	# Exponential decay — feels snappier than linear and matches how a hot
+	# object actually radiates away energy.
+	heat *= exp(-heat_decay_per_sec * delta)
+	if heat < 0.001:
+		heat = 0.0
+	_update_heat_visual()
+
+# Called by Player on every shot. amount is typically a small base value
+# scaled by damage_mult so heavy-hitting builds heat up faster.
+func add_heat(amount: float) -> void:
+	amount *= heat_add_factor
+	if amount <= 0.0:
+		return
+	heat = clampf(heat + amount, 0.0, 1.5)
+	_update_heat_visual()
+
+func _update_heat_visual() -> void:
+	if _barrel_material == null:
+		return
+	# Below the threshold, barrel reads as cold steel (no emission). Above it,
+	# colour walks from dull red → bright red → orange → yellow-white,
+	# roughly tracking how heated iron actually looks.
+	var glow_t: float = clampf(smoothstep(heat_glow_threshold, 1.0, heat), 0.0, 1.0)
+	if glow_t <= 0.0:
+		_barrel_material.emission_enabled = false
+		_barrel_material.emission_energy_multiplier = 0.0
+		if _receiver_material:
+			_receiver_material.emission_enabled = false
+			_receiver_material.emission_energy_multiplier = 0.0
+		if _heat_light:
+			_heat_light.visible = false
+		return
+	var r: float = 1.0
+	var g: float = lerpf(0.0, 0.7, pow(glow_t, 1.4))
+	var b: float = lerpf(0.0, 0.3, pow(glow_t, 3.0))
+	var emission := Color(r, g, b)
+	var barrel_energy: float = lerpf(0.0, heat_max_emission_energy, glow_t)
+	_barrel_material.emission_enabled = true
+	_barrel_material.emission = emission
+	_barrel_material.emission_energy_multiplier = barrel_energy
+	# Receiver heats up too (it's bolted to the barrel) but only partially —
+	# the chamber/breech area is hot while the grip end stays cool. Mid-body
+	# emissive at 40% sells the conduction without overpowering the barrel.
+	if _receiver_material:
+		_receiver_material.emission_enabled = true
+		_receiver_material.emission = emission
+		_receiver_material.emission_energy_multiplier = barrel_energy * RECEIVER_HEAT_FRACTION
+	if _heat_light:
+		_heat_light.visible = true
+		_heat_light.light_color = emission
+		_heat_light.light_energy = lerpf(0.0, 1.2, glow_t)
 
 # Map a Weapon's gameplay stats onto the gun's visual parameters. Bulk-set
 # everything inside _suppress_rebuild so we only rebuild meshes once.
@@ -215,6 +291,12 @@ func _rebuild() -> void:
 
 	var metal := _make_material(receiver_color, receiver_metallic, receiver_roughness)
 	var darker_metal := _make_material(receiver_color * 0.6, 0.95, 0.22)
+	# Barrels + muzzles get their own material so heat-driven emission
+	# doesn't bleed onto the stock / sights that share darker_metal.
+	_barrel_material = _make_material(receiver_color * 0.6, 0.95, 0.22)
+	# Receiver tracks barrel heat at a reduced fraction (see _update_heat_visual).
+	# `metal` is only used by the Receiver mesh, so we can mutate it freely.
+	_receiver_material = metal
 
 	# Multi-barrel layout: barrels spread horizontally with a small gap. The
 	# receiver widens to wrap them all so it doesn't look detached.
@@ -238,13 +320,13 @@ func _rebuild() -> void:
 	var muzzle_r: float = barrel_radius * muzzle_flare
 	for i in n_barrels:
 		var bx: float = (float(i) - float(n_barrels - 1) * 0.5) * barrel_pitch
-		_add_cylinder("Barrel%d" % i, barrel_radius, barrel_radius, barrel_length, Vector3(bx, 0, barrel_centre_z), darker_metal)
+		_add_cylinder("Barrel%d" % i, barrel_radius, barrel_radius, barrel_length, Vector3(bx, 0, barrel_centre_z), _barrel_material)
 		if wide_muzzle:
 			# Havoc-style: a wide horizontal slab in place of the cone muzzle.
 			var slab_size := Vector3(barrel_radius * 4.5, barrel_radius * 1.6, muzzle_length)
-			_add_box("Muzzle%d" % i, slab_size, Vector3(bx, 0, muzzle_centre_z), darker_metal)
+			_add_box("Muzzle%d" % i, slab_size, Vector3(bx, 0, muzzle_centre_z), _barrel_material)
 		else:
-			_add_cylinder("Muzzle%d" % i, muzzle_r, muzzle_r * 0.85, muzzle_length, Vector3(bx, 0, muzzle_centre_z), darker_metal)
+			_add_cylinder("Muzzle%d" % i, muzzle_r, muzzle_r * 0.85, muzzle_length, Vector3(bx, 0, muzzle_centre_z), _barrel_material)
 
 	# Magazine — box (default) or drum (Tommy-gun style cylinder, axis along X)
 	# when mag_drum is on.
@@ -360,6 +442,22 @@ func _rebuild() -> void:
 		light.position = Vector3(ind_x + 0.04, 0, 0)
 		add_child(light)
 		_finalize_owner(light)
+
+	# Heat light — sits at the muzzle, off until heat builds. Skip in editor
+	# so the OmniLight gizmo doesn't clutter the gun preview.
+	_heat_light = null
+	if heat_emits_light and not Engine.is_editor_hint():
+		var hl := OmniLight3D.new()
+		hl.name = "HeatLight"
+		hl.position = Vector3(0, 0, muzzle_centre_z)
+		hl.omni_range = 0.8
+		hl.visible = false
+		add_child(hl)
+		_heat_light = hl
+
+	# Re-apply current heat to the freshly-built barrel material so swapping
+	# weapons mid-burst doesn't visually reset the temperature.
+	_update_heat_visual()
 
 # ---- Helpers ----
 func _make_material(col: Color, metallic: float, roughness: float) -> StandardMaterial3D:

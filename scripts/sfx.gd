@@ -26,6 +26,9 @@ const NO_POS := Vector3.INF
 const EXPLOSION_VARIANTS := 5
 # Same idea for gun shots — uzi-rate fire stays varied per pull.
 const SHOT_VARIANTS := 5
+# Bullet-on-surface ticks. Cached per [damage_bucket, variant]; full-auto
+# fire ends up cycling through 5 distinct samples per damage class.
+const IMPACT_VARIANTS := 5
 # m/s — used to delay 3D sound playback by distance/SPEED_OF_SOUND so far
 # explosions arrive late, like real physics.
 const SPEED_OF_SOUND := 343.0
@@ -52,6 +55,10 @@ var hurt_world_db: float = -20.5
 var death_self_db: float = -24.0
 var death_world_db: float = -18.5
 var hit_received_db: float = -12.0
+# Bullet-on-surface tick. Heavier rounds add a low thump on top, so this
+# baseline level governs the lightest "plink" — the synth scales the body
+# upward with damage internally.
+var impact_db: float = -16.0
 var bullet_zip_close_db: float = -12.0
 var bullet_zip_far_db: float = -32.0
 # Bullet-zip pitch knobs. nominal = base + speed_coef * speed_factor (Hz).
@@ -584,6 +591,24 @@ func bullet_zip(speed: float, scale: float, at: Vector3) -> void:
 		var send_db: float = vol_db + lerpf(-30.0, -2.0, speed_norm)
 		_big_tail_intensity = maxf(_big_tail_intensity, lerpf(0.3, 1.0, speed_norm))
 		_spawn_big_tail_send(_samples_to_wav(samples), send_db, at, 1.0, "bullet_zip")
+
+# Bullet hitting world geometry — small click for tiny rounds, fatter thump
+# the bigger the bullet. Cached per damage bucket × variant so a full-auto
+# stream rotates through 5 distinct samples.
+func impact(at: Vector3 = NO_POS, dmg_ratio: float = 1.0) -> void:
+	var dmg_clamped: float = clampf(dmg_ratio, 0.5, 6.0)
+	var dmg_bucket: int = int(round(dmg_clamped * 4.0))  # 0.25 increments
+	var variant: int = randi() % IMPACT_VARIANTS
+	var key := "impact:%d:%d" % [dmg_bucket, variant]
+	var samples := _cached_samples(key, Callable(self, "_synth_impact").bind(dmg_clamped, variant))
+	# Damage-driven loudness: small rounds stay clicky, big rounds boom on
+	# the surface. Scaling matches the synth's internal body gain.
+	var dmg_db: float = clampf(log(maxf(1.0, dmg_clamped)) / log(2.0) * 4.0, 0.0, 9.0)
+	# Real bullet impact SPL ~85-100 dB depending on caliber. Scaled with
+	# damage so heavy rounds duck more of the mix. dry=true, big_tail=false:
+	# crisp tick that doesn't smear through reverb.
+	var spl: float = 90.0 + dmg_db
+	_play(samples, impact_db + dmg_db, at, "impact", 8.0, true, spl, false)
 
 func explosion(at: Vector3 = NO_POS, radius: float = 6.0) -> void:
 	# Layered: punchy transient bang + a deep brown-noise rumble that
@@ -1227,6 +1252,48 @@ func _synth_bullet_zip(speed_factor: float, scale_factor: float) -> PackedVector
 		var bp: float = lp_hi - lp_lo
 		var s: float = bp * env * 0.55 * scale_factor
 		s = tanh(s * drive)
+		out[i] = Vector2(s, s)
+	return out
+
+# Bullet-on-surface tick. Two layers: a high-passed noise click for the snap
+# and a low-frequency sine thump that scales with damage. Per-variant RNG
+# seeding gives 5 distinct samples per damage bucket, all stable across calls.
+func _synth_impact(dmg_ratio: float, variant: int) -> PackedVector2Array:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash([dmg_ratio, variant, "impact"])
+	# Click pitch jitters per variant — feels random without recomputing.
+	var click_freq: float = lerpf(2200.0, 4500.0, rng.randf())
+	var click_decay: float = lerpf(180.0, 320.0, rng.randf())
+	# Body thump only emerges above base damage. f0 starts mid-low and sweeps
+	# down — like a tiny kick drum. dmg_norm is 0 at base damage, 1 at 5×.
+	var dmg_norm: float = clampf((dmg_ratio - 1.0) / 4.0, 0.0, 1.0)
+	var thump_f0: float = lerpf(160.0, 260.0, rng.randf())
+	var thump_f1: float = lerpf(45.0, 80.0, rng.randf()) * lerpf(1.0, 0.7, dmg_norm)
+	var thump_sweep: float = lerpf(60.0, 100.0, rng.randf())
+	var thump_decay: float = lerpf(28.0, 42.0, rng.randf())
+	var thump_gain: float = lerpf(0.0, 0.65, dmg_norm)
+	# Heavier rounds tick longer (more body). Range 30 ms (light) to 80 ms (5×).
+	var dur: float = lerpf(0.030, 0.080, dmg_norm) * lerpf(0.92, 1.10, rng.randf())
+	var n: int = int(dur * MIX_RATE)
+	var out := PackedVector2Array()
+	out.resize(n)
+	# 1-pole highpass for the click — keeps it crisp by subtracting a slow
+	# moving lowpass average from the noise.
+	var lp_acc: float = 0.0
+	var thump_phase: float = 0.0
+	for i in range(n):
+		var t: float = float(i) / MIX_RATE
+		var noise: float = rng.randf_range(-1.0, 1.0)
+		# Highpass click: noise minus its own slow average. Cutoff scales with
+		# click_freq so different variants sit at different brightnesses.
+		var hp_k: float = clampf(click_freq * (TAU * 0.4) / MIX_RATE, 0.05, 0.6)
+		lp_acc = lerpf(lp_acc, noise, hp_k)
+		var click: float = (noise - lp_acc) * exp(-t * click_decay)
+		# Swept-sine thump for damage body — fades to nothing for base damage.
+		var thump_freq: float = thump_f1 + (thump_f0 - thump_f1) * exp(-t * thump_sweep)
+		thump_phase += TAU * thump_freq / float(MIX_RATE)
+		var thump: float = sin(thump_phase) * exp(-t * thump_decay) * thump_gain
+		var s: float = tanh((click + thump) * 1.4)
 		out[i] = Vector2(s, s)
 	return out
 

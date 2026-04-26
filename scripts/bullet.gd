@@ -210,6 +210,7 @@ func _handle_collision(result: Dictionary) -> void:
 		shooter_node.call("_spawn_blood", hit_pos, direction, dmg_ratio)
 	else:
 		shooter_node.call("_spawn_impact", hit_pos, weapon_stats.bullet_color, weapon_stats.bullet_scale, dmg_ratio)
+		SFX.impact(hit_pos, dmg_ratio)
 
 	if weapon_stats.explosive_radius > 0.0:
 		shooter_node.call("_spawn_bullet_blast", hit_pos, weapon_stats.explosive_radius, weapon_stats.bullet_color)
