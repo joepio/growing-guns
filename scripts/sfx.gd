@@ -188,8 +188,11 @@ func _ensure_master_chain() -> void:
 	# above the ceiling despite the compressor.
 	var lim := AudioEffectLimiter.new()
 	lim.ceiling_db = -0.3
-	lim.threshold_db = -1.0
-	lim.soft_clip_db = 4.0
+	# Catch peaks earlier and brick-wall harder. soft_clip_db is the knee
+	# softness: HIGHER = gentler / more pass-through (counter-intuitive).
+	# 1.0 gives near-brick-wall behaviour so stacked overshoots don't escape.
+	lim.threshold_db = -3.0
+	lim.soft_clip_db = 1.0
 	AudioServer.add_bus_effect(master_idx, lim)
 	_ensure_big_tail_bus()
 	_tame_raytraced_reverb()
@@ -252,7 +255,11 @@ func _listener_position() -> Vector3:
 
 func _configure_3d_player(p: AudioStreamPlayer3D) -> void:
 	p.unit_size = unit_size
-	p.max_db = 24.0
+	# Close-range cap — was 24 dB, which let close stacked rumbles overshoot
+	# the master comp+limiter chain into hard clipping. 18 dB still allows a
+	# modest close-range boost above the loudest source vol_db (~+19 max for
+	# big-damage shots) without saturating the chain.
+	p.max_db = 18.0
 	p.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
 	# Distance-based air absorption — distant sounds lose treble, like reality.
 	# Cutoff = 8 kHz, max -12 dB at far range; subtle but audible.
