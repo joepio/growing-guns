@@ -64,7 +64,7 @@ extends Node3D
 # Spent shell casings ejected from the top-right of the receiver on each
 # shot. Free-falling RigidBody3D's that despawn after a few seconds.
 @export var casing_radius_frac: float = 0.7   # fraction of barrel_radius
-@export var casing_length_frac: float = 0.6   # fraction of receiver length
+@export var casing_length_frac: float = 0.4   # fraction of receiver length
 @export var casing_lifetime: float = 3.0      # seconds before despawn
 @export var casing_eject_speed: float = 2.8   # base m/s (jittered ±30%)
 @export var casing_color: Color = Color(0.85, 0.65, 0.25)  # brass
@@ -237,6 +237,9 @@ func eject_casing() -> void:
 	# world geometry only (not players, not other casings, not bullets).
 	rb.collision_layer = 0
 	rb.collision_mask = 1
+	# contact_monitor lets us hear body_entered for the metallic ping sound.
+	rb.contact_monitor = true
+	rb.max_contacts_reported = 4
 	var pmat := PhysicsMaterial.new()
 	pmat.bounce = 0.35
 	pmat.friction = 0.6
@@ -291,6 +294,32 @@ func eject_casing() -> void:
 		randf_range(-12.0, 12.0),
 		randf_range(-12.0, 12.0),
 		randf_range(-12.0, 12.0),
+	)
+
+	# Metallic ping on every ground contact, throttled per-casing so a single
+	# bounce doesn't trigger a flurry of pings from multiple contact points.
+	# Volume scales with the casing's current speed so the initial fall is
+	# loud and subsequent bounces taper off naturally as energy drains.
+	# Pitch jitter is small — variation reads as the same shell hitting the
+	# same surface, not as different objects.
+	rb.set_meta("last_ping", -1.0)
+	var ref_speed: float = casing_eject_speed
+	# Bigger casings ring lower. barrel_radius=0.022 is the default; cards
+	# that fatten the barrel produce heavier rounds and lower-pitched pings.
+	# Exponent 0.7 ≈ an octave drop per ~2.7× size change. Clamped so the
+	# extremes don't sound like a sub-bass thud or a chipmunk ping.
+	var size_pitch: float = clampf(pow(0.022 / maxf(0.001, barrel_radius), 0.7), 0.55, 1.4)
+	rb.body_entered.connect(func(_other: Node) -> void:
+		var now: float = Time.get_ticks_msec() / 1000.0
+		if now - float(rb.get_meta("last_ping")) < 0.06:
+			return
+		rb.set_meta("last_ping", now)
+		# Speed is the post-impact value here — still a good proxy because
+		# bouncier hits retain more energy. Map [low, ref] → [-22, +2] dB.
+		var speed: float = rb.linear_velocity.length()
+		var loudness: float = clampf(speed / ref_speed, 0.05, 1.2)
+		var vol_db: float = lerpf(-22.0, 2.0, loudness)
+		SFX.casing_drop(rb.global_position, size_pitch * randf_range(0.96, 1.04), vol_db)
 	)
 
 	# Auto-despawn — keeps the world from filling with casings during a

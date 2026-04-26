@@ -29,6 +29,7 @@ const SHOT_VARIANTS := 5
 # Bullet-on-surface ticks. Cached per [damage_bucket, variant]; full-auto
 # fire ends up cycling through 5 distinct samples per damage class.
 const IMPACT_VARIANTS := 5
+const CASING_VARIANTS := 8
 # m/s — used to delay 3D sound playback by distance/SPEED_OF_SOUND so far
 # explosions arrive late, like real physics.
 const SPEED_OF_SOUND := 343.0
@@ -59,6 +60,9 @@ var hit_received_db: float = -12.0
 # baseline level governs the lightest "plink" — the synth scales the body
 # upward with damage internally.
 var impact_db: float = -16.0
+# Brass shell hitting a hard surface. Quiet but bright — short ping that
+# cuts through without ducking anything important.
+var casing_db: float = -18.0
 var bullet_zip_close_db: float = -12.0
 var bullet_zip_far_db: float = -32.0
 # Bullet-zip pitch knobs. nominal = base + speed_coef * speed_factor (Hz).
@@ -609,6 +613,18 @@ func impact(at: Vector3 = NO_POS, dmg_ratio: float = 1.0) -> void:
 	# crisp tick that doesn't smear through reverb.
 	var spl: float = 90.0 + dmg_db
 	_play(samples, impact_db + dmg_db, at, "impact", 8.0, true, spl, false)
+
+func casing_drop(at: Vector3 = NO_POS, pitch_scale: float = 1.0, volume_offset_db: float = 0.0) -> void:
+	# Brass shell ping — short, bright, metallic. Pitch jitter per call gives
+	# a pile of casings the variety it needs even with a small variant pool.
+	# volume_offset_db lets the caller scale loudness with impact momentum
+	# so the first hard hit is loud and subsequent bounces are softer.
+	var variant: int = randi() % CASING_VARIANTS
+	var key := "casing_drop:%d" % variant
+	var samples := _cached_samples(key, Callable(self, "_synth_casing_drop").bind(variant))
+	var stream := _samples_to_wav(samples)
+	# ~75 dB SPL — quiet but cuts cleanly through ambient mix. Dry, no big tail.
+	_play_stream(stream, casing_db + volume_offset_db, at, pitch_scale, "casing", 6.0, true, 75.0, false)
 
 func explosion(at: Vector3 = NO_POS, radius: float = 6.0) -> void:
 	# Layered: punchy transient bang + a deep brown-noise rumble that
@@ -1294,6 +1310,37 @@ func _synth_impact(dmg_ratio: float, variant: int) -> PackedVector2Array:
 		thump_phase += TAU * thump_freq / float(MIX_RATE)
 		var thump: float = sin(thump_phase) * exp(-t * thump_decay) * thump_gain
 		var s: float = tanh((click + thump) * 1.4)
+		out[i] = Vector2(s, s)
+	return out
+
+func _synth_casing_drop(variant: int) -> PackedVector2Array:
+	# Brass shell on hard surface. Two sines:
+	#   • Lower (~2 kHz), fast decay — the "body" of the impact
+	#   • Higher (~10 kHz), slow decay — the metallic "ring" tail
+	# Starting both at phase 0 produces a sample-instant attack which is
+	# already as sharp as a click without needing a separate noise burst.
+	# Variant ranges are tight so the pool sounds like one shell on one
+	# surface; per-call pitch_scale in casing_drop() supplies micro-variation.
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash([variant, "casing"])
+	var dur: float = 0.18
+	var n: int = int(dur * MIX_RATE)
+	var out := PackedVector2Array()
+	out.resize(n)
+	var f_low: float = lerpf(1900.0, 2150.0, rng.randf())
+	var f_high: float = lerpf(9600.0, 10500.0, rng.randf())
+	# Decay rates in 1/sec. f_low fades in ~30 ms; f_high rings for ~120 ms.
+	var d_low: float = lerpf(95.0, 115.0, rng.randf())
+	var d_high: float = lerpf(24.0, 32.0, rng.randf())
+	var phase_low: float = 0.0
+	var phase_high: float = 0.0
+	for i in range(n):
+		var t: float = float(i) / MIX_RATE
+		phase_low += TAU * f_low / MIX_RATE
+		phase_high += TAU * f_high / MIX_RATE
+		var p_low: float = sin(phase_low) * exp(-t * d_low) * 0.45
+		var p_high: float = sin(phase_high) * exp(-t * d_high) * 0.55
+		var s: float = tanh((p_low + p_high) * 1.1)
 		out[i] = Vector2(s, s)
 	return out
 
