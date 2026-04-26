@@ -38,8 +38,8 @@ var _step_sounds: Array[AudioStream] = []
 var _card_pick_sound: AudioStreamWAV = null
 
 # Tunable mix knobs — adjust live via scenes/audio_lab.tscn.
-var shot_self_db: float = 4.0
-var shot_world_db: float = 9.0
+var shot_self_db: float = -10.0
+var shot_world_db: float = 5.0
 var shot_dmg_per_double_db: float = 6.0
 var shot_pitch_per_double: float = 0.20  # 0..1; pitch drop per damage doubling
 var explosion_bang_db: float = 12.0
@@ -80,7 +80,7 @@ var _hdr_max_spl: float = HDR_FLOOR_DB
 # grenade explosion holds the bus open long enough for the rumble tail to
 # actually build. During calm the bus is all-but-muted; during heavy fire
 # (or just after a single loud event) the hall is open.
-var big_tail_send_db: float = -12.0  # per-source send level into the bus
+var big_tail_send_db: float = -24.0  # per-source send level into the bus
 var big_tail_min_db: float = -50.0   # bus output during silence
 var big_tail_max_db: float = -10.0   # bus output at peak intensity (~165 SPL)
 # Intensity ramps to 1.0 on a peak event (165+ SPL), decays back to 0 over
@@ -801,51 +801,79 @@ func _synth_empty_chamber() -> PackedVector2Array:
 	return out
 
 func _synth_explosion(radius: float, variant: int) -> PackedVector2Array:
-	# Layered: saturated broadband click at t=0 (the "bang"), sub-bass thump,
-	# lowpass-swept noise tail. Per-variant RNG seeding + parameter jitter
-	# gives 5 distinct sample characters per radius bucket.
+	# Same layered architecture as `_synth_shot` (thick, saturated, percussive)
+	# but scaled to explosion proportions: longer duration, lower kick body,
+	# slower envelope. Layers: thwack + LP-swept noise tail + kick drum +
+	# lowpassed sub-noise rumble; final tanh wrap drives everything into
+	# global saturation.
 	var rng := RandomNumberGenerator.new()
 	rng.seed = hash([radius, variant, "bang"])
-	var lp_start: float = lerpf(0.40, 0.60, rng.randf())
-	var lp_end: float = lerpf(0.012, 0.04, rng.randf())
-	# Noise-wash decay 14-24 → ~40-70 ms (was 5-9 → 110-200 ms). The bass
-	# body carries the explosion's weight from here on — the noise wash is
-	# just the moment-of-impact crackle.
-	var noise_decay: float = lerpf(14.0, 24.0, rng.randf())
-	# Lowpass coefficients for thwack/click — keeps the transient thumpy
-	# rather than hissy (white noise has flat treble). 0.10 ≈ 700 Hz, 0.20 ≈ 1.4 kHz.
-	var thwack_cutoff_k: float = lerpf(0.10, 0.16, rng.randf())
-	var click_cutoff_k: float = lerpf(0.18, 0.28, rng.randf())
-	# Sub-bass cutoff — heavily lowpass'd noise instead of a cosine. Range
-	# k ≈ 0.005-0.009 = ~35-65 Hz cutoff, the "boom" / rumble band.
-	var sub_cutoff_k: float = lerpf(0.005, 0.009, rng.randf())
-	var sub_decay: float = lerpf(2.8, 4.2, rng.randf())
-	var dur: float = clampf(0.4 + radius * 0.08, 0.4, 1.6)
+
+	# Per-variant param jitter.
+	var bright_jit: float = lerpf(0.85, 1.15, rng.randf())
+	var thwack_decay: float = lerpf(180.0, 280.0, rng.randf())
+	var thwack_drive: float = lerpf(4.0, 8.0, rng.randf())
+	var dur_jit: float = lerpf(0.92, 1.10, rng.randf())
+
+	# Kick drum parameters — same shape as gun's kick but f1 clamped higher
+	# (50 Hz min) so big blasts thump in the audible range, not sub-plonk.
+	# Body decays in 30-50 ms — pure attack, no sustain.
+	var r_norm: float = clampf(radius / 6.0, 0.3, 4.0)
+	var kick_f0: float = 220.0 * lerpf(0.85, 1.15, rng.randf())
+	var kick_f1: float = clampf(60.0 / sqrt(r_norm), 50.0, 95.0) * lerpf(0.92, 1.10, rng.randf())
+	var kick_sweep_rate: float = lerpf(70.0, 95.0, rng.randf())
+	var kick_decay: float = clampf(40.0 / sqrt(r_norm), 18.0, 45.0)
+	var kick_gain: float = lerpf(0.7, 1.05, clampf((r_norm - 1.0) / 3.0, 0.0, 1.0))
+
+	# Sub-bass rumble: heavily lowpassed noise (~35-65 Hz) for inharmonic
+	# body. Bigger blasts get lower cutoffs and slower decay → fatter rumble.
+	var sub_cutoff_k: float = lerpf(0.005, 0.010, rng.randf())
+	var sub_decay: float = clampf(3.5 / sqrt(r_norm), 1.2, 4.0)
+
+	# Duration scales with radius — bigger = longer body.
+	var dur: float = clampf((0.4 + radius * 0.08) * dur_jit, 0.4, 1.6)
 	var n := int(dur * MIX_RATE)
 	var out := PackedVector2Array()
 	out.resize(n)
+
+	var thwack_cutoff_k: float = lerpf(0.10, 0.16, rng.randf())
+	var noise_brightness: float = clampf(0.45 * bright_jit, 0.05, 0.95)
+	# Noise-tail decay 8-15 → ~70-125 ms. Without this the LP-swept noise
+	# rides the full envelope (up to 1.6 s) and reads as a long hiss sweep.
+	var noise_decay: float = lerpf(8.0, 15.0, rng.randf())
+
 	var lp := 0.0
 	var thwack_lp := 0.0
 	var sub_lp := 0.0
+	var kick_phase: float = 0.0
+	var kick_lp: float = 0.0
 	for i in range(n):
 		var t := float(i) / MIX_RATE
-		# Exp tail (-30 dB at ~1.4s), gentle convex shaping over the window.
-		var env := exp(-t * 2.2) * pow(1.0 - t / dur, 0.4)
+		# Slower decay than gun (gun = pow(1-t/dur, 1.6) only). Explosion adds
+		# an exp tail on top so the body sustains longer before the convex
+		# fadeout takes over.
+		var env := exp(-t * 1.4) * pow(1.0 - t / dur, 0.6)
 		var noise := rng.randf_range(-1.0, 1.0)
-		# Sharp impulse — the actual "crack" at t=0. Decays in ~4 ms.
-		# Lowpassed so it's a thumpy "boom", not a hissy "tap".
-		thwack_lp = lerpf(thwack_lp, rng.randf_range(-1.0, 1.0), thwack_cutoff_k)
-		var thwack := thwack_lp * 2.5 * exp(-t * 250.0)
-		# (The "click" is now a separate distance-driven bandpass synth — see
-		# `_synth_distance_click` and the explosion() public function. Air
-		# absorption shifts its peak frequency with distance.)
-		var cutoff_k := lerpf(lp_start, lp_end, sqrt(t / dur))
-		lp = lerpf(lp, noise, cutoff_k)
-		var noise_env := exp(-t * noise_decay)
-		# Sub-bass: heavily lowpassed noise (~40-65 Hz) instead of a cosine.
+		# WIDE distorted transient — broadband impulse, sub-bass roll-off,
+		# tanh-saturated for harmonic crack.
+		var raw_thwack := rng.randf_range(-1.0, 1.0)
+		thwack_lp = lerpf(thwack_lp, raw_thwack, thwack_cutoff_k)
+		var thwack := tanh(thwack_lp * thwack_drive) * 1.5 * exp(-t * thwack_decay)
+		# Lowpass-swept noise tail with its own fast envelope so it dies
+		# in ~80-125 ms instead of riding the full bang.
+		lp = lerpf(lp, noise, noise_brightness)
+		var lp_env: float = exp(-t * noise_decay)
+		# Kick: phase-accumulated swept sine, lowpassed.
+		var kick_freq: float = kick_f1 + (kick_f0 - kick_f1) * exp(-t * kick_sweep_rate)
+		kick_phase += 2.0 * PI * kick_freq / float(MIX_RATE)
+		kick_lp = lerpf(kick_lp, sin(kick_phase), 0.30)
+		var kick: float = kick_lp * exp(-t * kick_decay)
+		# Sub-bass rumble (inharmonic, fills out the body after the kick dies).
 		sub_lp = lerpf(sub_lp, rng.randf_range(-1.0, 1.0), sub_cutoff_k)
-		var sub := sub_lp * 3.5 * exp(-t * sub_decay)
-		var s := (thwack + lp * 0.30 * noise_env + sub * 0.85) * env * 0.9
+		var sub: float = sub_lp * 3.5 * exp(-t * sub_decay)
+		# Final mix wrapped in tanh — same trick as shot. Drives the layered
+		# sum into saturation for a thick, dense character.
+		var s := tanh((thwack + lp * 0.5 * lp_env + kick * kick_gain + sub * 0.7) * env * 1.4)
 		out[i] = Vector2(s, s)
 	return out
 
@@ -861,9 +889,10 @@ func _synth_distance_click(bucket: int, variant: int) -> PackedVector2Array:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = hash([b, variant, "ex_click"])
 	var freq: float = EX_CLICK_FREQS[b] * lerpf(0.85, 1.15, rng.randf())
-	# State-variable filter (Chamberlin) coefficients. q_factor low = high Q.
+	# State-variable filter (Chamberlin) coefficients. Lower q_factor = higher
+	# Q, sharper ring. 0.06 is very sharp.
 	var f_coef: float = 2.0 * sin(PI * freq / float(MIX_RATE))
-	var q_factor: float = 0.10
+	var q_factor: float = 0.06
 	var dur: float = 0.045
 	var n: int = int(dur * MIX_RATE)
 	var out := PackedVector2Array()
@@ -872,14 +901,15 @@ func _synth_distance_click(bucket: int, variant: int) -> PackedVector2Array:
 	var bp_s: float = 0.0
 	for i in range(n):
 		var t: float = float(i) / MIX_RATE
-		# Brief noise impulse (~3 ms) excites the resonator.
-		var noise: float = rng.randf_range(-1.0, 1.0) * exp(-t * 380.0)
+		# Sharper noise impulse (~2 ms) excites the resonator harder.
+		var noise: float = rng.randf_range(-1.0, 1.0) * exp(-t * 480.0)
 		var hp: float = noise - lp_s - q_factor * bp_s
 		bp_s += f_coef * hp
 		lp_s += f_coef * bp_s
-		# Tanh-saturate the resonator output for harmonic distortion → "pop"
-		# character instead of a clean ringing tone.
-		var s: float = tanh(bp_s * 6.0) * 0.7 * exp(-t * 65.0)
+		# Heavy tanh saturation (drive 14 vs 6) — much more harmonic content,
+		# distorted "pop" / "rip" character instead of a smooth ring. Output
+		# gain bumped to 1.1 (was 0.7) for more presence.
+		var s: float = tanh(bp_s * 14.0) * 1.1 * exp(-t * 80.0)
 		out[i] = Vector2(s, s)
 	return out
 
