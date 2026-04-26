@@ -1,6 +1,7 @@
 extends Node3D
 
 const PLAYER_SCENE := preload("res://scenes/player.tscn")
+const HUD_ICON_SCRIPT := preload("res://scripts/hud_icon.gd")
 
 enum State { WAITING, PLAYING, PICKING_CARD, MATCH_OVER }
 
@@ -106,8 +107,10 @@ var _flash_alpha_target: float = 0.0
 
 var _dash_segments: Array[ProgressBar] = []
 var _dash_text_hbox: Control = null
+var _last_input_was_controller := false
 
 func _ready() -> void:
+	_install_controller_input_map()
 	# F2 brings up the live audio-tuning panel — same sliders as action_lab.
 	add_child(AudioSettingsPanel.new())
 
@@ -120,8 +123,6 @@ func _ready() -> void:
 	if grenade_bar: grenade_bar.visible = false
 
 	# 1. Setup Rifle & Grenade overlays
-	var icon_script := load("res://scripts/hud_icon.gd")
-
 	for info in [
 		{"cont": $HUD/AbilityBar/Rifle, "bar": rifle_bar, "lbl": rifle_label, "type": 1, "color": Color(1, 0.9, 0.5)}, # LMB
 		{"cont": $HUD/AbilityBar/Grenade, "bar": grenade_bar, "lbl": grenade_label, "type": 2, "color": Color(0.7, 1, 0.4)} # RMB
@@ -151,8 +152,8 @@ func _ready() -> void:
 
 		# Create icon
 		var icon := Control.new()
-		icon.custom_minimum_size = Vector2(20, 20)
-		icon.set_script(icon_script)
+		icon.custom_minimum_size = Vector2(38, 20)
+		icon.set_script(HUD_ICON_SCRIPT)
 		icon.set("icon_type", info.type)
 		icon.set("icon_color", info.color)
 		hbox.add_child(icon)
@@ -192,19 +193,10 @@ func _ready() -> void:
 
 	var d_icon := Control.new()
 	d_icon.custom_minimum_size = Vector2(46, 20) # Wider for SHIFT
-	d_icon.set_script(icon_script)
+	d_icon.set_script(HUD_ICON_SCRIPT)
 	d_icon.set("icon_type", 0) # SHIFT
 	d_icon.set("icon_color", Color(0.6, 0.9, 1.0))
 	_dash_text_hbox.add_child(d_icon)
-
-	# Add the text inside the icon wrapper for Shift
-	var shift_text := Label.new()
-	shift_text.text = "SHIFT"
-	shift_text.add_theme_font_size_override("font_size", 10)
-	shift_text.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	shift_text.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	shift_text.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	d_icon.add_child(shift_text)
 
 	dash_lbl.text = "DASH"
 	_dash_text_hbox.add_child(dash_lbl)
@@ -257,7 +249,6 @@ func _ready() -> void:
 		var requested_count: int = int(NetworkManager.get_meta("bot_count_on_start", 1)) if bot_requested else 0
 		if bot_requested:
 			_spawn_bots(requested_count)
-
 		_maybe_start_match()
 
 		# SP fallback: if nobody else has joined yet, and no bot was specifically requested,
@@ -273,6 +264,55 @@ func _ready() -> void:
 		_client_request_spawn_when_ready()
 
 	_update_scoreboard()
+
+func _track_input_device(event: InputEvent) -> void:
+	var controller_input := event is InputEventJoypadButton or event is InputEventJoypadMotion
+	var keyboard_mouse_input := event is InputEventKey or event is InputEventMouseButton or event is InputEventMouseMotion
+	if controller_input:
+		if event is InputEventJoypadMotion and absf(event.axis_value) < 0.18:
+			return
+		_set_controller_hud_icons(true)
+	elif keyboard_mouse_input:
+		if event is InputEventMouseMotion and event.relative.length_squared() < 0.01:
+			return
+		_set_controller_hud_icons(false)
+
+func _set_controller_hud_icons(enabled: bool) -> void:
+	if _last_input_was_controller == enabled:
+		return
+	_last_input_was_controller = enabled
+	HUD_ICON_SCRIPT.use_controller_icons = enabled
+	get_tree().call_group("hud_input_icons", "_refresh_input_device")
+
+func _install_controller_input_map() -> void:
+	_add_joy_axis_action("move_left", JOY_AXIS_LEFT_X, -1.0)
+	_add_joy_axis_action("move_right", JOY_AXIS_LEFT_X, 1.0)
+	_add_joy_axis_action("move_forward", JOY_AXIS_LEFT_Y, -1.0)
+	_add_joy_axis_action("move_back", JOY_AXIS_LEFT_Y, 1.0)
+	_add_joy_axis_action("shoot", JOY_AXIS_TRIGGER_RIGHT, 1.0)
+	_add_joy_button_action("shoot_grenade", JOY_BUTTON_RIGHT_SHOULDER)
+	_add_joy_button_action("shoot_grenade", JOY_BUTTON_B)
+	_add_joy_button_action("jump", JOY_BUTTON_LEFT_SHOULDER)
+	_add_joy_button_action("jump", JOY_BUTTON_A)
+	_add_joy_button_action("reload", JOY_BUTTON_X)
+	_add_joy_button_action("dash", JOY_BUTTON_LEFT_STICK)
+
+func _add_joy_button_action(action: StringName, button_index: int) -> void:
+	if not InputMap.has_action(action):
+		return
+	var event := InputEventJoypadButton.new()
+	event.button_index = button_index
+	if not InputMap.action_has_event(action, event):
+		InputMap.action_add_event(action, event)
+
+func _add_joy_axis_action(action: StringName, axis: int, axis_value: float) -> void:
+	if not InputMap.has_action(action):
+		return
+	var event := InputEventJoypadMotion.new()
+	event.axis = axis
+	event.axis_value = axis_value
+	if not InputMap.action_has_event(action, event):
+		InputMap.action_add_event(action, event)
 
 func _client_request_spawn_when_ready() -> void:
 	# The scene change happens before `connected_to_server` fires, so the
@@ -323,6 +363,8 @@ func _process(delta: float) -> void:
 	# before _process polling can see it, so we intercept it earlier.
 
 func _input(event: InputEvent) -> void:
+	_track_input_device(event)
+
 	# Tab hold = scoreboard overlay. Use _input (not _unhandled_input) so we
 	# beat the viewport's GUI focus navigation, which would otherwise consume
 	# Tab and prevent our polling from ever seeing it.
