@@ -2166,6 +2166,28 @@ func _refresh_dev_panel() -> void:
 		call_deferred("_refresh_dev_panel"))
 	_dev_player_picker()
 	var target: Node = _dev_target_player()
+	# Cards first — rare ones (uzi, bazooka, etc.) at the top so they're easy
+	# to spam-add for testing. Common cards follow.
+	_dev_heading("— CARDS —", Color(1.0, 0.6, 0.9), 15)
+	if target and is_instance_valid(target):
+		var applied: Array = target.weapon.applied_cards
+		var counts := {}
+		for cid in applied:
+			counts[cid] = counts.get(cid, 0) + 1
+		var sorted_cards: Array = CardLibrary.all().duplicate()
+		sorted_cards.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+			# rare (0) before common (1); stable name order within each.
+			var ra: int = 0 if str(a.get("rarity", "common")) == "rare" else 1
+			var rb: int = 0 if str(b.get("rarity", "common")) == "rare" else 1
+			if ra != rb:
+				return ra < rb
+			return str(a.get("name", "")) < str(b.get("name", "")))
+		for card in sorted_cards:
+			_dev_card_row(card, counts.get(card.id, 0))
+	else:
+		_dev_note("(target player not spawned)")
+	# Stats moved to the bottom — useful for verifying card effects but the
+	# cards themselves are the primary action surface.
 	_dev_heading("— WEAPON STATS —", Color(1.0, 0.9, 0.5), 15)
 	if target and is_instance_valid(target):
 		var w: Weapon = target.weapon
@@ -2182,17 +2204,6 @@ func _refresh_dev_panel() -> void:
 		_dev_stat("explosive radius / dmg", "%.1fm  /  %.1f" % [w.explosive_radius, w.explosive_damage])
 		_dev_stat("bullet scale", "%.2f" % w.bullet_scale)
 		_dev_stat("bullet color", "#%s" % w.bullet_color.to_html(false))
-	else:
-		_dev_note("(target player not spawned)")
-	_dev_heading("— CARDS —", Color(1.0, 0.6, 0.9), 15)
-	if target and is_instance_valid(target):
-		var applied: Array = target.weapon.applied_cards
-		var counts := {}
-		for cid in applied:
-			counts[cid] = counts.get(cid, 0) + 1
-
-		for card in CardLibrary.all():
-			_dev_card_row(card, counts.get(card.id, 0))
 	else:
 		_dev_note("(target player not spawned)")
 

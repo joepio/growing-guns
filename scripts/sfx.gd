@@ -52,8 +52,12 @@ var hurt_world_db: float = -20.5
 var death_self_db: float = -24.0
 var death_world_db: float = -18.5
 var hit_received_db: float = -12.0
-var bullet_zip_close_db: float = -28.0
-var bullet_zip_far_db: float = -50.0
+var bullet_zip_close_db: float = -12.0
+var bullet_zip_far_db: float = -32.0
+# Bullet-zip pitch knobs. nominal = base + speed_coef * speed_factor (Hz).
+# speed_factor itself is bullet_speed / 165 m/s, clamped 0.2..5.0.
+var bullet_zip_base_hz: float = 2400.0
+var bullet_zip_speed_hz: float = 1300.0
 # Subsonic rumble layered under big-damage shots — same piping as the
 # explosion bang+rumble pair. Default -12 dB so it sits under the gun bang.
 var shot_rumble_db: float = -12.0
@@ -276,7 +280,7 @@ func _configure_3d_player(p: AudioStreamPlayer3D) -> void:
 	# The plugin sets `bus` to RaytracedReverb itself on _enter_tree.
 
 func _log_sfx(label: String, vol_db: float, at: Vector3) -> void:
-	if label == "":
+	if label == "" or label.begins_with("_"):
 		return
 	if at == NO_POS:
 		print("[SFX] %s vol=%+.1fdB (2D)" % [label, vol_db])
@@ -304,7 +308,7 @@ func _samples_to_wav(samples: PackedVector2Array) -> AudioStreamWAV:
 	wav.data = data
 	return wav
 
-func _play(samples: PackedVector2Array, volume_db: float = -6.0, at: Vector3 = NO_POS, debug_label: String = "", attenuation_dist: float = -1.0, dry: bool = false, priority_db_spl: float = 80.0) -> Node:
+func _play(samples: PackedVector2Array, volume_db: float = -6.0, at: Vector3 = NO_POS, debug_label: String = "", attenuation_dist: float = -1.0, dry: bool = false, priority_db_spl: float = 80.0, big_tail: bool = true) -> Node:
 	if _solo_blocks(debug_label):
 		return null
 	if _hdr_blocks(priority_db_spl, debug_label):
@@ -315,11 +319,16 @@ func _play(samples: PackedVector2Array, volume_db: float = -6.0, at: Vector3 = N
 	# Empty label avoids a second log line via _play_stream's own logger.
 	# The empty label also skips the HDR gate inside _play_stream — already
 	# admitted here, don't double-count.
-	return _play_stream(_samples_to_wav(samples), volume_db, at, 1.0, "", attenuation_dist, dry, priority_db_spl)
+	return _play_stream(_samples_to_wav(samples), volume_db, at, 1.0, "", attenuation_dist, dry, priority_db_spl, big_tail)
 
 # Empty `label` is treated as a forwarded inner call (already gated upstream).
+# Leading `_` means "wet companion" — silent in the log but still solo-gated by
+# the rest (e.g. "_shot" matches a "shot" solo).
 func _solo_blocks(label: String) -> bool:
-	return solo_kind != "" and label != "" and not label.begins_with(solo_kind)
+	if solo_kind == "" or label == "":
+		return false
+	var key: String = label.substr(1) if label.begins_with("_") else label
+	return not key.begins_with(solo_kind)
 
 # `attenuation_dist`: per-call unit_size for 3D sounds. <= 0 means use the
 # global SFX.unit_size. Sounds that should "carry" (explosions) pass a much
@@ -328,7 +337,7 @@ func _solo_blocks(label: String) -> bool:
 # filter, no reverb). Use for sharp transients that should hit clean.
 # `priority_db_spl`: real-world SPL approximation for HDR gating. See
 # _hdr_blocks() — sounds below `max_spl - HDR_WINDOW_DB` are culled.
-func _play_stream(stream: AudioStream, volume_db: float = -6.0, at: Vector3 = NO_POS, pitch_scale: float = 1.0, debug_label: String = "", attenuation_dist: float = -1.0, dry: bool = false, priority_db_spl: float = 80.0) -> Node:
+func _play_stream(stream: AudioStream, volume_db: float = -6.0, at: Vector3 = NO_POS, pitch_scale: float = 1.0, debug_label: String = "", attenuation_dist: float = -1.0, dry: bool = false, priority_db_spl: float = 80.0, big_tail: bool = true) -> Node:
 	if _solo_blocks(debug_label):
 		return null
 	if _hdr_blocks(priority_db_spl, debug_label):
@@ -336,11 +345,11 @@ func _play_stream(stream: AudioStream, volume_db: float = -6.0, at: Vector3 = NO
 	_log_sfx(debug_label, volume_db, at)
 	if stream == null:
 		return null
-	# All 3D sounds send a copy to the BigTailReverb bus. The bus's output
-	# volume is driven by `_big_tail_intensity` in _process — and we lift
-	# that intensity HERE (synchronously, before the speed-of-sound delay)
-	# so the bus is already open by the time the sound and its tail land.
-	if at != NO_POS:
+	# All 3D sounds (unless `big_tail=false`) send a copy to the BigTailReverb
+	# bus. Bus output volume is driven by `_big_tail_intensity` in _process —
+	# and we lift that intensity HERE (synchronously, before the speed-of-sound
+	# delay) so the bus is already open by the time the sound and tail land.
+	if at != NO_POS and big_tail:
 		var contribution: float = clampf((priority_db_spl - HDR_FLOOR_DB) / 100.0, 0.0, 1.0)
 		_big_tail_intensity = maxf(_big_tail_intensity, contribution)
 	if at == NO_POS:
@@ -362,17 +371,21 @@ func _play_stream(stream: AudioStream, volume_db: float = -6.0, at: Vector3 = NO
 		delay = listener_pos.distance_to(at) / SPEED_OF_SOUND
 	if delay < 0.01:
 		var p2 := _spawn_3d_player(stream, volume_db, at, pitch_scale, attenuation_dist, dry)
-		_spawn_big_tail_send(stream, volume_db + big_tail_send_db, at, pitch_scale)
+		if big_tail:
+			_spawn_big_tail_send(stream, volume_db + big_tail_send_db, at, pitch_scale, debug_label)
 		return p2
 	get_tree().create_timer(delay).timeout.connect(func() -> void:
 		_spawn_3d_player(stream, volume_db, at, pitch_scale, attenuation_dist, dry)
-		_spawn_big_tail_send(stream, volume_db + big_tail_send_db, at, pitch_scale))
+		if big_tail:
+			_spawn_big_tail_send(stream, volume_db + big_tail_send_db, at, pitch_scale, debug_label))
 	return null
 
 # Spawns a quieter copy of a stream that plays into the BigTailReverb bus,
 # producing the long-tail hall sound for loud events. The player auto-frees
 # after the stream finishes; the bus continues to render the reverb tail.
-func _spawn_big_tail_send(stream: AudioStream, volume_db: float, at: Vector3, pitch_scale: float) -> void:
+func _spawn_big_tail_send(stream: AudioStream, volume_db: float, at: Vector3, pitch_scale: float, debug_label: String = "") -> void:
+	if _solo_blocks(debug_label):
+		return
 	if at == NO_POS:
 		var p := AudioStreamPlayer.new()
 		p.stream = stream
@@ -481,15 +494,17 @@ func shot(w: Weapon = null, at: Vector3 = NO_POS, is_self: bool = false) -> void
 	# bigger guns push the HDR window higher, ducking weaker sounds harder.
 	var dmg_log: float = 0.0 if w == null else log(maxf(1.0, w.get_damage() / Weapon.BASE_DAMAGE)) / log(2.0)
 	var spl: float = 148.0 + dmg_log * 6.0
+	# Wet companion uses "_<label>" — silent in the log, still solo-gated.
+	var wet_label := "_" + label
 	if not _gun_sounds.is_empty():
 		var stream: AudioStream = _gun_sounds.pick_random()
 		_play_stream(stream, dry_vol, at, pitch, label, shot_dist, true, spl)
-		_play_stream(stream, wet_vol, at, pitch, "", shot_dist, false, spl)
+		_play_stream(stream, wet_vol, at, pitch, wet_label, shot_dist, false, spl)
 	else:
 		var key := _shot_cache_key(w, shot_variant)
 		var samples := _cached_samples(key, Callable(self, "_synth_shot").bind(w, shot_variant))
 		_play(samples, dry_vol, at, label, shot_dist, true, spl)
-		_play(samples, wet_vol, at, "", shot_dist, false, spl)
+		_play(samples, wet_vol, at, wet_label, shot_dist, false, spl)
 	# Rumble layer — only for hard-hitting weapons (>1.4× base damage). Reuses
 	# the explosion rumble synth + cache (same brown-noise body) but at a much
 	# lower dB so it sits under the bang. Snipers, bazookas, etc. get a real
@@ -524,21 +539,42 @@ func bullet_zip(speed: float, scale: float, at: Vector3) -> void:
 	if listener == NO_POS:
 		return
 	var dist_sq: float = listener.distance_squared_to(at)
-	# Quick reject: anything beyond ~6 m wouldn't be heard as a near-miss.
-	if dist_sq > 36.0:
+	# Quick reject: well outside the audible bubble.
+	if dist_sq > 144.0:  # 12 m
 		return
 	var speed_factor: float = clampf(speed / 165.0, 0.2, 5.0)
 	var scale_factor: float = clampf(scale, 0.5, 4.0)
-	# Range-driven volume: close pass = audible whip; just inside the bubble
-	# = barely there. Stay well below gunshot level.
+	# Range-driven volume: gentle sqrt falloff so a 5 m miss isn't dramatically
+	# quieter than a 1 m miss — keeps the perceived "lots of bullets around me"
+	# wash instead of every shot being a punchy near-miss or inaudible.
 	var dist: float = sqrt(dist_sq)
-	var prox: float = clampf(1.0 - dist / 6.0, 0.0, 1.0)  # 1 at 0 m, 0 at 6 m
-	var vol_db: float = lerpf(bullet_zip_far_db, bullet_zip_close_db, prox)
+	var prox: float = clampf(1.0 - dist / 12.0, 0.0, 1.0)
+	prox = sqrt(prox)
+	var dist_db: float = lerpf(bullet_zip_far_db, bullet_zip_close_db, prox)
+	# Speed-driven boost: slow grenades (sf≈0.2) sit ~14 dB below sniper rounds
+	# (sf=4) so a faster bullet feels meaningfully more violent passing by, not
+	# just slightly different. Hypersonic (sf=5) tops out a few dB louder again.
+	var speed_norm: float = clampf((speed_factor - 0.2) / 4.8, 0.0, 1.0)
+	var speed_db: float = lerpf(-10.0, 6.0, speed_norm)
+	var vol_db: float = dist_db + speed_db
 	var samples := _synth_bullet_zip(speed_factor, scale_factor)
-	# Bullet zips are deliberately low priority — should be culled when a
-	# gunshot (148+ SPL) fires within HDR_WINDOW_DB. Real near-miss zips
-	# read ~95 dB.
-	_play(samples, vol_db, at, "bullet_zip", -1.0, false, 95.0)
+	# Real near-miss zips read ~95 dB; supersonic rounds peak well above 130 dB
+	# from the ballistic crack alone. Scale priority high enough that the
+	# sniper zip survives HDR culling next to its own ~157 dB gunshot
+	# (cull threshold = max_spl - HDR_WINDOW_DB ≈ 122).
+	var spl: float = lerpf(95.0, 135.0, speed_norm)
+	# Dry primary — clean transient, no tail smear.
+	_play(samples, vol_db, at, "bullet_zip", -1.0, true, spl, false)
+	# Manual reverb companion at a much hotter level than the default
+	# big_tail_send_db (-24): supersonic zips need a noticeable hangar tail.
+	# Send level scales with speed (slow grenades stay dry, fast rounds get
+	# a wide spatial impression). Also push intensity so the bus opens up
+	# even when no other loud event has primed it.
+	if speed_norm > 0.0:
+		var send_db: float = vol_db + lerpf(-30.0, -2.0, speed_norm)
+		_big_tail_intensity = maxf(_big_tail_intensity, lerpf(0.3, 1.0, speed_norm))
+		_spawn_big_tail_send(_samples_to_wav(samples), send_db, at, 1.0, "bullet_zip")
+
 func explosion(at: Vector3 = NO_POS, radius: float = 6.0) -> void:
 	# Layered: punchy transient bang + a deep brown-noise rumble that
 	# decays longer for larger blasts. The rumble samples are bucketed
@@ -569,7 +605,7 @@ func explosion(at: Vector3 = NO_POS, radius: float = 6.0) -> void:
 	# bang bypasses the reverb bus entirely and the explosion sounds tail-less.
 	var bang_samples := _cached_samples(bang_key, Callable(self, "_synth_explosion").bind(float(r_bucket), variant))
 	_play(bang_samples, explosion_bang_db, at, "explosion_bang", bang_dist, true, ex_spl)
-	_play(bang_samples, explosion_bang_db + explosion_wet_db, at, "", bang_dist, false, ex_spl)
+	_play(bang_samples, explosion_bang_db + explosion_wet_db, at, "_explosion_bang", bang_dist, false, ex_spl)
 	var rumble_key := "explosion_rumble:%d:%d" % [r_bucket, variant]
 	_play(_cached_samples(rumble_key, Callable(self, "_synth_explosion_rumble").bind(float(r_bucket), variant)), explosion_rumble_db, at, "explosion_rumble", rumble_dist, false, ex_spl)
 	# (The distance-bucketed bandpass click was removed — its high-Q resonator
@@ -698,6 +734,7 @@ func _synth_shot(w: Weapon, variant: int) -> PackedVector2Array:
 	var thwack_decay: float = lerpf(180.0, 280.0, rng.randf()) * sqrt(velocity)
 	var thwack_drive: float = lerpf(4.0, 8.0, rng.randf()) * lerpf(0.9, 1.3, clampf((velocity - 1.0) / 2.0, 0.0, 1.0))
 	var dur_jit: float = lerpf(0.90, 1.12, rng.randf())
+
 	# Kick-drum bass: sine with rapid pitch sweep from f0 (click pitch) down
 	# to f1 (body pitch) over ~12 ms. f1 scales with damage so big guns thump
 	# lower. f0 stays in the click range regardless. Lowpassed to smooth the
@@ -730,6 +767,15 @@ func _synth_shot(w: Weapon, variant: int) -> PackedVector2Array:
 	var thwack_low_acc := 0.0
 	var kick_phase: float = 0.0
 	var kick_lp: float = 0.0
+	# Damage-scaled high-pass on the final mix — low-damage rifles were
+	# coming out muddy because the kick + thwack body sat too low for their
+	# energy. Curve drops fast: base rifles get cleared up to ~220 Hz,
+	# bazooka-class weapons (dmg>4) keep nearly the full subharmonic since
+	# cutoff drops below the kick fundamental. Implemented as 1-pole IIR
+	# lowpass subtracted from the sample.
+	var hp_cutoff: float = clampf(220.0 / pow(dmg_ratio, 1.4), 25.0, 220.0)
+	var hp_k: float = clampf(TAU * hp_cutoff / MIX_RATE, 0.005, 0.5)
+	var bass_acc: float = 0.0
 	for i in range(n):
 		var t := float(i) / MIX_RATE
 		var env := pow(clampf(1.0 - t / dur, 0.0, 1.0), 1.6)
@@ -755,6 +801,9 @@ func _synth_shot(w: Weapon, variant: int) -> PackedVector2Array:
 		var lp_env: float = exp(-t * noise_decay)
 		var click := sin(2.0 * PI * click_freq * t) * exp(-t * 280.0) * click_gain
 		var s := tanh((thwack + lp * 0.5 * lp_env + kick * kick_gain + click) * env * 1.4)
+		# Damage-scaled high-pass: subtract the slow-moving bass average.
+		bass_acc = lerpf(bass_acc, s, hp_k)
+		s -= bass_acc
 		out[i] = Vector2(s, s)
 	return out
 
@@ -959,29 +1008,28 @@ func _synth_explosion_rumble(radius: float, variant: int) -> PackedVector2Array:
 	var lp_k: float = clampf(TAU * cutoff / MIX_RATE, 0.005, 0.4)
 	var brown: float = 0.0
 	var lp: float = 0.0
-	# Variant jitter: attack and decay rate vary subtly per variant.
+	# Variant jitter on attack + ease curve.
 	var attack_dur: float = lerpf(0.05, 0.12, rng.randf())
-	var decay_rate: float = lerpf(1.5, 2.2, rng.randf())
-	# Long, smoothstepped release so the rumble eases off subtly instead of
-	# tapering to silence over 0.4 s (which sounded like an abrupt cut at the
-	# tail-end). 1.2 s release with an S-curve = gradual fade-out.
-	var release_dur: float = minf(1.2, dur * 0.45)
+	# Power-law ease-out across the whole tail. Higher = faster initial drop,
+	# longer near-silent fade. ~2.6 gives the perceptual feel of "loud, then
+	# softens continuously toward silence" without a plateau in the middle.
+	var ease_power: float = lerpf(2.4, 3.0, rng.randf())
 	# Per-sample gain. Bazooka-class blasts (large radius) have a longer +
 	# deeper rumble whose total acoustic energy would otherwise drown the
 	# bang. sqrt(6/radius) keeps small blasts at full level (radius=6 -> 1.5)
 	# and trims big ones (radius=24 -> ~0.75).
 	var gain: float = 1.5 * sqrt(6.0 / maxf(6.0, radius))
+	var body_dur: float = maxf(dur - attack_dur, 0.0001)
 	for i in range(n):
 		var t: float = float(i) / MIX_RATE
 		var attack: float = clampf(t / attack_dur, 0.0, 1.0)
-		# Slower decay than 3.0/dur so the body of each rumble persists
-		# longer; stacked rumbles overlap into a sustained roar.
-		var decay: float = exp(-t * (decay_rate / dur))
-		# Smoothstep for the release so the rolloff is gentle at both ends
-		# (no audible "knee" at the start of the fade or at the end).
-		var release_lin: float = clampf((dur - t) / release_dur, 0.0, 1.0)
-		var release: float = release_lin * release_lin * (3.0 - 2.0 * release_lin)
-		var env: float = attack * decay * release
+		# Single monotone ease-out from 1.0 (right after the attack) down to
+		# 0.0 at t = dur. Replaces the previous exp(-decay) * smoothstep_release
+		# combo, which plateaued around 15 % of peak before finally fading and
+		# read as "loud → middle → middle → silent".
+		var decay_phase: float = clampf((t - attack_dur) / body_dur, 0.0, 1.0)
+		var decay: float = pow(1.0 - decay_phase, ease_power)
+		var env: float = attack * decay
 		# Brown noise: integrated white noise with a tiny leak so it can't
 		# drift into DC offset territory.
 		brown = brown * 0.998 + rng.randf_range(-1.0, 1.0) * 0.03
@@ -1111,37 +1159,63 @@ func _reload_tap(out: PackedVector2Array, start_time: float, pitch_ratio: float,
 
 func _synth_bullet_zip(speed_factor: float, scale_factor: float) -> PackedVector2Array:
 	# Per-call jitter so consecutive zips never sound identical.
-	var pitch_jit: float = randf_range(0.90, 1.10)
+	var pitch_jit: float = randf_range(0.92, 1.08)
 	var dur_jit: float = randf_range(0.85, 1.18)
-	var bright_jit: float = randf_range(0.80, 1.20)
-	# Base pitch — bright, snappy whip. Bazooka ~2.2 kHz; base ~4.8 kHz;
-	# hitscan ~8 kHz tick.
-	var base_high: float = clampf(3500.0 + 1500.0 * speed_factor, 2800.0, 8000.0) * pitch_jit
-	# Doppler sweep: pitch slides from high (incoming) to low (receding).
-	# Slower bullets get more pronounced drop; fast ones are too brief to drag.
-	var doppler_drop: float = lerpf(0.55, 0.85, clampf(speed_factor / 4.0, 0.0, 1.0))
-	var base_low: float = base_high * doppler_drop
-	# Faster bullets = shorter sound. Default ~80 ms, bazooka ~200 ms, hitscan ~50 ms.
-	var dur: float = clampf((0.06 + 0.06 / speed_factor) * dur_jit, 0.04, 0.22)
+	var bright_jit: float = randf_range(0.85, 1.15)
+	# Pitch = base + speed_coef * speed_factor, both tunable via the F2 panel.
+	# Capped at 6 kHz so it stays in the speaker sweet spot — going higher
+	# (8-12 kHz) ends up perceptually thin / inaudible on most listening setups.
+	var nominal: float = clampf(bullet_zip_base_hz + bullet_zip_speed_hz * speed_factor, 300.0, 6000.0) * pitch_jit
+	# Doppler ratio derived from real v/c (c≈343 m/s): approach freq is
+	# nominal*c/(c-v), recede is nominal*c/(c+v). Slow rounds get a mild glide;
+	# transonic rounds get a dramatic one; supersonic is capped so the formula
+	# doesn't explode. base_high capped at 7 kHz to keep the sweep audible.
+	var v_bullet: float = clampf(speed_factor * 165.0, 10.0, 280.0)
+	var c_sound: float = 343.0
+	var base_high: float = minf(nominal * c_sound / (c_sound - v_bullet), 7000.0)
+	var base_low: float = nominal * c_sound / (c_sound + v_bullet)
+	# Duration: slow grenade ~250 ms whoosh, default round ~120 ms, sniper
+	# ~80 ms (long enough for the doppler glide and tanh saturation to be
+	# perceptible — was 20 ms which read as a click).
+	var dur: float = clampf(0.06 + 0.06 / speed_factor, 0.07, 0.40) * dur_jit
 	var n: int = int(dur * MIX_RATE)
 	var out := PackedVector2Array()
 	out.resize(n)
-	var lp := 0.0
-	var hp := 0.0
+	# Attack fraction also shrinks with speed: slow whoosh swells in slowly
+	# (sin-like), hypersonic crack hits instantly with exp-decay tail.
+	var attack_frac: float = clampf(0.45 / speed_factor, 0.04, 0.5)
+	# Soft saturation that engages above ~Mach 0.9. Below sf=3, drive≈1 (clean
+	# tanh, near-linear). At sf=5 hypersonic, drive=3.5 — peaks soft-clip into a
+	# crackly ballistic edge. tanh is symmetric and has no harsh corners, so it
+	# adds harmonics without sounding like digital clipping.
+	var drive_amount: float = clampf((speed_factor - 3.0) / 2.0, 0.0, 1.0)
+	var drive: float = lerpf(1.0, 3.5, drive_amount)
+	var lp_hi := 0.0
+	var lp_lo := 0.0
 	for i in range(n):
 		var t := float(i) / MIX_RATE
-		var phase: float = t / dur
-		# Glide cubic-eased so the doppler curve feels natural.
-		var sweep_t: float = phase * phase * (3.0 - 2.0 * phase)
+		var phase: float = clampf(t / dur, 0.0, 1.0)
+		# Smootherstep sweep — flat on the ends, steep through the middle, so
+		# the fastest pitch slide lines up with the closest-pass moment.
+		var sweep_t: float = phase * phase * phase * (phase * (phase * 6.0 - 15.0) + 10.0)
 		var center: float = lerpf(base_high, base_low, sweep_t) * bright_jit
-		var lp_k: float = clampf(center * 4.0 / MIX_RATE, 0.02, 0.95)
-		var hp_k: float = clampf(center * 0.6 / MIX_RATE, 0.005, 0.5)
-		var env: float = sin(PI * clampf(phase, 0.0, 1.0))
-		var noise := randf_range(-1.0, 1.0)
-		lp = lerpf(lp, noise, lp_k)
-		hp = lerpf(hp, lp, hp_k)
-		var bp: float = lp - hp
-		var s: float = bp * env * 0.42 * scale_factor
+		# 2-octave bandpass with geometric center == `center`. The 1-pole IIR
+		# cutoff is f_c ≈ k * MIX_RATE / (2π), so multiplying by 2π puts the
+		# band edges in real Hz: lp_hi at 2×center, lp_lo at 0.5×center.
+		var lp_k: float = clampf(center * (TAU * 2.0) / MIX_RATE, 0.04, 0.98)
+		var hp_k: float = clampf(center * (TAU * 0.5) / MIX_RATE, 0.003, 0.6)
+		var env: float
+		if phase < attack_frac:
+			env = phase / attack_frac
+		else:
+			var d: float = (phase - attack_frac) / max(1.0 - attack_frac, 0.0001)
+			env = exp(-d * 4.0)
+		var noise: float = randf_range(-1.0, 1.0)
+		lp_hi = lerpf(lp_hi, noise, lp_k)
+		lp_lo = lerpf(lp_lo, lp_hi, hp_k)
+		var bp: float = lp_hi - lp_lo
+		var s: float = bp * env * 0.55 * scale_factor
+		s = tanh(s * drive)
 		out[i] = Vector2(s, s)
 	return out
 

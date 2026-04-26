@@ -16,7 +16,7 @@ var excluded_rids: Array[RID] = []
 
 # Bullet zip-by audio — triggers once when the bullet passes the closest
 # point to the local camera (within ZIP_RADIUS_SQ).
-const ZIP_RADIUS_SQ := 25.0  # 5 m
+const ZIP_RADIUS_SQ := 144.0  # 12 m — must match the gate in SFX.bullet_zip
 var _zipped: bool = false
 var _prev_listener_dist_sq: float = INF
 
@@ -136,8 +136,9 @@ func _physics_process(delta: float) -> void:
 		queue_free()
 
 # Detect when the bullet passes its closest point to the local camera and
-# play one zip sound. Cheap: square-distance compare per tick, early-exits
-# for bullets nowhere near the listener, and at most one sound per bullet.
+# play one zip sound. Predictive — extrapolates the bullet's straight-line
+# trajectory so fast rounds (supersonic bullets traverse the 12 m bubble in
+# under one physics tick) still trigger correctly. Fires once per bullet.
 func _maybe_zip_by() -> void:
 	if _zipped:
 		return
@@ -148,12 +149,37 @@ func _maybe_zip_by() -> void:
 	var cam: Camera3D = get_viewport().get_camera_3d() if is_inside_tree() else null
 	if cam == null:
 		return
-	var d_sq: float = cam.global_position.distance_squared_to(global_position)
-	# Trigger once distance starts increasing (we just passed the closest
-	# point) AND we're inside the audible bubble.
-	if d_sq < ZIP_RADIUS_SQ and d_sq > _prev_listener_dist_sq:
+	var to_cam: Vector3 = cam.global_position - global_position
+	var d_sq: float = to_cam.length_squared()
+	var v_speed: float = velocity.length()
+	if v_speed < 0.001:
+		_prev_listener_dist_sq = d_sq
+		return
+	# Predict the closest-pass distance along the bullet's straight-line
+	# trajectory. If the perpendicular distance is inside the bubble, the
+	# bullet WILL pass within audible range — even if it does so between two
+	# physics ticks (sniper rounds at 660 m/s move ~11 m per tick).
+	var v_norm: Vector3 = velocity / v_speed
+	var t_close: float = to_cam.dot(v_norm) / v_speed
+	var closest_pos: Vector3 = global_position + velocity * maxf(t_close, 0.0)
+	var closest_d_sq: float = cam.global_position.distance_squared_to(closest_pos)
+	# Trigger if either:
+	#   (a) we just passed the closest point this tick (slow bullets), OR
+	#   (b) the predicted closest-pass falls inside the bubble AND we entered
+	#       the bubble this tick (fast bullets — first-and-only chance).
+	var passed: bool = d_sq < ZIP_RADIUS_SQ and d_sq > _prev_listener_dist_sq
+	var entered_with_pending_pass: bool = (
+		closest_d_sq < ZIP_RADIUS_SQ
+		and _prev_listener_dist_sq > ZIP_RADIUS_SQ
+		and d_sq < _prev_listener_dist_sq
+	)
+	if passed or entered_with_pending_pass:
 		_zipped = true
-		SFX.bullet_zip(speed, weapon_stats.bullet_scale, global_position)
+		# Spatialise at the predicted closest-pass position so volume +
+		# panning reflect the bullet's nearest point to the listener, not
+		# whichever side of it we happen to sample on this tick.
+		var fire_pos: Vector3 = closest_pos
+		SFX.bullet_zip(speed, weapon_stats.bullet_scale, fire_pos)
 	_prev_listener_dist_sq = d_sq
 
 func _handle_collision(result: Dictionary) -> void:

@@ -1169,7 +1169,7 @@ func _spawn_muzzle_flash(color: Color = Color(1.0, 0.88, 0.45), scale_f: float =
 	mat.albedo_color = Color(color.r, color.g, color.b, 0.96)
 	mat.emission_enabled = true
 	mat.emission = color
-	mat.emission_energy_multiplier = 7.0 * scale_f
+	mat.emission_energy_multiplier = 4.0 * scale_f
 	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 
 	var cross_mesh := BoxMesh.new()
@@ -1200,8 +1200,8 @@ func _spawn_muzzle_flash(color: Color = Color(1.0, 0.88, 0.45), scale_f: float =
 	# budget is disabled; this is a tiny, short-lived light and sells the shot.
 	var light := OmniLight3D.new()
 	light.light_color = color.lerp(Color(1.0, 0.95, 0.82), 0.45)
-	light.light_energy = 5.0 * scale_f
-	light.omni_range = 7.0 * scale_f
+	light.light_energy = 2.5 * scale_f
+	light.omni_range = 4.5 * scale_f
 	light.position = Vector3(0.0, 0.0, -0.42)
 	flash_root.add_child(light)
 	tw.tween_property(light, "light_energy", 0.0, 0.07)
@@ -1211,8 +1211,8 @@ func _spawn_muzzle_flash(color: Color = Color(1.0, 0.88, 0.45), scale_f: float =
 	# itself catches a warm flash instead of staying flat during shots.
 	var gun_light := OmniLight3D.new()
 	gun_light.light_color = color.lerp(Color(1.0, 0.92, 0.8), 0.6)
-	gun_light.light_energy = 2.4 * scale_f
-	gun_light.omni_range = 2.2 * scale_f
+	gun_light.light_energy = 1.4 * scale_f
+	gun_light.omni_range = 1.7 * scale_f
 	gun_light.position = Vector3(0.0, 0.0, 0.06)
 	muzzle.add_child(gun_light)
 	tw.tween_property(gun_light, "light_energy", 0.0, 0.08)
