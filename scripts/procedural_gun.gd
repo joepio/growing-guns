@@ -60,6 +60,15 @@ extends Node3D
 @export var bolt_radius: float = 0.009
 @export var bolt_length: float = 0.04     # how far the knob sticks out sideways
 
+@export_group("Casings")
+# Spent shell casings ejected from the top-right of the receiver on each
+# shot. Free-falling RigidBody3D's that despawn after a few seconds.
+@export var casing_radius_frac: float = 0.7   # fraction of barrel_radius
+@export var casing_length_frac: float = 0.6   # fraction of receiver length
+@export var casing_lifetime: float = 3.0      # seconds before despawn
+@export var casing_eject_speed: float = 2.8   # base m/s (jittered ±30%)
+@export var casing_color: Color = Color(0.85, 0.65, 0.25)  # brass
+
 @export_group("Heat")
 # Barrels glow when fired a lot. add_heat() pumps in per-shot heat (Player
 # scales it by damage_mult); we decay exponentially each frame and map the
@@ -208,6 +217,90 @@ func _process(delta: float) -> void:
 		var z: float = _bolt_rest_z + _bolt_back
 		for b in _bolts:
 			b.position = Vector3(b.position.x, b.position.y, z)
+
+# Spawn a brass casing as a free-falling RigidBody3D in world space. Pops
+# out the top-right of the receiver with a randomised impulse and tumble.
+# Lives in current_scene so it persists when the gun moves with the player.
+func eject_casing() -> void:
+	if Engine.is_editor_hint():
+		return
+	var tree := get_tree()
+	if tree == null or tree.current_scene == null:
+		return
+
+	var c_radius: float = barrel_radius * casing_radius_frac
+	var c_length: float = receiver_size.z * casing_length_frac
+
+	var rb := RigidBody3D.new()
+	rb.mass = 0.02
+	# Layer 0 so casings don't block anything; mask 1 so they collide with
+	# world geometry only (not players, not other casings, not bullets).
+	rb.collision_layer = 0
+	rb.collision_mask = 1
+	var pmat := PhysicsMaterial.new()
+	pmat.bounce = 0.35
+	pmat.friction = 0.6
+	rb.physics_material_override = pmat
+
+	# Mesh — slight nose taper for shell look. Rotated so the cylinder's
+	# long axis lies along local Z (matches the rotated collision shape).
+	var mi := MeshInstance3D.new()
+	var cm := CylinderMesh.new()
+	cm.top_radius = c_radius * 0.85
+	cm.bottom_radius = c_radius
+	cm.height = c_length
+	cm.radial_segments = 10
+	mi.mesh = cm
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = casing_color
+	mat.metallic = 0.9
+	mat.roughness = 0.35
+	mi.material_override = mat
+	mi.rotation = Vector3(PI * 0.5, 0, 0)
+	rb.add_child(mi)
+
+	var cs := CollisionShape3D.new()
+	var shape := CylinderShape3D.new()
+	shape.radius = c_radius
+	shape.height = c_length
+	cs.shape = shape
+	cs.rotation = Vector3(PI * 0.5, 0, 0)
+	rb.add_child(cs)
+
+	# Spawn just outside the top-right corner of the receiver. global_transform
+	# is the gun's world transform (it's parented under the camera/muzzle),
+	# so this places the casing wherever the gun is being held.
+	var local_spawn := Vector3(receiver_size.x * 0.5 + c_radius * 1.5, receiver_size.y * 0.5 + c_radius, 0)
+	var spawn_pos: Vector3 = global_transform * local_spawn
+	# Inherit the gun's orientation so the casing starts aligned with the
+	# barrel before the random tumble takes over.
+	rb.transform = Transform3D(global_transform.basis, spawn_pos)
+	tree.current_scene.add_child(rb)
+
+	# Eject toward up + right in the gun's own frame, jittered. Speed is
+	# randomised ±30%, tumble axes are uniformly random.
+	var basis: Basis = global_transform.basis
+	var dir: Vector3 = (basis.y * 1.4 + basis.x * 1.0).normalized()
+	dir = (dir + Vector3(
+		randf_range(-0.25, 0.25),
+		randf_range(-0.15, 0.15),
+		randf_range(-0.25, 0.25),
+	)).normalized()
+	rb.linear_velocity = dir * casing_eject_speed * randf_range(0.7, 1.3)
+	rb.angular_velocity = Vector3(
+		randf_range(-12.0, 12.0),
+		randf_range(-12.0, 12.0),
+		randf_range(-12.0, 12.0),
+	)
+
+	# Auto-despawn — keeps the world from filling with casings during a
+	# heavy firefight.
+	var timer := Timer.new()
+	timer.wait_time = casing_lifetime
+	timer.one_shot = true
+	timer.autostart = true
+	timer.timeout.connect(rb.queue_free)
+	rb.add_child(timer)
 
 # Called by Player on every shot — slams the bolt to its rear stop. The
 # forward return happens in _process so rapid fire keeps it pinned back.
