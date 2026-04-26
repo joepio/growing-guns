@@ -938,6 +938,22 @@ func _spawn_bullet_blast(pos: Vector3, radius: float, color: Color) -> void:
 		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
 	ftw.tween_callback(flash.queue_free)
 
+	# Bright core glow — small range, longer duration than the scene flash.
+	# Reads as the white-hot fireball center hanging around as the blast
+	# evolves, distinct from the scene-wide initial spike.
+	var core_light := OmniLight3D.new()
+	core_light.light_color = color.lerp(Color(1.0, 0.95, 0.78), 0.7)
+	core_light.light_energy = 60.0 + radius * 8.0
+	core_light.omni_range = maxf(8.0, radius * 1.4)
+	core_light.position = pos
+	scene.add_child(core_light)
+	var ctlw := core_light.create_tween()
+	ctlw.tween_property(core_light, "light_color", color.lerp(Color(1.0, 0.55, 0.18), 0.5), 0.12)\
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	ctlw.parallel().tween_property(core_light, "light_energy", 0.0, 0.32)\
+		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+	ctlw.tween_callback(core_light.queue_free)
+
 	# 3) Explosion light — extremely bright at ignition, then it collapses fast.
 	var light := OmniLight3D.new()
 	var hot_color := color.lerp(Color(1.0, 0.98, 0.9), 0.72)

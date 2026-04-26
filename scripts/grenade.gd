@@ -234,6 +234,22 @@ func _do_vfx() -> void:
 		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
 	ftw.tween_callback(flash.queue_free)
 
+	# Bright core glow — small range, longer duration than the scene flash.
+	# Reads as the white-hot fireball center hanging around as the blast
+	# evolves, distinct from the scene-wide initial spike.
+	var core_light := OmniLight3D.new()
+	core_light.light_color = Color(1.0, 0.95, 0.78)
+	core_light.light_energy = 60.0 + RADIUS * 8.0
+	core_light.omni_range = maxf(8.0, RADIUS * 1.4)
+	core_light.position = pos
+	scene.add_child(core_light)
+	var ctlw := core_light.create_tween()
+	ctlw.tween_property(core_light, "light_color", Color(1.0, 0.55, 0.18), 0.12)\
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	ctlw.parallel().tween_property(core_light, "light_energy", 0.0, 0.32)\
+		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+	ctlw.tween_callback(core_light.queue_free)
+
 	var light := OmniLight3D.new()
 	var hot_color := Color(1.0, 0.97, 0.9)
 	var warm_color := Color(1.0, 0.62, 0.22)
