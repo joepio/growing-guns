@@ -21,6 +21,8 @@ const KNOBS: Array = [
 	["hit_received dB",       "hit_received_db",       -40.0,   6.0],
 	["bullet zip CLOSE dB",   "bullet_zip_close_db",   -50.0,   0.0],
 	["bullet zip FAR dB",     "bullet_zip_far_db",     -60.0, -10.0],
+	["bullet zip base Hz",    "bullet_zip_base_hz",    200.0, 5000.0],
+	["bullet zip speed Hz",   "bullet_zip_speed_hz",     0.0, 3000.0],
 	["shot wet send dB",      "shot_wet_db",           -40.0,   6.0],
 	["shot rumble dB",        "shot_rumble_db",        -40.0,   6.0],
 	["explosion wet dB",      "explosion_wet_db",      -40.0,   6.0],
@@ -51,7 +53,12 @@ const SOLO_CHOICES: Array = [
 	["empty_chamber",  "empty_chamber"],
 ]
 
-var _was_captured: bool = false
+# Mouse mode applied while the panel is open. Default HIDDEN matches game.gd —
+# its in-shader / fisheye HUD draws its own cursor, and HIDDEN keeps the OS
+# cursor from rendering on top. Hosts without a custom cursor (e.g. the audio
+# labs) should set this to MOUSE_MODE_VISIBLE before the panel opens.
+@export var open_mouse_mode: int = Input.MOUSE_MODE_HIDDEN
+var _saved_mouse_mode: int = Input.MOUSE_MODE_VISIBLE
 var _peak_bar: ProgressBar = null
 var _peak_label: Label = null
 var _hdr_bar: ProgressBar = null
@@ -95,19 +102,16 @@ func _input(event: InputEvent) -> void:
 func toggle() -> void:
 	visible = not visible
 	if visible:
-		_was_captured = Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
-		# HIDDEN (not VISIBLE) so game.gd's in-HUD custom cursor renders
-		# instead of the OS cursor — that way it gets warped by the retro /
-		# fisheye shader and visually matches the distorted button positions.
-		Input.mouse_mode = Input.MOUSE_MODE_HIDDEN
-	elif _was_captured:
-		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+		_saved_mouse_mode = Input.mouse_mode
+		Input.mouse_mode = open_mouse_mode
+	else:
+		Input.mouse_mode = _saved_mouse_mode
 
 func _build_ui() -> void:
+	# Centered, full-height-with-margin panel so the slider list always has
+	# room to scroll regardless of viewport size.
 	var panel := PanelContainer.new()
 	panel.set_anchors_preset(Control.PRESET_TOP_LEFT)
-	panel.position = Vector2(12, 12)
-	panel.custom_minimum_size = Vector2(420, 0)
 	var sb := StyleBoxFlat.new()
 	sb.bg_color = Color(0, 0, 0, 0.78)
 	sb.set_corner_radius_all(6)
@@ -118,15 +122,27 @@ func _build_ui() -> void:
 	panel.add_theme_stylebox_override("panel", sb)
 	add_child(panel)
 
-	var vb := VBoxContainer.new()
-	vb.add_theme_constant_override("separation", 4)
-	panel.add_child(vb)
+	var outer := VBoxContainer.new()
+	outer.add_theme_constant_override("separation", 4)
+	panel.add_child(outer)
 
 	var title := Label.new()
 	title.text = "AUDIO SETTINGS — F2 to toggle"
 	title.add_theme_font_size_override("font_size", 14)
 	title.add_theme_color_override("font_color", Color(1, 0.95, 0.6))
-	vb.add_child(title)
+	outer.add_child(title)
+
+	# Scroll viewport — fills the rest of the panel; the inner VBox can be
+	# arbitrarily tall and the scrollbar lets the user reach every knob.
+	var scroll := ScrollContainer.new()
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	outer.add_child(scroll)
+
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 4)
+	vb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(vb)
 
 	_build_meter_row(vb)
 	_build_hdr_row(vb)
@@ -155,6 +171,17 @@ func _build_ui() -> void:
 	solo_opt.item_selected.connect(func(idx: int) -> void:
 		SFX.solo_kind = SOLO_CHOICES[idx][1])
 	solo_row.add_child(solo_opt)
+
+	# Re-center on viewport size changes (window resize, fullscreen toggle).
+	_resize_panel(panel)
+	get_tree().root.size_changed.connect(_resize_panel.bind(panel))
+
+func _resize_panel(panel: PanelContainer) -> void:
+	var vp_size: Vector2 = get_viewport().get_visible_rect().size
+	var w: float = clampf(vp_size.x * 0.45, 380.0, 520.0)
+	var h: float = clampf(vp_size.y - 80.0, 280.0, vp_size.y - 40.0)
+	panel.size = Vector2(w, h)
+	panel.position = (vp_size - panel.size) * 0.5
 
 func _build_meter_row(vb: VBoxContainer) -> void:
 	var row := HBoxContainer.new()
