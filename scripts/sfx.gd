@@ -86,12 +86,12 @@ var _hdr_max_spl: float = HDR_FLOOR_DB
 # (or just after a single loud event) the hall is open.
 var big_tail_send_db: float = -24.0  # per-source send level into the bus
 var big_tail_min_db: float = -50.0   # bus output during silence
-var big_tail_max_db: float = -10.0   # bus output at peak intensity (~165 SPL)
-# Intensity ramps to 1.0 on a peak event (165+ SPL). Slow exponential decay
-# (rate 0.10 → half-life ~7 s, audible to ~15 s) so the reverb tail has
-# time to actually play out audibly instead of being muted by the bus
-# closing too fast.
-const BIG_TAIL_DECAY_RATE := 0.10
+var big_tail_max_db: float = -22.0   # bus output at peak intensity (~165 SPL)
+# Intensity ramps to 1.0 on a peak event (165+ SPL). Exponential decay; rate
+# 0.22 → half-life ~3 s. Slow enough that a single loud event still gets a
+# trailing tail, but fast enough that stacked upgrades don't keep the hall
+# open continuously and drown ambient sounds (footsteps).
+const BIG_TAIL_DECAY_RATE := 0.22
 const BIG_TAIL_FLOOR := 0.002  # snap-to-zero threshold so it actually settles
 var _big_tail_intensity: float = 0.0
 # AudioStreamPlayer3D unit_size — distance at which the inverse-distance
@@ -122,7 +122,13 @@ func _process(delta: float) -> void:
 		_big_tail_intensity = 0.0
 	var idx := AudioServer.get_bus_index("BigTailReverb")
 	if idx >= 0:
-		AudioServer.set_bus_volume_db(idx, lerpf(big_tail_min_db, big_tail_max_db, _big_tail_intensity))
+		# sqrt curve on the intensity → bus mapping. The linear contribution
+		# formula `(SPL-60)/100` only puts mid-loud events (SPL 100, e.g. hurt
+		# or hit_received) at intensity ~0.4, which on a linear ramp barely
+		# opens the bus. sqrt(0.4) ≈ 0.63 nudges the hall open early while
+		# keeping the peak at big_tail_max_db unchanged.
+		var curve: float = sqrt(_big_tail_intensity)
+		AudioServer.set_bus_volume_db(idx, lerpf(big_tail_min_db, big_tail_max_db, curve))
 
 # HDR gate: returns true if the sound should be CULLED entirely because it
 # falls below the sliding window. Otherwise lifts max_spl and lets it play.

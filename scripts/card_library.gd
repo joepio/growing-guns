@@ -105,6 +105,8 @@ static func all() -> Array:
 				"apply": func(w: Weapon) -> void:
 						w.extra_projectiles += 2
 						w.reload_mult *= 1.5
+						w.damage_mult *= 1.5
+						w.fire_rate_mult *= 0.3
 						w.bullet_speed_mult *= 0.75
 						w.spread = max(w.spread, deg_to_rad(2.0)) + deg_to_rad(2.0),
 		},		{
