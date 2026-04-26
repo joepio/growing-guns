@@ -60,6 +60,9 @@ var shot_rumble_db: float = -12.0
 # Wet send for shots — a quieter copy of the bang routed through the reverb
 # bus so the environmental tail is audible without smearing the dry transient.
 var shot_wet_db: float = -10.0
+# Same idea for explosion bang + click — adds a wet companion so the sharp
+# transient picks up the room reverb (otherwise dry-only bypasses it).
+var explosion_wet_db: float = -8.0
 # HDR sliding-window mixing. Each sound declares a `priority_db_spl` (real-
 # world Sound Pressure Level approximation). SFX tracks the rolling loudest
 # active SPL; any new sound below `max_spl - HDR_WINDOW_DB` is CULLED
@@ -72,14 +75,18 @@ var hdr_enabled: bool = true
 var _hdr_max_spl: float = HDR_FLOOR_DB
 
 # "Big tail" reverb — second, longer-tailed reverb bus that ALL 3D sounds
-# send a copy to. The bus's output volume is driven by combat intensity
-# (we reuse `_hdr_max_spl` as the intensity proxy, since it's already a
-# rolling loudest-active SPL that decays cleanly). During calm the bus is
-# all-but-muted; during heavy fire the hall opens up and every sound that
-# played in that window contributes a long bass-y tail.
+# send a copy to. The bus's output volume is driven by a dedicated combat-
+# intensity tracker that decays SLOWER than _hdr_max_spl, so a one-off
+# grenade explosion holds the bus open long enough for the rumble tail to
+# actually build. During calm the bus is all-but-muted; during heavy fire
+# (or just after a single loud event) the hall is open.
 var big_tail_send_db: float = -12.0  # per-source send level into the bus
 var big_tail_min_db: float = -50.0   # bus output during silence
 var big_tail_max_db: float = -10.0   # bus output at peak intensity (~165 SPL)
+# Intensity ramps to 1.0 on a peak event (165+ SPL), decays back to 0 over
+# ~3 s. Slow enough that a grenade's tail has time to develop.
+const BIG_TAIL_DECAY := 0.33
+var _big_tail_intensity: float = 0.0
 # AudioStreamPlayer3D unit_size — distance at which the inverse-distance
 # attenuation curve starts falling off. Sounds want different values:
 # footsteps are intimate (small unit_size), explosions carry far (large).
@@ -101,12 +108,12 @@ func _process(delta: float) -> void:
 	# release rate. New plays push the max back up via _hdr_blocks().
 	if _hdr_max_spl > HDR_FLOOR_DB:
 		_hdr_max_spl = maxf(HDR_FLOOR_DB, _hdr_max_spl - HDR_RELEASE_DB_PER_SEC * delta)
-	# Drive BigTailReverb bus volume from current intensity.
+	# Slow-release big-tail intensity (separate from HDR so single events
+	# hold the bus open long enough for a tail to form).
+	_big_tail_intensity = maxf(0.0, _big_tail_intensity - BIG_TAIL_DECAY * delta)
 	var idx := AudioServer.get_bus_index("BigTailReverb")
 	if idx >= 0:
-		# Map _hdr_max_spl 60 (calm) → 160 (loud) to min_db → max_db.
-		var t: float = clampf((_hdr_max_spl - HDR_FLOOR_DB) / 100.0, 0.0, 1.0)
-		AudioServer.set_bus_volume_db(idx, lerpf(big_tail_min_db, big_tail_max_db, t))
+		AudioServer.set_bus_volume_db(idx, lerpf(big_tail_min_db, big_tail_max_db, _big_tail_intensity))
 
 # HDR gate: returns true if the sound should be CULLED entirely because it
 # falls below the sliding window. Otherwise lifts max_spl and lets it play.
@@ -315,11 +322,12 @@ func _play_stream(stream: AudioStream, volume_db: float = -6.0, at: Vector3 = NO
 	if stream == null:
 		return null
 	# All 3D sounds send a copy to the BigTailReverb bus. The bus's output
-	# volume is itself driven by `_hdr_max_spl` (combat intensity) in
-	# _process — so during calm the bus is all-but-silent and the sends are
-	# inaudible; during heavy combat the hall opens up and contributions from
-	# both loud AND incidental sounds show up in the tail. UI / 2D sounds
-	# don't send (positionless, would smear the hall).
+	# volume is driven by `_big_tail_intensity` in _process — and we lift
+	# that intensity HERE (synchronously, before the speed-of-sound delay)
+	# so the bus is already open by the time the sound and its tail land.
+	if at != NO_POS:
+		var contribution: float = clampf((priority_db_spl - HDR_FLOOR_DB) / 100.0, 0.0, 1.0)
+		_big_tail_intensity = maxf(_big_tail_intensity, contribution)
 	if at == NO_POS:
 		var p := AudioStreamPlayer.new()
 		p.stream = stream
@@ -473,7 +481,6 @@ func shot(w: Weapon = null, at: Vector3 = NO_POS, is_self: bool = false) -> void
 			var rumble_variant: int = randi() % EXPLOSION_VARIANTS
 			var rumble_key := "explosion_rumble:%d:%d" % [rumble_radius, rumble_variant]
 			var rumble_dist: float = clampf(float(rumble_radius) * 0.8, 4.0, 12.0)
-			# Rumble inherits the parent shot's SPL — same gunshot event.
 			_play(_cached_samples(rumble_key, Callable(self, "_synth_explosion_rumble").bind(float(rumble_radius), rumble_variant)),
 				shot_rumble_db, at, "shot_rumble", rumble_dist, false, spl)
 func grenade_launch(at: Vector3 = NO_POS) -> void:
@@ -534,9 +541,13 @@ func explosion(at: Vector3 = NO_POS, radius: float = 6.0) -> void:
 	# bigger blasts push the HDR window highest, ducking everything else
 	# hardest.
 	var ex_spl: float = 165.0 + log(maxf(1.0, radius / 6.0)) / log(2.0) * 5.0
-	# Bang plays dry — routed past the reverb bus so the transient stays
-	# crisp. The rumble (next call) carries the wet/spatial character.
-	_play(_cached_samples(bang_key, Callable(self, "_synth_explosion").bind(float(r_bucket), variant)), explosion_bang_db, at, "explosion_bang", bang_dist, true, ex_spl)
+	# Bang plays dry primary (crisp transient) PLUS a wet companion through
+	# RaytracedReverb — same pattern as gun shots. The wet companion is what
+	# gives a sharp transient an audible reverb tail; without it the dry
+	# bang bypasses the reverb bus entirely and the explosion sounds tail-less.
+	var bang_samples := _cached_samples(bang_key, Callable(self, "_synth_explosion").bind(float(r_bucket), variant))
+	_play(bang_samples, explosion_bang_db, at, "explosion_bang", bang_dist, true, ex_spl)
+	_play(bang_samples, explosion_bang_db + explosion_wet_db, at, "", bang_dist, false, ex_spl)
 	var rumble_key := "explosion_rumble:%d:%d" % [r_bucket, variant]
 	_play(_cached_samples(rumble_key, Callable(self, "_synth_explosion_rumble").bind(float(r_bucket), variant)), explosion_rumble_db, at, "explosion_rumble", rumble_dist, false, ex_spl)
 	# Distance-bucketed bandpass click. Picks one of 5 frequency buckets based
@@ -553,10 +564,9 @@ func explosion(at: Vector3 = NO_POS, radius: float = 6.0) -> void:
 		elif listener_dist > 5.0: click_bucket = 1
 		var click_variant: int = randi() % EXPLOSION_VARIANTS
 		var click_key := "ex_click:%d:%d" % [click_bucket, click_variant]
-		_play(
-			_cached_samples(click_key, Callable(self, "_synth_distance_click").bind(click_bucket, click_variant)),
-			explosion_bang_db - 4.0, at, "explosion_click", bang_dist, true, ex_spl,
-		)
+		var click_samples := _cached_samples(click_key, Callable(self, "_synth_distance_click").bind(click_bucket, click_variant))
+		_play(click_samples, explosion_bang_db - 4.0, at, "explosion_click", bang_dist, true, ex_spl)
+		_play(click_samples, explosion_bang_db - 4.0 + explosion_wet_db, at, "", bang_dist, false, ex_spl)
 func melee(at: Vector3 = NO_POS, damage: int = 50) -> void:
 	var pitch_ratio: float = clampf(50.0 / float(damage), 0.5, 1.2)
 	var key := "melee_%d" % int(round(pitch_ratio * 100.0))
@@ -669,61 +679,57 @@ func _synth_shot(w: Weapon, variant: int) -> PackedVector2Array:
 	rng.seed = hash([dmg_ratio, accuracy, variant, "shot"])
 
 	# Per-variant param jitter (deterministic per variant for stable cache).
-	var pitch_jit: float = lerpf(0.92, 1.09, rng.randf())
-	var decay_jit: float = lerpf(0.82, 1.20, rng.randf())
 	var bright_jit: float = lerpf(0.85, 1.15, rng.randf())
 	var click_freq_jit: float = lerpf(0.80, 1.25, rng.randf())
 	var thwack_decay: float = lerpf(180.0, 280.0, rng.randf())
-	# Drive level for the wide saturated transient — higher = harsher / more
-	# harmonic content. Range chosen so all variants sound aggressive but
-	# not the same.
 	var thwack_drive: float = lerpf(4.0, 8.0, rng.randf())
 	var dur_jit: float = lerpf(0.90, 1.12, rng.randf())
-	var bass_phase: float = rng.randf() * TAU
+	# Kick-drum bass: sine with rapid pitch sweep from f0 (click pitch) down
+	# to f1 (body pitch) over ~12 ms. f1 scales with damage so big guns thump
+	# lower. f0 stays in the click range regardless. Lowpassed to smooth the
+	# sweep into a punchy "boom" instead of a chirp.
+	var kick_f0: float = 220.0 * lerpf(0.88, 1.12, rng.randf())
+	var kick_f1: float = clampf(55.0 / sqrt(dmg_ratio), 28.0, 80.0) * lerpf(0.92, 1.10, rng.randf())
+	var kick_sweep_rate: float = lerpf(70.0, 95.0, rng.randf())
+	var kick_decay: float = clampf(35.0 / sqrt(dmg_ratio), 10.0, 40.0)
+	var kick_gain: float = lerpf(0.55, 0.95, clampf((dmg_ratio - 1.0) / 3.0, 0.0, 1.0))
 
 	var dur: float = clampf((0.08 + 0.08 * log(dmg_ratio) / log(2.0)) * dur_jit, 0.08, 0.35)
 	var n := int(dur * MIX_RATE)
 	var out := PackedVector2Array()
 	out.resize(n)
 
-	var bass_freq: float = clampf((90.0 / sqrt(dmg_ratio)) * pitch_jit, 32.0, 130.0)
-	var bass_decay: float = clampf((30.0 / dmg_ratio) * decay_jit, 6.0, 45.0)
-	var bass_gain: float = lerpf(0.45, 0.95, clampf((dmg_ratio - 1.0) / 3.0, 0.0, 1.0))
 	var noise_brightness: float = clampf(lerpf(0.18, 0.55, accuracy) * bright_jit, 0.05, 0.95)
 	var click_gain := accuracy * 0.3
 	var click_freq := 2400.0 * click_freq_jit
 
 	var lp := 0.0
 	var thwack_low_acc := 0.0
-	var bass_lp := 0.0
+	var kick_phase: float = 0.0
+	var kick_lp: float = 0.0
 	for i in range(n):
 		var t := float(i) / MIX_RATE
-		# Slower env decay (was 2.5) so more energy survives past the peak,
-		# raising RMS / perceived loudness.
 		var env := pow(clampf(1.0 - t / dur, 0.0, 1.0), 1.6)
 		var noise := rng.randf_range(-1.0, 1.0)
-		# WIDE distorted transient — full-band noise, soft sub-bass roll-off
-		# (1-pole HP via accumulator subtraction), then tanh-saturated for
-		# even-order harmonics. Gives the muzzle blast its "crack" character.
+		# WIDE distorted transient — broadband impulse, sub-bass roll-off,
+		# tanh-saturated for harmonic crack character.
 		var raw_thwack := rng.randf_range(-1.0, 1.0)
 		thwack_low_acc = lerpf(thwack_low_acc, raw_thwack, 0.06)
 		var hp := raw_thwack - thwack_low_acc
 		var thwack := tanh(hp * thwack_drive) * 1.5 * exp(-t * thwack_decay)
+		# Kick: phase-accumulated swept sine. Phase integration handles the
+		# time-varying frequency correctly (a plain sin(2πft) would mis-track
+		# the sweep).
+		var kick_freq: float = kick_f1 + (kick_f0 - kick_f1) * exp(-t * kick_sweep_rate)
+		kick_phase += 2.0 * PI * kick_freq / float(MIX_RATE)
+		var kick_raw: float = sin(kick_phase)
+		# Lowpass smooths the sweep edges so it reads as a thump, not a chirp.
+		kick_lp = lerpf(kick_lp, kick_raw, 0.30)
+		var kick: float = kick_lp * exp(-t * kick_decay)
 		# Lowpass-swept noise tail.
 		lp = lerpf(lp, noise, noise_brightness)
-		# Bass: saturated sine (square-ish) MULT'd by lowpassed noise — gives
-		# the gritty, non-pure character of a real muzzle blast body instead
-		# of a clean tone. The noise modulation breaks up the sine's purity.
-		bass_lp = lerpf(bass_lp, noise, 0.08)
-		var bass_sine := sin(2.0 * PI * bass_freq * t + bass_phase)
-		var bass_sat := tanh(bass_sine * 3.5)  # square-ish harmonic richness
-		var bass_grit := 1.0 + bass_lp * 0.6   # modulate amplitude with noise
-		var low := bass_sat * bass_grit * exp(-t * bass_decay)
 		var click := sin(2.0 * PI * click_freq * t) * exp(-t * 280.0) * click_gain
-		# Push hard into tanh — drives the output to near-rail and generates
-		# additional harmonics. Output is still bounded so the limiter
-		# doesn't have to soft-clip on top.
-		var s := tanh((thwack + lp * 0.5 + low * bass_gain + click) * env * 1.4)
+		var s := tanh((thwack + lp * 0.5 + kick * kick_gain + click) * env * 1.4)
 		out[i] = Vector2(s, s)
 	return out
 

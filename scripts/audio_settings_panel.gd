@@ -23,6 +23,7 @@ const KNOBS: Array = [
 	["bullet zip FAR dB",     "bullet_zip_far_db",     -60.0, -10.0],
 	["shot wet send dB",      "shot_wet_db",           -40.0,   6.0],
 	["shot rumble dB",        "shot_rumble_db",        -40.0,   6.0],
+	["explosion wet dB",      "explosion_wet_db",      -40.0,   6.0],
 	["big-tail send dB",      "big_tail_send_db",      -60.0,   0.0],
 	["big-tail min dB (calm)","big_tail_min_db",       -80.0, -10.0],
 	["big-tail max dB (peak)","big_tail_max_db",       -40.0,   6.0],
