@@ -43,7 +43,7 @@ var shot_world_db: float = 5.0
 var shot_dmg_per_double_db: float = 6.0
 var shot_pitch_per_double: float = 0.20  # 0..1; pitch drop per damage doubling
 var explosion_bang_db: float = 12.0
-var explosion_rumble_db: float = 4.0
+var explosion_rumble_db: float = 10.0
 var footstep_db: float = -30.0
 var jump_db: float = -10.5
 var landing_max_db: float = 5.0
@@ -62,7 +62,7 @@ var shot_rumble_db: float = -12.0
 var shot_wet_db: float = -10.0
 # Same idea for explosion bang + click — adds a wet companion so the sharp
 # transient picks up the room reverb (otherwise dry-only bypasses it).
-var explosion_wet_db: float = -8.0
+var explosion_wet_db: float = -2.0
 # HDR sliding-window mixing. Each sound declares a `priority_db_spl` (real-
 # world Sound Pressure Level approximation). SFX tracks the rolling loudest
 # active SPL; any new sound below `max_spl - HDR_WINDOW_DB` is CULLED
@@ -85,7 +85,7 @@ var big_tail_min_db: float = -50.0   # bus output during silence
 var big_tail_max_db: float = -10.0   # bus output at peak intensity (~165 SPL)
 # Intensity ramps to 1.0 on a peak event (165+ SPL), decays back to 0 over
 # ~3 s. Slow enough that a grenade's tail has time to develop.
-const BIG_TAIL_DECAY := 0.33
+const BIG_TAIL_DECAY := 0.18
 var _big_tail_intensity: float = 0.0
 # AudioStreamPlayer3D unit_size — distance at which the inverse-distance
 # attenuation curve starts falling off. Sounds want different values:
@@ -372,9 +372,13 @@ func _spawn_big_tail_send(stream: AudioStream, volume_db: float, at: Vector3, pi
 	var p3 := AudioStreamPlayer3D.new()
 	_configure_3d_player(p3)
 	p3.bus = "BigTailReverb"
-	# Bigger unit_size so the send doesn't fall off rapidly — the tail should
-	# carry across the arena even if the dry signal attenuates.
-	p3.unit_size = 25.0
+	# ATTENUATION_DISABLED — wet send stays at constant volume regardless of
+	# distance, while keeping 3D positioning (stereo pan + plugin muffle).
+	# This implements the real-world "diffuse reverberant field is roughly
+	# constant in a room" behavior: the dry signal attenuates with distance,
+	# the wet doesn't, so the wet/dry ratio increases for far sources →
+	# distant explosions get a hangar-style tail without changing the dry mix.
+	p3.attenuation_model = AudioStreamPlayer3D.ATTENUATION_DISABLED
 	p3.stream = stream
 	p3.volume_db = volume_db
 	p3.pitch_scale = pitch_scale
@@ -416,7 +420,8 @@ func _shot_cache_key(w: Weapon, variant: int) -> String:
 	var damage_bucket := int(round(w.get_damage() / 5.0))
 	var spread_bucket := int(round(w.spread * 1000.0))
 	var fire_bucket := int(round(w.fire_rate_mult * 10.0))
-	return "shot:%d:%d:%d:%d" % [damage_bucket, spread_bucket, fire_bucket, variant]
+	var speed_bucket := int(round(w.bullet_speed_mult * 4.0))  # 0.25 increments
+	return "shot:%d:%d:%d:%d:%d" % [damage_bucket, spread_bucket, fire_bucket, speed_bucket, variant]
 
 func _hitmarker_cache_key(kind: String, dmg: int) -> String:
 	var dmg_bucket := 0
@@ -533,7 +538,9 @@ func explosion(at: Vector3 = NO_POS, radius: float = 6.0) -> void:
 	# at radius*2.5 stays bass-heavy at distance — that's what gives a
 	# bazooka 30 m out its weight instead of sounding "thin".
 	var bang_dist: float = clampf(radius * 0.8, 4.0, 24.0)
-	var rumble_dist: float = clampf(radius * 2.5, 12.0, 60.0)
+	# Rumble carries far — bumped from 2.5x to 4.5x radius so a 30 m bazooka
+	# bystander still gets the bass body at near-full volume.
+	var rumble_dist: float = clampf(radius * 4.5, 20.0, 100.0)
 	var r_bucket: int = int(round(clampf(radius, 2.0, 24.0)))
 	var variant: int = randi() % EXPLOSION_VARIANTS
 	var bang_key := "explosion_bang:%d:%d" % [r_bucket, variant]
@@ -671,18 +678,23 @@ func _synth_shot(w: Weapon, variant: int) -> PackedVector2Array:
 	# (damage, spread, fire) bucket but variant differentiates them.
 	var dmg_ratio := 1.0
 	var accuracy := 1.0  # 1.0 = perfectly accurate, 0.0 = fully sprayed
+	var velocity := 1.0  # 1.0 = baseline; >1 = high-velocity (sharper)
 	if w:
 		dmg_ratio = maxf(1.0, w.get_damage() / Weapon.BASE_DAMAGE)
 		accuracy = clampf(1.0 - w.spread / 0.06, 0.0, 1.0)
+		velocity = clampf(w.bullet_speed_mult, 0.5, 3.0)
 
 	var rng := RandomNumberGenerator.new()
-	rng.seed = hash([dmg_ratio, accuracy, variant, "shot"])
+	rng.seed = hash([dmg_ratio, accuracy, velocity, variant, "shot"])
 
 	# Per-variant param jitter (deterministic per variant for stable cache).
 	var bright_jit: float = lerpf(0.85, 1.15, rng.randf())
 	var click_freq_jit: float = lerpf(0.80, 1.25, rng.randf())
-	var thwack_decay: float = lerpf(180.0, 280.0, rng.randf())
-	var thwack_drive: float = lerpf(4.0, 8.0, rng.randf())
+	# High-velocity weapons have a sharper transient — faster thwack decay
+	# (sonic crack), more harmonic drive, less low-end body. Mimics how a
+	# real sniper rifle reads as a "snap" vs a slow rifle's "boom".
+	var thwack_decay: float = lerpf(180.0, 280.0, rng.randf()) * sqrt(velocity)
+	var thwack_drive: float = lerpf(4.0, 8.0, rng.randf()) * lerpf(0.9, 1.3, clampf((velocity - 1.0) / 2.0, 0.0, 1.0))
 	var dur_jit: float = lerpf(0.90, 1.12, rng.randf())
 	# Kick-drum bass: sine with rapid pitch sweep from f0 (click pitch) down
 	# to f1 (body pitch) over ~12 ms. f1 scales with damage so big guns thump
@@ -690,16 +702,24 @@ func _synth_shot(w: Weapon, variant: int) -> PackedVector2Array:
 	# sweep into a punchy "boom" instead of a chirp.
 	var kick_f0: float = 220.0 * lerpf(0.88, 1.12, rng.randf())
 	var kick_f1: float = clampf(55.0 / sqrt(dmg_ratio), 28.0, 80.0) * lerpf(0.92, 1.10, rng.randf())
-	var kick_sweep_rate: float = lerpf(70.0, 95.0, rng.randf())
-	var kick_decay: float = clampf(35.0 / sqrt(dmg_ratio), 10.0, 40.0)
-	var kick_gain: float = lerpf(0.55, 0.95, clampf((dmg_ratio - 1.0) / 3.0, 0.0, 1.0))
+	# High-velocity → faster sweep + faster kick decay → less body sustain,
+	# more "snap". Low-velocity guns sustain the body longer for a "boom".
+	var kick_sweep_rate: float = lerpf(70.0, 95.0, rng.randf()) * sqrt(velocity)
+	var kick_decay: float = clampf(35.0 / sqrt(dmg_ratio), 10.0, 40.0) * sqrt(velocity)
+	var kick_gain: float = lerpf(0.55, 0.95, clampf((dmg_ratio - 1.0) / 3.0, 0.0, 1.0)) / sqrt(velocity)
 
-	var dur: float = clampf((0.08 + 0.08 * log(dmg_ratio) / log(2.0)) * dur_jit, 0.08, 0.35)
+	# High-velocity guns are SHORTER overall — the entire bang collapses.
+	# Slow guns: full duration. Sniper at velocity ~3: dur cut to ~half.
+	var dur: float = clampf((0.08 + 0.08 * log(dmg_ratio) / log(2.0)) * dur_jit / sqrt(velocity), 0.04, 0.35)
 	var n := int(dur * MIX_RATE)
 	var out := PackedVector2Array()
 	out.resize(n)
 
 	var noise_brightness: float = clampf(lerpf(0.18, 0.55, accuracy) * bright_jit, 0.05, 0.95)
+	# Dedicated noise-tail decay so the lowpass-swept noise dies fast for
+	# high-velocity weapons (sharp crack, no lingering hiss). Slow guns
+	# keep a longer noise wash.
+	var noise_decay: float = lerpf(8.0, 16.0, rng.randf()) * sqrt(velocity)
 	var click_gain := accuracy * 0.3
 	var click_freq := 2400.0 * click_freq_jit
 
@@ -726,10 +746,12 @@ func _synth_shot(w: Weapon, variant: int) -> PackedVector2Array:
 		# Lowpass smooths the sweep edges so it reads as a thump, not a chirp.
 		kick_lp = lerpf(kick_lp, kick_raw, 0.30)
 		var kick: float = kick_lp * exp(-t * kick_decay)
-		# Lowpass-swept noise tail.
+		# Lowpass-swept noise tail with its own fast envelope (scales with
+		# velocity → sniper has very short tail, slow gun has longer wash).
 		lp = lerpf(lp, noise, noise_brightness)
+		var lp_env: float = exp(-t * noise_decay)
 		var click := sin(2.0 * PI * click_freq * t) * exp(-t * 280.0) * click_gain
-		var s := tanh((thwack + lp * 0.5 + kick * kick_gain + click) * env * 1.4)
+		var s := tanh((thwack + lp * 0.5 * lp_env + kick * kick_gain + click) * env * 1.4)
 		out[i] = Vector2(s, s)
 	return out
 
