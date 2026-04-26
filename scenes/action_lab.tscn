@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://b0actionlab01"]
+
+[ext_resource type="Script" path="res://scripts/action_lab.gd" id="1_actionlab"]
+
+[node name="ActionLab" type="Node3D"]
+script = ExtResource("1_actionlab")

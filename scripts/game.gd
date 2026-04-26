@@ -108,7 +108,7 @@ var _dash_segments: Array[ProgressBar] = []
 var _dash_text_hbox: Control = null
 
 func _ready() -> void:
-	# F2 brings up the live audio-tuning panel — same sliders as audio_lab.
+	# F2 brings up the live audio-tuning panel — same sliders as action_lab.
 	add_child(AudioSettingsPanel.new())
 
 	# --- Ability Bar Redesign ---
