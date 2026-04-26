@@ -81,15 +81,6 @@ static func all() -> Array:
 				w.reload_mult *= 2.0,
 		},
 		{
-			"id": "piercing",
-			"name": "PIERCING",
-			"desc": "Bullets pass through targets",
-			"color": Color(0.5, 0.85, 1.0),
-			"apply": func(w: Weapon) -> void:
-				w.pierce_count += 1
-				w.bullet_color = w.bullet_color.lerp(Color(0.4, 0.8, 1.0), 0.5),
-		},
-		{
 			"id": "ricochet",
 			"name": "RICOCHET",
 			"desc": "Bullets bounce off walls",

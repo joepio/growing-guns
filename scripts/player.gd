@@ -167,6 +167,8 @@ const HIT_FACE_DURATION := 0.22
 @export var player_id: int = 1
 @export var player_name: String = "Player"
 @export var is_bot: bool = false
+@export var local_input_device: int = -1
+@export var split_screen_local: bool = false
 
 # --- Bot AI ---
 const BOT_MOVE_SPEED := 8.0
@@ -184,6 +186,7 @@ var _bot_strafe_side: float = 0.0        # -1 left, 0 none, +1 right
 var _bot_approach: float = 1.0           # -1 retreat, 0 hold, +1 chase
 var _bot_jump_cooldown: float = 0.0
 var _bot_dash_cooldown: float = 0.0
+var _prev_local_actions: Dictionary = {}
 
 var health: int = MAX_HEALTH
 var god_mode: bool = false
@@ -193,7 +196,7 @@ signal cooldowns_changed  # emitted on local player for HUD
 
 func _enter_tree() -> void:
 	# Bots are server-owned — their player_id isn't a real peer.
-	set_multiplayer_authority(1 if is_bot else player_id)
+	set_multiplayer_authority(1 if (is_bot or split_screen_local) else player_id)
 
 func _ready() -> void:
 	name_label.text = player_name
@@ -269,7 +272,7 @@ func _process(delta: float) -> void:
 	# Re-assert camera state every frame until authority is established.
 	# Guards against a connection-state race where is_multiplayer_authority()
 	# is false during _ready (peer id == 0 before connected_to_server fires).
-	if is_multiplayer_authority() and not camera.current:
+	if is_multiplayer_authority() and not split_screen_local and not camera.current:
 		_refresh_authority_view()
 
 	if is_multiplayer_authority():
@@ -296,8 +299,11 @@ func _refresh_authority_view() -> void:
 		name_label.visible = true
 		return
 	if is_multiplayer_authority():
-		camera.make_current()
-		body_model.visible = false
+		if split_screen_local:
+			camera.clear_current()
+		else:
+			camera.make_current()
+		body_model.visible = split_screen_local
 		name_label.visible = false
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 		Input.use_accumulated_input = false
@@ -393,8 +399,8 @@ func _update_blob_motion(delta: float) -> void:
 func _apply_ghost_visuals() -> void:
 	if body_model == null:
 		return
-	body_model.visible = (is_bot or not is_multiplayer_authority())
-	name_label.visible = not ghost_mode and not invisible_mode and (is_bot or not is_multiplayer_authority())
+	body_model.visible = (is_bot or split_screen_local or not is_multiplayer_authority())
+	name_label.visible = not ghost_mode and not invisible_mode and (is_bot or (not split_screen_local and not is_multiplayer_authority()))
 	muzzle.visible = true # Gun always visible now, but shading changes
 
 	var gun_meshes: Array[MeshInstance3D] = []
@@ -435,6 +441,8 @@ func _show_hit_face(duration: float = HIT_FACE_DURATION) -> void:
 
 func _unhandled_input(event: InputEvent) -> void:
 	if not is_multiplayer_authority():
+		return
+	if local_input_device >= 0:
 		return
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		var sens := MOUSE_SENS
@@ -492,10 +500,11 @@ func _physics_process(delta: float) -> void:
 	_view_punch_pos = _view_punch_pos.lerp(Vector3.ZERO, delta * 12.0)
 	_view_punch_rot = _view_punch_rot.lerp(Vector3.ZERO, delta * 12.0)
 
-	if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+	if _can_accept_gameplay_input() and (local_input_device >= 0 or not split_screen_local):
+		var look_device := local_input_device if local_input_device >= 0 else 0
 		var look_input := Vector2(
-			Input.get_joy_axis(0, JOY_AXIS_RIGHT_X),
-			Input.get_joy_axis(0, JOY_AXIS_RIGHT_Y)
+			Input.get_joy_axis(look_device, JOY_AXIS_RIGHT_X),
+			Input.get_joy_axis(look_device, JOY_AXIS_RIGHT_Y)
 		)
 		if look_input.length() > CONTROLLER_LOOK_DEADZONE:
 			var look_mag := inverse_lerp(CONTROLLER_LOOK_DEADZONE, 1.0, minf(look_input.length(), 1.0))
@@ -523,7 +532,7 @@ func _physics_process(delta: float) -> void:
 	# Horizontal sway runs at half the vertical frequency — classic figure-8 feel.
 	var bob_x: float = sin(_walk_bob_phase * 0.5) * GUN_BOB_AMP_X * bob_intensity
 	_gun_jump_bump = lerp(_gun_jump_bump, 0.0, clampf(delta * 8.0, 0.0, 1.0))
-	var input_x_tilt: float = Input.get_axis("move_right", "move_left")
+	var input_x_tilt: float = _move_axis_x() * -1.0
 	_gun_tilt_z = lerp(_gun_tilt_z, deg_to_rad(input_x_tilt * GUN_STRAFE_TILT_DEG), clampf(delta * 8.0, 0.0, 1.0))
 
 	muzzle.position = _muzzle_rest_pos + Vector3(bob_x, bob_y - _gun_jump_bump, muzzle_kick_z) + melee_offset + reload_offset + _gun_pull_back
@@ -559,7 +568,14 @@ func _physics_process(delta: float) -> void:
 	# Wall-jump takes priority over double-jump so you can chain WJ → WJ → dash → WJ
 	# to climb a building. Each WJ imparts strong up + gentle outward push, so the
 	# player must strafe/dash back toward the wall to chain.
-	if Input.is_action_just_pressed("jump"):
+	var jump_pressed := _action_just_pressed_local("jump")
+	var dash_pressed := _action_just_pressed_local("dash")
+	var shoot_pressed := _action_pressed_local("shoot")
+	var shoot_just_pressed := _action_just_pressed_local("shoot")
+	var reload_pressed := _action_just_pressed_local("reload")
+	var special_pressed := _action_just_pressed_local("shoot_grenade")
+
+	if jump_pressed:
 		if is_on_floor():
 			velocity.y = JUMP_VELOCITY
 			jumps_left = 1 + weapon.extra_jumps
@@ -581,7 +597,7 @@ func _physics_process(delta: float) -> void:
 			if not ghost_mode: SFX.jump(global_position)
 
 	# --- Dash ---
-	if Input.is_action_just_pressed("dash") and dash_charges > 0:
+	if dash_pressed and dash_charges > 0:
 		var input_dir := _input_vector()
 		if input_dir == Vector3.ZERO:
 			input_dir = -global_transform.basis.z
@@ -591,7 +607,7 @@ func _physics_process(delta: float) -> void:
 		if not ghost_mode: SFX.dash(global_position)
 
 	# --- Movement ---
-	var input_x := Input.get_axis("move_right", "move_left")
+	var input_x := _move_axis_x() * -1.0
 	tilt_z = input_x * TILT_MAX_DEG
 
 	var wish_dir := _input_vector()
@@ -634,11 +650,11 @@ func _physics_process(delta: float) -> void:
 
 	# --- Combat actions ---
 	# Hold LMB to keep firing — the weapon's fire_interval gates the cadence.
-	var can_fire := Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
-	var fire_input := Input.is_action_pressed("shoot") and can_fire
+	var can_fire := _can_accept_gameplay_input()
+	var fire_input := shoot_pressed and can_fire
 	if ghost_mode:
 		fire_input = false
-		if Input.is_action_just_pressed("shoot") and grenade_cooldown <= 0.0 and can_fire:
+		if shoot_just_pressed and grenade_cooldown <= 0.0 and can_fire:
 			grenade_cooldown = MINE_RELOAD
 			_place_mine()
 	if fire_input and not reloading and mag > 0 and rifle_cooldown <= 0.0:
@@ -656,13 +672,13 @@ func _physics_process(delta: float) -> void:
 					SFX.next_round(muzzle.global_position))
 		if mag <= 0:
 			_start_reload()
-	elif Input.is_action_just_pressed("shoot") and can_fire and not ghost_mode and (reloading or mag <= 0):
+	elif shoot_just_pressed and can_fire and not ghost_mode and (reloading or mag <= 0):
 		# Trigger pulled while the gun isn't ready — the dull "click of nothing".
 		if muzzle:
 			SFX.empty_chamber(muzzle.global_position)
-	if Input.is_action_just_pressed("reload") and not ghost_mode and can_fire:
+	if reload_pressed and not ghost_mode and can_fire:
 		_start_reload()
-	if Input.is_action_just_pressed("shoot_grenade") and not ghost_mode and can_fire:
+	if special_pressed and not ghost_mode and can_fire:
 		if weapon.special == Weapon.SPECIAL_ZOOM:
 			is_zooming = !is_zooming
 		elif grenade_cooldown <= 0.0:
@@ -680,10 +696,56 @@ func _physics_process(delta: float) -> void:
 			_apply_damage(MAX_HEALTH, player_id)
 
 func _input_vector() -> Vector3:
-	var input := Input.get_vector("move_left", "move_right", "move_forward", "move_back")
+	var input := _move_vector()
 	var dir := (global_transform.basis * Vector3(input.x, 0.0, input.y))
 	dir.y = 0.0
 	return dir
+
+func _can_accept_gameplay_input() -> bool:
+	return split_screen_local or Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
+
+func _move_vector() -> Vector2:
+	if local_input_device < 0:
+		return Input.get_vector("move_left", "move_right", "move_forward", "move_back")
+	var raw := Vector2(
+		Input.get_joy_axis(local_input_device, JOY_AXIS_LEFT_X),
+		Input.get_joy_axis(local_input_device, JOY_AXIS_LEFT_Y)
+	)
+	if raw.length() < 0.18:
+		return Vector2.ZERO
+	return raw.limit_length(1.0)
+
+func _move_axis_x() -> float:
+	if local_input_device < 0:
+		return Input.get_axis("move_right", "move_left")
+	var x := Input.get_joy_axis(local_input_device, JOY_AXIS_LEFT_X)
+	return 0.0 if absf(x) < 0.18 else x
+
+func _action_pressed_local(action: StringName) -> bool:
+	if local_input_device < 0:
+		return Input.is_action_pressed(action)
+	match action:
+		&"shoot":
+			return Input.get_joy_axis(local_input_device, JOY_AXIS_TRIGGER_RIGHT) > 0.35
+		&"shoot_grenade":
+			return Input.is_joy_button_pressed(local_input_device, JOY_BUTTON_RIGHT_SHOULDER) \
+				or Input.is_joy_button_pressed(local_input_device, JOY_BUTTON_B)
+		&"jump":
+			return Input.is_joy_button_pressed(local_input_device, JOY_BUTTON_LEFT_SHOULDER) \
+				or Input.is_joy_button_pressed(local_input_device, JOY_BUTTON_A)
+		&"reload":
+			return Input.is_joy_button_pressed(local_input_device, JOY_BUTTON_X)
+		&"dash":
+			return Input.is_joy_button_pressed(local_input_device, JOY_BUTTON_LEFT_STICK)
+	return false
+
+func _action_just_pressed_local(action: StringName) -> bool:
+	if local_input_device < 0:
+		return Input.is_action_just_pressed(action)
+	var pressed := _action_pressed_local(action)
+	var was_pressed := bool(_prev_local_actions.get(action, false))
+	_prev_local_actions[action] = pressed
+	return pressed and not was_pressed
 
 # -------------------- RIFLE (hitscan) --------------------
 

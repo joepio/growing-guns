@@ -499,7 +499,11 @@ func shot(w: Weapon = null, at: Vector3 = NO_POS, is_self: bool = false) -> void
 	# Real-world rifle SPL is ~150-165 dB at the muzzle. Scale with damage so
 	# bigger guns push the HDR window higher, ducking weaker sounds harder.
 	var dmg_log: float = 0.0 if w == null else log(maxf(1.0, w.get_damage() / Weapon.BASE_DAMAGE)) / log(2.0)
-	var spl: float = 148.0 + dmg_log * 6.0
+	# Game-mixed SPL — real rifles read 148+ dB at the muzzle but that pushes
+	# the HDR window so high a single shot mutes everything else. Compressed
+	# baseline at 105 dB lets footsteps (78 SPL) survive a base rifle but
+	# upgraded weapons (2× dmg → 119, 4× → 133) still duck them.
+	var spl: float = 105.0 + dmg_log * 7.0
 	# Wet companion uses "_<label>" — silent in the log, still solo-gated.
 	var wet_label := "_" + label
 	if not _gun_sounds.is_empty():
@@ -655,8 +659,9 @@ func footstep(at: Vector3 = NO_POS, size: float = 1.0) -> void:
 	var size_db: float = clampf(log(s) / log(2.0) * 6.0, -6.0, 10.0)
 	# Pitch: 1.0 at size 1, ~0.5 at size 2, ~1.4 at size 0.5.
 	var size_pitch: float = clampf(1.0 / sqrt(s), 0.5, 1.6)
-	# Footsteps deliberately low priority — they should disappear during
-	# combat (gunshots / explosions) and re-emerge in calm moments.
+	# Footsteps mid priority — they should survive light combat (base
+	# rifle SPL 105 with 35 dB window admits anything ≥ 70) but get culled
+	# by upgraded weapons / explosions / hurts.
 	_play_stream(
 		_step_sounds.pick_random(),
 		footstep_db + randf_range(-2.0, 2.0) + size_db,
@@ -665,7 +670,7 @@ func footstep(at: Vector3 = NO_POS, size: float = 1.0) -> void:
 		"footstep",
 		-1.0,
 		false,
-		70.0,
+		78.0,
 	)
 func dash(at: Vector3 = NO_POS) -> void:
 	_play(_cached_samples("dash", Callable(self, "_synth_dash")), -24.0, at, "dash", -1.0, false, 75.0)
