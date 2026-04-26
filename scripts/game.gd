@@ -11,6 +11,7 @@ const SPAWN_CAPSULE_HEIGHT := 1.8
 const BOT_ID_BASE := 9000
 const BOT_ID_LIMIT := 9100  # IDs 9000..9099 are reserved for bots
 const BOT_NAME := "BOT"
+const SPLIT_PLAYER_ID_BASE := 10000
 
 func _is_bot_id(pid: int) -> bool:
 	return pid >= BOT_ID_BASE and pid < BOT_ID_LIMIT
@@ -108,9 +109,18 @@ var _flash_alpha_target: float = 0.0
 var _dash_segments: Array[ProgressBar] = []
 var _dash_text_hbox: Control = null
 var _last_input_was_controller := false
+var _splitscreen_enabled := false
+var _split_layer: CanvasLayer = null
+var _split_grid: Control = null
+var _split_join_label: Label = null
+var _split_pause_menu: Control = null
+var _split_pause_device: int = -1
+var _split_players_by_device: Dictionary = {}
+var _split_views_by_player: Dictionary = {}
 
 func _ready() -> void:
 	_install_controller_input_map()
+	_splitscreen_enabled = NetworkManager.has_meta("splitscreen_on_start") and NetworkManager.get_meta("splitscreen_on_start")
 	# F2 brings up the live audio-tuning panel — same sliders as action_lab.
 	add_child(AudioSettingsPanel.new())
 
@@ -253,7 +263,7 @@ func _ready() -> void:
 
 		# SP fallback: if nobody else has joined yet, and no bot was specifically requested,
 		# we still give a bot to fight as a default "sandbox" experience.
-		if not bot_requested:
+		if not bot_requested and not _splitscreen_enabled:
 			_spawn_bots.call_deferred(1)
 	else:
 		# Instantly show the client state — makes it obvious when you thought
@@ -264,6 +274,9 @@ func _ready() -> void:
 		_client_request_spawn_when_ready()
 
 	_update_scoreboard()
+	if _splitscreen_enabled:
+		_build_split_screen_layer()
+		_update_split_screen_views()
 
 func _track_input_device(event: InputEvent) -> void:
 	var controller_input := event is InputEventJoypadButton or event is InputEventJoypadMotion
@@ -314,6 +327,224 @@ func _add_joy_axis_action(action: StringName, axis: int, axis_value: float) -> v
 	if not InputMap.action_has_event(action, event):
 		InputMap.action_add_event(action, event)
 
+func _handle_splitscreen_input(event: InputEvent) -> bool:
+	if not (event is InputEventJoypadButton) or not event.pressed:
+		return false
+	var device := event.device
+	if _split_pause_menu and _split_pause_menu.visible and device == _split_pause_device:
+		if event.button_index == JOY_BUTTON_B:
+			_close_split_pause_menu()
+			return true
+		if event.button_index == JOY_BUTTON_X or event.button_index == JOY_BUTTON_A:
+			_leave_split_player(device)
+			_close_split_pause_menu()
+			return true
+	if event.button_index == JOY_BUTTON_X and not _split_players_by_device.has(device):
+		_join_split_player(device)
+		return true
+	if event.button_index == JOY_BUTTON_START and _split_players_by_device.has(device):
+		_open_split_pause_menu(device)
+		return true
+	return false
+
+func _build_split_screen_layer() -> void:
+	if _split_layer:
+		return
+	_split_layer = CanvasLayer.new()
+	_split_layer.layer = 0
+	add_child(_split_layer)
+
+	_split_grid = Control.new()
+	_split_grid.name = "SplitScreenGrid"
+	_split_grid.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_split_grid.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_split_layer.add_child(_split_grid)
+	_split_grid.resized.connect(_update_split_screen_views)
+
+	_split_join_label = Label.new()
+	_split_join_label.name = "JoinPrompt"
+	_split_join_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_split_join_label.text = "PRESS X TO JOIN"
+	_split_join_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_split_join_label.add_theme_font_size_override("font_size", 22)
+	_split_join_label.add_theme_color_override("font_color", Color(1.0, 0.9, 0.45))
+	_split_join_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.8))
+	_split_join_label.add_theme_constant_override("outline_size", 8)
+	_split_join_label.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	_split_join_label.offset_top = 18.0
+	_split_join_label.offset_bottom = 48.0
+	_split_layer.add_child(_split_join_label)
+
+	_build_split_pause_menu()
+
+func _join_split_player(device: int) -> void:
+	if not multiplayer.is_server() or _split_players_by_device.has(device):
+		return
+	var id := SPLIT_PLAYER_ID_BASE + device
+	var suffix := _split_players_by_device.size() + 2
+	var pname := "P%d" % suffix
+	NetworkManager.players[id] = pname
+	round_wins[id] = 0
+	_do_spawn.rpc(id, pname, _random_spawn(_current_player_positions()), false, device, true)
+	_broadcast_scores.rpc(round_wins)
+	_maybe_start_match()
+	_update_scoreboard()
+
+func _leave_split_player(device: int) -> void:
+	if not multiplayer.is_server() or not _split_players_by_device.has(device):
+		return
+	var id := int(_split_players_by_device[device])
+	_split_players_by_device.erase(device)
+	_remove_split_view(id)
+	_despawn.rpc(id)
+	NetworkManager.players.erase(id)
+	round_wins.erase(id)
+	pending_pick_cards_by_player.erase(id)
+	completed_picks.erase(id)
+	eliminated_players.erase(id)
+	if pending_picker_id == id:
+		pending_picker_id = 0
+		pending_pick_cards.clear()
+		_hide_card_pick.rpc_id(1)
+	_broadcast_scores.rpc(round_wins)
+	_update_scoreboard()
+	_update_split_screen_views()
+	if _active_match_player_count() < 2:
+		state = State.WAITING
+		_announce.rpc("PRESS X TO JOIN", 99.0)
+
+func _active_match_player_count() -> int:
+	var count := 0
+	for pid in NetworkManager.players:
+		if not _is_bot_id(int(pid)):
+			count += 1
+	return count
+
+func _split_local_player_ids() -> Array[int]:
+	var ids: Array[int] = []
+	var primary_id := multiplayer.get_unique_id()
+	if players_root.has_node(str(primary_id)):
+		ids.append(primary_id)
+	for child in players_root.get_children():
+		if bool(child.get("split_screen_local")):
+			var pid := int(child.get("player_id"))
+			if not ids.has(pid):
+				ids.append(pid)
+	ids.sort()
+	return ids
+
+func _update_split_screen_views() -> void:
+	if not _split_grid:
+		return
+	var ids := _split_local_player_ids()
+	for id in ids:
+		if not _split_views_by_player.has(id):
+			_create_split_view(id)
+	for id in _split_views_by_player.keys():
+		if not ids.has(int(id)):
+			_remove_split_view(int(id))
+
+	var n := ids.size()
+	_split_join_label.visible = n < 4
+	var rect := _split_grid.get_rect()
+	for i in range(n):
+		var id := ids[i]
+		var view: Dictionary = _split_views_by_player[id]
+		var container: SubViewportContainer = view.container
+		var viewport: SubViewport = view.viewport
+		var slot := _split_slot_rect(i, n, rect.size)
+		container.position = slot.position
+		container.size = slot.size
+		viewport.size = Vector2i(maxi(1, int(slot.size.x)), maxi(1, int(slot.size.y)))
+
+func _split_slot_rect(index: int, count: int, size: Vector2) -> Rect2:
+	if count <= 1:
+		return Rect2(Vector2.ZERO, size)
+	if count == 2:
+		var w := size.x * 0.5
+		return Rect2(Vector2(w * index, 0.0), Vector2(w, size.y))
+	var w2 := size.x * 0.5
+	var h2 := size.y * 0.5
+	return Rect2(Vector2(w2 * float(index % 2), h2 * float(index / 2)), Vector2(w2, h2))
+
+func _create_split_view(id: int) -> void:
+	var container := SubViewportContainer.new()
+	container.stretch = true
+	container.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_split_grid.add_child(container)
+
+	var viewport := SubViewport.new()
+	viewport.disable_3d = false
+	viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	viewport.world_3d = get_viewport().world_3d
+	container.add_child(viewport)
+
+	var camera := Camera3D.new()
+	camera.current = true
+	viewport.add_child(camera)
+	_split_views_by_player[id] = {"container": container, "viewport": viewport, "camera": camera}
+
+func _remove_split_view(id: int) -> void:
+	if not _split_views_by_player.has(id):
+		return
+	var view: Dictionary = _split_views_by_player[id]
+	var container: Node = view.container
+	if is_instance_valid(container):
+		container.queue_free()
+	_split_views_by_player.erase(id)
+
+func _update_split_screen_cameras() -> void:
+	_update_split_screen_views()
+	for id in _split_views_by_player.keys():
+		var player := players_root.get_node_or_null(str(id))
+		if player == null:
+			continue
+		var source := player.get_node_or_null("Camera") as Camera3D
+		if source == null:
+			continue
+		var view: Dictionary = _split_views_by_player[id]
+		var camera: Camera3D = view.camera
+		camera.global_transform = source.global_transform
+		camera.fov = source.fov
+
+func _build_split_pause_menu() -> void:
+	_split_pause_menu = PanelContainer.new()
+	_split_pause_menu.visible = false
+	_split_pause_menu.mouse_filter = Control.MOUSE_FILTER_STOP
+	_split_pause_menu.set_anchors_preset(Control.PRESET_CENTER)
+	_split_pause_menu.offset_left = -170.0
+	_split_pause_menu.offset_top = -78.0
+	_split_pause_menu.offset_right = 170.0
+	_split_pause_menu.offset_bottom = 78.0
+	_split_layer.add_child(_split_pause_menu)
+
+	var vb := VBoxContainer.new()
+	vb.alignment = BoxContainer.ALIGNMENT_CENTER
+	vb.add_theme_constant_override("separation", 10)
+	_split_pause_menu.add_child(vb)
+
+	var title := Label.new()
+	title.name = "Title"
+	title.text = "PLAYER MENU"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 18)
+	vb.add_child(title)
+
+	var hint := Label.new()
+	hint.text = "A/X LEAVE   B RESUME"
+	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	hint.add_theme_font_size_override("font_size", 13)
+	vb.add_child(hint)
+
+func _open_split_pause_menu(device: int) -> void:
+	_split_pause_device = device
+	_split_pause_menu.visible = true
+
+func _close_split_pause_menu() -> void:
+	_split_pause_device = -1
+	if _split_pause_menu:
+		_split_pause_menu.visible = false
+
 func _client_request_spawn_when_ready() -> void:
 	# The scene change happens before `connected_to_server` fires, so the
 	# client can reach _ready with a peer that isn't fully connected yet.
@@ -339,6 +570,8 @@ func _process(delta: float) -> void:
 		# reticle visibly blooms when sprinting / spamming.
 		if _custom_crosshair:
 			_custom_crosshair.spread = local_player.get_effective_spread()
+	if _splitscreen_enabled:
+		_update_split_screen_cameras()
 
 	if _pick_timeout_active:
 		_pick_timeout_timer -= delta
@@ -364,6 +597,9 @@ func _process(delta: float) -> void:
 
 func _input(event: InputEvent) -> void:
 	_track_input_device(event)
+	if _splitscreen_enabled and _handle_splitscreen_input(event):
+		get_viewport().set_input_as_handled()
+		return
 
 	# Tab hold = scoreboard overlay. Use _input (not _unhandled_input) so we
 	# beat the viewport's GUI focus navigation, which would otherwise consume
@@ -378,15 +614,75 @@ func _input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_F1:
 		_toggle_dev_panel()
 		return
-	# Pause menu: ui_cancel (Esc) plus a hard-coded P fallback. Esc is sometimes
-	# eaten by a focused Control or by the OS, so P is always available.
+
+	# Pause menu: ui_cancel (Esc), Enter, and numpad Enter.
 	var pause_pressed: bool = event.is_action_pressed("ui_cancel") \
-		or (event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_P)
+		or (event is InputEventKey and event.pressed and not event.echo and (
+			event.keycode == KEY_ENTER \
+			or event.keycode == KEY_KP_ENTER
+		))
 	if pause_pressed:
 		if _dev_root and _dev_root.visible:
 			_toggle_dev_panel()
 			return
 		_toggle_pause_menu()
+		return
+
+	if event is InputEventKey and event.pressed and not event.echo:
+		var cheat_handled := true
+		match event.keycode:
+			KEY_G:
+				var t = _dev_target_player()
+				if t:
+					t.god_mode = not t.god_mode
+					_announce.rpc("GODMODE: %s" % ("ON" if t.god_mode else "OFF"), 1.0)
+					if _dev_root and _dev_root.visible: _refresh_dev_panel()
+			KEY_P:
+				bots_hold_fire = not bots_hold_fire
+				_announce.rpc("PASSIVE AI: %s" % ("ON" if bots_hold_fire else "OFF"), 1.0)
+				if _dev_root and _dev_root.visible: _refresh_dev_panel()
+			KEY_M:
+				if multiplayer.is_server():
+					_restart_match()
+			KEY_1:
+				var t = _dev_target_player()
+				if t:
+					t.reset_weapon.rpc()
+					_announce.rpc("WEAPON RESET", 1.0)
+					if _dev_root and _dev_root.visible: _refresh_dev_panel()
+			KEY_2:
+				var t = _dev_target_player()
+				if t:
+					t.apply_card.rpc("sniper")
+					_announce.rpc("APPLIED: SNIPER", 1.0)
+					if _dev_root and _dev_root.visible: _refresh_dev_panel()
+			KEY_3:
+				var t = _dev_target_player()
+				if t:
+					t.apply_card.rpc("shotgun")
+					_announce.rpc("APPLIED: SHOTGUN", 1.0)
+					if _dev_root and _dev_root.visible: _refresh_dev_panel()
+			KEY_4:
+				var t = _dev_target_player()
+				if t:
+					t.apply_card.rpc("uzi")
+					_announce.rpc("APPLIED: UZI", 1.0)
+					if _dev_root and _dev_root.visible: _refresh_dev_panel()
+			KEY_5:
+				var t = _dev_target_player()
+				if t:
+					t.apply_card.rpc("bazooka")
+					_announce.rpc("APPLIED: BAZOOKA", 1.0)
+					if _dev_root and _dev_root.visible: _refresh_dev_panel()
+			KEY_SLASH:
+				if event.shift_pressed: # '?'
+					_show_dev_help()
+			_:
+				cheat_handled = false
+
+		if cheat_handled:
+			get_viewport().set_input_as_handled()
+			return
 
 func _refresh_cooldowns() -> void:
 	var w: Weapon = local_player.weapon
@@ -538,7 +834,14 @@ func _spawn_is_clear(pos: Vector3) -> bool:
 	return get_world_3d().direct_space_state.intersect_shape(query, 1).is_empty()
 
 @rpc("authority", "call_local", "reliable")
-func _do_spawn(id: int, pname: String, pos: Vector3, bot: bool = false) -> void:
+func _do_spawn(
+	id: int,
+	pname: String,
+	pos: Vector3,
+	bot: bool = false,
+	input_device: int = -1,
+	split_local: bool = false,
+) -> void:
 	if players_root.has_node(str(id)):
 		return
 	var p := PLAYER_SCENE.instantiate()
@@ -546,6 +849,9 @@ func _do_spawn(id: int, pname: String, pos: Vector3, bot: bool = false) -> void:
 	p.player_id = id
 	p.is_bot = bot
 	p.player_name = pname
+	p.local_input_device = input_device
+	p.split_screen_local = split_local
+	p.set_multiplayer_authority(1 if (bot or split_local) else id)
 	players_root.add_child(p, true)
 	# global_position must be set after add_child — it requires being in-tree.
 	p.global_position = pos
@@ -560,6 +866,10 @@ func _do_spawn(id: int, pname: String, pos: Vector3, bot: bool = false) -> void:
 			var listener := RaytracedAudioListener.new()
 			cam.add_child(listener)
 			listener.owner = cam
+	if _splitscreen_enabled and split_local:
+		if input_device >= 0:
+			_split_players_by_device[input_device] = id
+		_update_split_screen_views()
 
 @rpc("authority", "call_local", "reliable")
 func _despawn(id: int) -> void:
@@ -1168,9 +1478,6 @@ func _get_card_stat_diff(card_id: String) -> Array[String]:
 	if base_w.extra_projectiles != next_w.extra_projectiles:
 		out.append("%+d Projectiles" % (next_w.extra_projectiles - base_w.extra_projectiles))
 
-	if base_w.pierce_count != next_w.pierce_count:
-		out.append("%+d Pierce" % (next_w.pierce_count - base_w.pierce_count))
-
 	if base_w.ricochet_count != next_w.ricochet_count:
 		out.append("%+d Bounces" % (next_w.ricochet_count - base_w.ricochet_count))
 
@@ -1260,6 +1567,9 @@ func _server_card_picked(card_id: String) -> void:
 	var sender := multiplayer.get_remote_sender_id()
 	if sender == 0:
 		sender = multiplayer.get_unique_id()
+	if _splitscreen_enabled and not pending_pick_cards_by_player.has(sender) \
+			and pending_picker_id >= SPLIT_PLAYER_ID_BASE:
+		sender = pending_picker_id
 	if not pending_pick_cards_by_player.has(sender):
 		return
 	var cards: Array = pending_pick_cards_by_player[sender]
@@ -1612,7 +1922,6 @@ func _refresh_stats_panel(projected_card_id: String = "") -> void:
 	_add_stat_comparison("ACCURACY", rad_to_deg(base_w.spread), rad_to_deg(next_w.spread), false)
 	_add_stat_comparison("MOVEMENT", base_w.move_speed_mult, next_w.move_speed_mult, true)
 	_add_stat_comparison("BOUNCES", base_w.ricochet_count, next_w.ricochet_count, true)
-	_add_stat_comparison("PIERCE", base_w.pierce_count, next_w.pierce_count, true)
 	_add_stat_comparison("MAX HP", 100.0 + base_w.max_hp_bonus, 100.0 + next_w.max_hp_bonus, true)
 	_add_stat_comparison("JUMPS", 2.0 + base_w.extra_jumps, 2.0 + next_w.extra_jumps, true)
 	_add_stat_comparison("PROJ SPD", base_w.bullet_speed_mult, next_w.bullet_speed_mult, true)
@@ -2203,11 +2512,18 @@ func _refresh_dev_panel() -> void:
 	for c in _dev_content.get_children():
 		c.queue_free()
 	_dev_heading("DEV  ·  F1 to close", Color(0.5, 0.9, 1.0), 20)
+	_dev_note("Quick shortcuts: G (god), P (passive AI), M (restart), 1-5 (cards), ? (help)")
 	_dev_toggle("Bots hold fire (move + aim, no shooting)", bots_hold_fire, func(v: bool) -> void:
 		bots_hold_fire = v
 		call_deferred("_refresh_dev_panel"))
-	_dev_player_picker()
+
 	var target: Node = _dev_target_player()
+	if target and is_instance_valid(target):
+		_dev_toggle("God mode (this player)", target.get("god_mode") == true, func(v: bool) -> void:
+			target.god_mode = v
+			call_deferred("_refresh_dev_panel"))
+
+	_dev_player_picker()
 	# Cards first — rare ones (uzi, bazooka, etc.) at the top so they're easy
 	# to spam-add for testing. Common cards follow.
 	_dev_heading("— CARDS —", Color(1.0, 0.6, 0.9), 15)
@@ -2239,7 +2555,6 @@ func _refresh_dev_panel() -> void:
 		_dev_stat("reload time", "%.2fs  (×%.2f)" % [w.get_reload_time(), w.reload_mult])
 		_dev_stat("headshot mult", "×%.2f" % w.get_headshot_mult())
 		_dev_stat("shots / trigger", str(w.get_shots_per_trigger()))
-		_dev_stat("pierce", str(w.pierce_count))
 		_dev_stat("ricochet", str(w.ricochet_count))
 		_dev_stat("spread", "%.4f rad  (%.2f°)" % [w.spread, rad_to_deg(w.spread)])
 		_dev_stat("lifesteal", "%.0f%%" % (w.lifesteal * 100.0))
@@ -2375,3 +2690,26 @@ func _dev_remove_card(card_id: String) -> void:
 	for c in remaining:
 		target.apply_card.rpc(str(c))
 	call_deferred("_refresh_dev_panel")
+
+func _restart_match() -> void:
+	if not multiplayer.is_server():
+		return
+	state = State.WAITING
+	round_wins.clear()
+	for pid in NetworkManager.players:
+		round_wins[pid] = 0
+	_broadcast_scores.rpc(round_wins)
+	_maybe_start_match()
+
+func _show_dev_help() -> void:
+	var help_text = "DEV SHORTCUTS:\n" + \
+		"G: Toggle Godmode\n" + \
+		"P: Toggle Passive AI\n" + \
+		"M: Restart Match\n" + \
+		"1: Reset Weapon\n" + \
+		"2: Apply Sniper\n" + \
+		"3: Apply Shotgun\n" + \
+		"4: Apply Uzi\n" + \
+		"5: Apply Bazooka\n" + \
+		"F1: Full Dev Panel"
+	_announce.rpc(help_text, 4.0)

@@ -11,6 +11,7 @@ extends Control
 const MAX_BOTS := 7
 var _bot_count: int = 1
 var _bot_count_label: Label = null
+var _splitscreen_button: Button = null
 
 func _ready() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
@@ -19,6 +20,7 @@ func _ready() -> void:
 	bot_button.pressed.connect(_on_vs_bot)
 	host_button.pressed.connect(_on_host)
 	join_button.pressed.connect(_on_join)
+	_build_splitscreen_button()
 	_build_bot_count_row()
 
 	name_input.text = "Player_%d" % (randi() % 1000)
@@ -62,6 +64,19 @@ func _build_bot_count_row() -> void:
 	var actions := bot_button.get_parent()
 	actions.add_child(row)
 	actions.move_child(row, bot_button.get_index())  # place row right above VS BOT
+
+func _build_splitscreen_button() -> void:
+	_splitscreen_button = Button.new()
+	_splitscreen_button.text = "SPLITSCREEN"
+	_splitscreen_button.custom_minimum_size = Vector2(0, 44)
+	_splitscreen_button.add_theme_stylebox_override("normal", load("res://scenes/main.tscn::Style_Button"))
+	_splitscreen_button.add_theme_stylebox_override("hover", load("res://scenes/main.tscn::Style_Button_Hover"))
+	_splitscreen_button.add_theme_stylebox_override("pressed", load("res://scenes/main.tscn::Style_Button"))
+	_splitscreen_button.pressed.connect(_on_splitscreen)
+
+	var actions := bot_button.get_parent()
+	actions.add_child(_splitscreen_button)
+	actions.move_child(_splitscreen_button, bot_button.get_index() + 1)
 
 func _on_bot_minus() -> void:
 	_bot_count = max(1, _bot_count - 1)
@@ -141,13 +156,24 @@ func _exit_tree() -> void:
 
 func _on_vs_bot() -> void:
 	status_label.text = "Starting solo match..."
+	NetworkManager.set_meta("splitscreen_on_start", false)
 	if NetworkManager.host_game(name_input.text):
 		NetworkManager.set_meta("spawn_bot_on_start", true)
 		NetworkManager.set_meta("bot_count_on_start", _bot_count)
 		_go_to_game()
 
+func _on_splitscreen() -> void:
+	status_label.text = "Starting splitscreen match..."
+	NetworkManager.set_meta("splitscreen_on_start", true)
+	NetworkManager.set_meta("spawn_bot_on_start", false)
+	if NetworkManager.host_game(name_input.text):
+		_go_to_game()
+	else:
+		status_label.text = "Failed to start splitscreen (port in use?)"
+
 func _on_host() -> void:
 	status_label.text = "Hosting..."
+	NetworkManager.set_meta("splitscreen_on_start", false)
 	NetworkManager.set_meta("spawn_bot_on_start", false)
 	if NetworkManager.host_game(name_input.text):
 		_go_to_game()
@@ -162,6 +188,7 @@ func _on_join() -> void:
 
 func _do_join(addr: String) -> void:
 	status_label.text = "Connecting to %s..." % addr
+	NetworkManager.set_meta("splitscreen_on_start", false)
 	if NetworkManager.join_game(addr, name_input.text):
 		_go_to_game()
 	else:

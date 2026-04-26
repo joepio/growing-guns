@@ -33,7 +33,6 @@ const SPECIAL_SWORD := "sword"
 # --- Additive modifiers ---
 @export var mag_size_bonus: int = 0
 @export var extra_projectiles: int = 0         # bullets per trigger beyond the first
-@export var pierce_count: int = 0              # extra players a ray can pass through
 @export var ricochet_count: int = 0            # wall bounces
 
 # --- Behaviour knobs ---
@@ -104,7 +103,6 @@ func reset() -> void:
 		headshot_mult = 1.0
 		mag_size_bonus = 0
 		extra_projectiles = 0
-		pierce_count = 0
 		ricochet_count = 0
 		spread = BASE_SPREAD
 		recoil_per_shot = BASE_RECOIL

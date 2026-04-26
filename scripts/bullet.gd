@@ -10,7 +10,6 @@ var weapon_stats: Weapon = null
 var max_range: float = 200.0
 var distance_traveled: float = 0.0
 
-var pierce_left: int = 0
 var ricochet_left: int = 0
 var excluded_rids: Array[RID] = []
 
@@ -34,7 +33,6 @@ func setup(origin: Vector3, dir: Vector3, shooter: int, w: Weapon) -> void:
 	add_to_group("projectiles")
 	speed = w.get_bullet_speed()
 	velocity = direction * speed
-	pierce_left = w.pierce_count
 	ricochet_left = w.ricochet_count
 
 	look_at(global_position + direction)
@@ -257,15 +255,7 @@ func _handle_collision(result: Dictionary) -> void:
 			var splash_pos: Vector3 = hit_pos + normal * 0.1
 			shooter_node.call("_apply_bullet_splash", splash_pos, weapon_stats.explosive_radius, weapon_stats.explosive_damage, shooter_id)
 
-	# Pierce / Ricochet logic
-	if hit_player and pierce_left > 0:
-		pierce_left -= 1
-		var hit_rids: Array = hit_player.call("get_hitbox_rids") if hit_player.has_method("get_hitbox_rids") else [hit_player.get_rid()]
-		excluded_rids.append_array(hit_rids)
-		# Continue travel after slight nudge
-		global_position += direction * 0.05
-		return
-
+	# Ricochet logic
 	if not hit_player and ricochet_left > 0:
 		ricochet_left -= 1
 		# Bounce the full velocity so drop / homing keep working post-ricochet.
