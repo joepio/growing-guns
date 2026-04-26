@@ -48,6 +48,15 @@ extends Node3D
 @export var has_stock: bool = true : set = _set_has_stock
 @export var has_foregrip: bool = true : set = _set_has_foregrip
 
+@export_group("Barrel Shroud")
+# Vented metal shroud wrapping the barrel — appears on explosive rounds for
+# extra menace. Built from boxes as 4 slotted plates around the barrel,
+# with edge rails + end caps + inner ribs framing the slots.
+@export var has_shroud: bool = false : set = _set_has_shroud
+@export var shroud_extent: float = 0.05 : set = _set_shroud_extent       # half-width of square cross-section
+@export var shroud_length_frac: float = 0.65 : set = _set_shroud_length_frac # fraction of barrel_length covered
+@export var shroud_slot_count: int = 5 : set = _set_shroud_slot_count
+
 @export_group("Charging Handle")
 # Bolt / charging handle: a small cylindrical knob sticking out sideways
 # from a slot in the receiver (axis perpendicular to the barrel, like an
@@ -131,6 +140,10 @@ func _set_stock_size(v: Vector3) -> void:           stock_size = v;           _r
 func _set_stock_taper(v: float) -> void:            stock_taper = v;          _rebuild()
 func _set_has_stock(v: bool) -> void:               has_stock = v;            _rebuild()
 func _set_has_foregrip(v: bool) -> void:            has_foregrip = v;         _rebuild()
+func _set_has_shroud(v: bool) -> void:              has_shroud = v;           _rebuild()
+func _set_shroud_extent(v: float) -> void:          shroud_extent = v;        _rebuild()
+func _set_shroud_length_frac(v: float) -> void:     shroud_length_frac = v;   _rebuild()
+func _set_shroud_slot_count(v: int) -> void:        shroud_slot_count = max(1, v); _rebuild()
 func _set_indicator_color(v: Color) -> void:        indicator_color = v;      _rebuild()
 func _set_indicator_size(v: Vector3) -> void:       indicator_size = v;       _rebuild()
 func _set_indicator_energy(v: float) -> void:       indicator_energy = v;     _rebuild()
@@ -442,6 +455,12 @@ func apply_weapon_stats(w: Weapon) -> void:
 	has_scope = w.spread < 0.003
 	# Very heavy hitters get a Havoc-style wide rectangular muzzle.
 	wide_muzzle = w.damage_mult >= 3.0
+	# Explosive rounds (BAZOOKA-style) get a vented barrel shroud — that
+	# slotted metal sleeve adds visual weight and reads as "launcher". Sits
+	# snugly around the barrel: half-width is barrel radius plus a 1 cm
+	# margin (covers the radial wall + a few mm of air gap).
+	has_shroud = w.explosive_radius > 0.0
+	shroud_extent = barrel_radius + 0.010
 
 	_suppress_rebuild = false
 	_rebuild()
@@ -535,6 +554,14 @@ func _rebuild() -> void:
 			_add_box("Muzzle%d" % i, slab_size, Vector3(bx, 0, muzzle_centre_z), _barrel_material)
 		else:
 			_add_cylinder("Muzzle%d" % i, muzzle_r, muzzle_r * 0.85, muzzle_length, Vector3(bx, 0, muzzle_centre_z), _barrel_material)
+
+	# Vented barrel shroud (explosive rounds only — see apply_weapon_stats).
+	# Wraps the rear portion of the barrel for a launcher silhouette.
+	if has_shroud:
+		var s_length: float = barrel_length * clampf(shroud_length_frac, 0.05, 0.95)
+		var s_centre_z: float = receiver_front_z - s_length * 0.5
+		var s_extent: float = maxf(shroud_extent, barrel_radius + 0.012)  # never thinner than barrel
+		_add_barrel_shroud(s_centre_z, s_length, s_extent, shroud_slot_count, darker_metal)
 
 	# Magazine — box (default) or drum (Tommy-gun style cylinder, axis along X)
 	# when mag_drum is on.
@@ -667,6 +694,51 @@ func _rebuild() -> void:
 	# weapons mid-burst doesn't visually reset the temperature.
 	_update_heat_visual()
 
+# Vented square shroud — 4 slotted plates around the barrel. Each plate
+# has a front and back end cap (full tangential width), two long edge
+# rails along its X edges, and N-1 inner ribs creating N slots between
+# them. The 4 sides are siblings under per-side Node3D parents that we
+# rotate around Z so each plate ends up on its own face of the box.
+func _add_barrel_shroud(centre_z: float, length: float, half_extent: float, slot_count: int, mat: Material) -> void:
+	if length <= 0.0 or half_extent <= 0.0 or slot_count <= 0:
+		return
+	var plate_thickness: float = 0.006    # radial wall thickness
+	# Wide rails — they overlap with the adjacent plate's rails at each
+	# corner, forming substantial L-shaped corner posts that close off the
+	# diagonal "see-through" gaps that made earlier versions look caged.
+	var rail_width: float = 0.022
+	var rib_z_thickness: float = 0.025    # axial thickness of inner ribs
+	var end_cap_thickness: float = 0.024  # axial thickness of front/back caps
+	var inner_length: float = maxf(0.001, length - 2.0 * end_cap_thickness)
+	var ribs: int = max(0, slot_count - 1)
+	var slot_length: float = maxf(0.001,
+		(inner_length - float(ribs) * rib_z_thickness) / float(slot_count))
+	var z_back: float = centre_z + length * 0.5
+	var z_front: float = centre_z - length * 0.5
+	var plate_y: float = half_extent - plate_thickness * 0.5  # outward face of each plate
+	var plate_width: float = 2.0 * half_extent
+	var rib_x_width: float = maxf(0.001, plate_width - 2.0 * rail_width)
+	for side_idx in 4:
+		var side := Node3D.new()
+		side.name = "Shroud%d" % side_idx
+		side.rotation = Vector3(0.0, 0.0, float(side_idx) * PI * 0.5)
+		add_child(side)
+		_finalize_owner(side)
+		var cap_size := Vector3(plate_width, plate_thickness, end_cap_thickness)
+		_add_box("FrontCap", cap_size,
+			Vector3(0.0, plate_y, z_front + end_cap_thickness * 0.5), mat, side)
+		_add_box("BackCap", cap_size,
+			Vector3(0.0, plate_y, z_back - end_cap_thickness * 0.5), mat, side)
+		var rail_x: float = half_extent - rail_width * 0.5
+		var rail_size := Vector3(rail_width, plate_thickness, inner_length)
+		_add_box("RailL", rail_size, Vector3(-rail_x, plate_y, centre_z), mat, side)
+		_add_box("RailR", rail_size, Vector3(+rail_x, plate_y, centre_z), mat, side)
+		var rib_size := Vector3(rib_x_width, plate_thickness, rib_z_thickness)
+		for i in ribs:
+			var rib_z: float = z_front + end_cap_thickness + slot_length \
+				+ float(i) * (slot_length + rib_z_thickness) + rib_z_thickness * 0.5
+			_add_box("Rib%d" % i, rib_size, Vector3(0.0, plate_y, rib_z), mat, side)
+
 # ---- Helpers ----
 func _make_material(col: Color, metallic: float, roughness: float) -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
@@ -675,7 +747,7 @@ func _make_material(col: Color, metallic: float, roughness: float) -> StandardMa
 	m.roughness = clampf(roughness, 0.0, 1.0)
 	return m
 
-func _add_box(part_name: String, size: Vector3, pos: Vector3, mat: Material) -> MeshInstance3D:
+func _add_box(part_name: String, size: Vector3, pos: Vector3, mat: Material, parent: Node3D = null) -> MeshInstance3D:
 	var mi := MeshInstance3D.new()
 	mi.name = part_name
 	var bm := BoxMesh.new()
@@ -683,7 +755,8 @@ func _add_box(part_name: String, size: Vector3, pos: Vector3, mat: Material) -> 
 	mi.mesh = bm
 	mi.material_override = mat
 	mi.position = pos
-	add_child(mi)
+	var p: Node3D = parent if parent != null else self
+	p.add_child(mi)
 	_finalize_owner(mi)
 	return mi
 
