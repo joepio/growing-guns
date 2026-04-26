@@ -37,7 +37,7 @@ var _gun_sounds: Array[AudioStreamWAV] = []
 var _step_sounds: Array[AudioStream] = []
 var _card_pick_sound: AudioStreamWAV = null
 
-# Tunable mix knobs — adjust live via scenes/audio_lab.tscn.
+# Tunable mix knobs — adjust live via scenes/action_lab.tscn.
 var shot_self_db: float = -10.0
 var shot_world_db: float = 5.0
 var shot_dmg_per_double_db: float = 6.0

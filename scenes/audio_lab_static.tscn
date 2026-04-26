@@ -1,6 +1,6 @@
-[gd_scene format=3 uid="uid://b0audiolab02"]
+[gd_scene format=3 uid="uid://bsaj2cu5hkbmf"]
 
 [ext_resource type="Script" path="res://scripts/audio_lab_static.gd" id="1_lab_static"]
 
-[node name="AudioLabStatic" type="Node3D"]
+[node name="AudioLabStatic" type="Node3D" unique_id=726499608]
 script = ExtResource("1_lab_static")

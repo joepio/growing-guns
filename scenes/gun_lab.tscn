@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://b0gunlab01"]
+
+[ext_resource type="Script" path="res://scripts/gun_lab.gd" id="1_gunlab"]
+
+[node name="GunLab" type="Node3D"]
+script = ExtResource("1_gunlab")

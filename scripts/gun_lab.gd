@@ -1,10 +1,9 @@
 extends Node3D
 
-# Focused audio sandbox: one stationary shooter + a free-cam listener. Use to
-# isolate gunshot sounds without crossfire chaos. Toggle FPV mode to teleport
-# the listener to the shooter's eye position; F1 opens a card panel that
-# applies cards to the static shooter so you can hear how each weapon variant
-# sounds.
+# Gun lab: one stationary shooter + a free-cam listener. Use to isolate
+# gunshot sounds without crossfire chaos. Toggle FPV mode to teleport the
+# listener to the shooter's eye position; F1 opens a card panel that applies
+# cards to the static shooter so you can hear how each weapon variant sounds.
 
 const PLAYER_SCENE := preload("res://scenes/player.tscn")
 const ARENA_SCENE := preload("res://scenes/arena.tscn")
@@ -20,6 +19,10 @@ const FREE_CAM_INITIAL := Vector3(10.0, 2.5, 18.0)
 const TARGET_POS := Vector3(0.0, 1.5, 0.0)
 const SPECTATOR_POS := Vector3(14.0, 3.5, 8.0)
 const SPECTATOR_LOOK_AT := Vector3(0.0, 1.5, 8.0)
+# Side-of-gun close-up — useful for inspecting muzzle flash + reload anims and
+# hearing the muzzle blast from a near-field bystander angle.
+const GUN_SIDE_POS := Vector3(1.4, 1.6, 17.4)
+const GUN_SIDE_LOOK_AT := Vector3(0.0, 1.6, 17.4)
 # Authority ID we move the shooter to so player.gd's authority-gated paths
 # (mouse-look in _unhandled_input, _input_impl, etc.) don't fire on this lab's
 # local peer. 999 is just "anything other than 1".
@@ -45,6 +48,10 @@ var _card_panel: PanelContainer = null
 var _stats_label: Label = null
 var _hud_label: Label = null
 var _saved_mouse_mode_card: int = Input.MOUSE_MODE_VISIBLE
+# Stash the listener pose before entering FPV so TAB can restore it.
+var _pre_fpv_pos: Vector3 = FREE_CAM_INITIAL
+var _pre_fpv_yaw: float = 0.0
+var _pre_fpv_pitch: float = 0.0
 
 func _ready() -> void:
 	_build_arena()
@@ -159,14 +166,49 @@ func _toggle_card_panel() -> void:
 		Input.mouse_mode = _saved_mouse_mode_card
 
 func _set_fpv(on: bool) -> void:
-	_fpv = on
-	if _fpv and _shooter and is_instance_valid(_shooter):
-		# Snap free-cam to the shooter's eye and align rotation so user looks
-		# forward from the shooter's POV. Mouse-look is suspended in FPV; the
-		# camera tracks the shooter every frame.
+	if on == _fpv:
+		return
+	if on and _shooter and is_instance_valid(_shooter):
+		# Stash the current listener pose so we can return on toggle-off.
+		_pre_fpv_pos = _free_cam.global_position
+		_pre_fpv_yaw = _yaw
+		_pre_fpv_pitch = _pitch
+		_fpv = true
+		# Hide the visible body & nameplate — you ARE the shooter, not looking
+		# AT them. The body model normally stays visible because is_bot=true.
+		var body: Node = _shooter.get_node_or_null("BodyModel")
+		if body:
+			body.visible = false
+		var name_lbl: Node = _shooter.get_node_or_null("NameLabel")
+		if name_lbl:
+			name_lbl.visible = false
+		# Make is_self=true in SFX.shot() — shooter_id needs to equal our local
+		# unique_id (always 1 in single-peer). Rename the node to match so
+		# player.gd:_rifle_fired's get_node_or_null(str(shooter_id)) still
+		# resolves the weapon. Restored on exit.
+		_shooter.set("player_id", 1)
+		_shooter.name = "1"
+		# Align look forward and snap to the eye. Camera tracks the eye each
+		# frame in _process so head movement (none, since pinned) is followed.
 		_free_cam.rotation = Vector3(0.0, SHOOTER_YAW, 0.0)
 		_yaw = SHOOTER_YAW
 		_pitch = 0.0
+	else:
+		_fpv = false
+		if _shooter and is_instance_valid(_shooter):
+			var body: Node = _shooter.get_node_or_null("BodyModel")
+			if body:
+				body.visible = true
+			var name_lbl: Node = _shooter.get_node_or_null("NameLabel")
+			if name_lbl:
+				name_lbl.visible = true
+			_shooter.set("player_id", 2)
+			_shooter.name = "2"
+		# Restore the listener pose from before FPV.
+		_free_cam.global_position = _pre_fpv_pos
+		_yaw = _pre_fpv_yaw
+		_pitch = _pre_fpv_pitch
+		_free_cam.rotation = Vector3(_pitch, _yaw, 0.0)
 	_update_hud()
 
 func _process(delta: float) -> void:
@@ -262,7 +304,7 @@ func _build_card_panel(canvas: CanvasLayer) -> void:
 	outer.add_theme_constant_override("separation", 6)
 	_card_panel.add_child(outer)
 	var title := Label.new()
-	title.text = "STATIC SHOOTER LAB — F1 hide  ·  TAB FPV  ·  SPACE fire  ·  R reload  ·  RMB look"
+	title.text = "GUN LAB — F1 hide  ·  TAB FPV  ·  SPACE fire  ·  R reload  ·  RMB look"
 	title.add_theme_font_size_override("font_size", 12)
 	title.add_theme_color_override("font_color", Color(1, 0.95, 0.6))
 	outer.add_child(title)
@@ -307,6 +349,12 @@ func _build_card_panel(canvas: CanvasLayer) -> void:
 	spec_btn.focus_mode = Control.FOCUS_NONE
 	spec_btn.pressed.connect(_listener_to_spectator)
 	preset_row.add_child(spec_btn)
+	var gun_btn := Button.new()
+	gun_btn.text = "Gun side"
+	gun_btn.tooltip_text = "Close-up beside the muzzle — inspect the gun visually"
+	gun_btn.focus_mode = Control.FOCUS_NONE
+	gun_btn.pressed.connect(_listener_to_gun_side)
+	preset_row.add_child(gun_btn)
 	# Card list (scrollable so it survives any number of cards).
 	var scroll := ScrollContainer.new()
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
@@ -365,7 +413,7 @@ func _reset_weapon() -> void:
 
 # Down-range listener — what a target hears when the shooter fires at them.
 func _listener_to_target() -> void:
-	_fpv = false
+	_exit_fpv_for_preset()
 	_teleport_listener(TARGET_POS, SHOOTER_POS)
 
 # FPV — at the shooter's eye. Reuses the TAB-toggle path so audio + HUD stay
@@ -375,8 +423,23 @@ func _listener_to_shooter() -> void:
 
 # Off to the side, watching the bullet's path — like an observer/cameraman.
 func _listener_to_spectator() -> void:
-	_fpv = false
+	_exit_fpv_for_preset()
 	_teleport_listener(SPECTATOR_POS, SPECTATOR_LOOK_AT)
+
+# Side close-up — inspect muzzle flash + reload anims from a near-field
+# bystander angle. Useful for visual gun-tuning.
+func _listener_to_gun_side() -> void:
+	_exit_fpv_for_preset()
+	_teleport_listener(GUN_SIDE_POS, GUN_SIDE_LOOK_AT)
+
+# A non-FPV preset was clicked while we're in FPV — go through _set_fpv(false)
+# so the body model, name label, and player_id all reset cleanly. We don't
+# want the saved-position restore to happen here (the preset is going to set
+# its own position immediately), so suppress it for this call.
+func _exit_fpv_for_preset() -> void:
+	if not _fpv:
+		return
+	_set_fpv(false)
 
 # Helper: place the free-cam at `pos` and orient it toward `look_target`,
 # syncing _yaw/_pitch so subsequent mouse-look picks up where look_at left off.

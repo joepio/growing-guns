@@ -1,10 +1,10 @@
 extends Node3D
 
-# Audio sandbox: full arena, real Player bots fighting each other with random
+# Action lab: full arena, real Player bots fighting each other with random
 # card builds, free-look camera, and a sidebar of sliders that retune the
 # SFX volume knobs live.
 #
-# Run: godot --scene res://scenes/audio_lab.tscn  (or set as main scene).
+# Run: godot --scene res://scenes/action_lab.tscn  (or set as main scene).
 
 const PLAYER_SCENE := preload("res://scenes/player.tscn")
 const ARENA_SCENE := preload("res://scenes/arena.tscn")
@@ -189,7 +189,7 @@ func _build_ui() -> void:
 	panel.add_child(vb)
 
 	var title := Label.new()
-	title.text = "AUDIO LAB — RMB look, WASD/QE move, Shift sprint"
+	title.text = "ACTION LAB — RMB look, WASD/QE move, Shift sprint"
 	title.add_theme_font_size_override("font_size", 14)
 	title.add_theme_color_override("font_color", Color(1, 0.95, 0.6))
 	vb.add_child(title)
