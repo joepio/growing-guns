@@ -35,6 +35,11 @@ const CASING_VARIANTS := 8
 const SPEED_OF_SOUND := 343.0
 
 var _sample_cache: Dictionary = {}
+# Pre-converted AudioStreamWAV per cache key. Without this, every _play call
+# re-converts the cached PackedVector2Array to a fresh WAV — which dominated
+# the per-physics-tick cost of explosions in the perf bench (~1 ms per blast,
+# 10+ blasts/sec).
+var _wav_cache: Dictionary = {}
 var _hurt_sounds: Array[AudioStreamWAV] = []
 var _death_sounds: Array[AudioStreamWAV] = []
 var _gun_sounds: Array[AudioStreamWAV] = []
@@ -459,6 +464,16 @@ func _cached_samples(key: String, generator: Callable) -> PackedVector2Array:
 		_sample_cache[key] = generator.call()
 	return _sample_cache[key]
 
+# Returns a cached AudioStreamWAV for the given key, generating + converting
+# the PackedVector2Array on first request. Hot paths (explosion / shot /
+# casing) call this instead of `_samples_to_wav(_cached_samples(...))` so
+# they avoid re-allocating a fresh WAV (and its byte-array data) per call.
+func _cached_wav(key: String, generator: Callable) -> AudioStreamWAV:
+	if not _wav_cache.has(key):
+		var samples: PackedVector2Array = _cached_samples(key, generator)
+		_wav_cache[key] = _samples_to_wav(samples)
+	return _wav_cache[key]
+
 func _shot_cache_key(w: Weapon, variant: int) -> String:
 	if w == null:
 		return "shot:default:%d" % variant
@@ -523,9 +538,9 @@ func shot(w: Weapon = null, at: Vector3 = NO_POS, is_self: bool = false) -> void
 		_play_stream(stream, wet_vol, at, pitch, wet_label, shot_dist, false, spl)
 	else:
 		var key := _shot_cache_key(w, shot_variant)
-		var samples := _cached_samples(key, Callable(self, "_synth_shot").bind(w, shot_variant))
-		_play(samples, dry_vol, at, label, shot_dist, true, spl)
-		_play(samples, wet_vol, at, wet_label, shot_dist, false, spl)
+		var wav := _cached_wav(key, Callable(self, "_synth_shot").bind(w, shot_variant))
+		_play_stream(wav, dry_vol, at, 1.0, label, shot_dist, true, spl)
+		_play_stream(wav, wet_vol, at, 1.0, wet_label, shot_dist, false, spl)
 	# Rumble layer — only for hard-hitting weapons (>1.4× base damage). Reuses
 	# the explosion rumble synth + cache (same brown-noise body) but at a much
 	# lower dB so it sits under the bang. Snipers, bazookas, etc. get a real
@@ -621,10 +636,9 @@ func casing_drop(at: Vector3 = NO_POS, pitch_scale: float = 1.0, volume_offset_d
 	# so the first hard hit is loud and subsequent bounces are softer.
 	var variant: int = randi() % CASING_VARIANTS
 	var key := "casing_drop:%d" % variant
-	var samples := _cached_samples(key, Callable(self, "_synth_casing_drop").bind(variant))
-	var stream := _samples_to_wav(samples)
+	var wav := _cached_wav(key, Callable(self, "_synth_casing_drop").bind(variant))
 	# ~75 dB SPL — quiet but cuts cleanly through ambient mix. Dry, no big tail.
-	_play_stream(stream, casing_db + volume_offset_db, at, pitch_scale, "casing", 6.0, true, 75.0, false)
+	_play_stream(wav, casing_db + volume_offset_db, at, pitch_scale, "casing", 6.0, true, 75.0, false)
 
 func explosion(at: Vector3 = NO_POS, radius: float = 6.0) -> void:
 	# Layered: punchy transient bang + a deep brown-noise rumble that
@@ -654,11 +668,14 @@ func explosion(at: Vector3 = NO_POS, radius: float = 6.0) -> void:
 	# RaytracedReverb — same pattern as gun shots. The wet companion is what
 	# gives a sharp transient an audible reverb tail; without it the dry
 	# bang bypasses the reverb bus entirely and the explosion sounds tail-less.
-	var bang_samples := _cached_samples(bang_key, Callable(self, "_synth_explosion").bind(float(r_bucket), variant))
-	_play(bang_samples, explosion_bang_db, at, "explosion_bang", bang_dist, true, ex_spl)
-	_play(bang_samples, explosion_bang_db + explosion_wet_db, at, "_explosion_bang", bang_dist, false, ex_spl)
+	# _cached_wav avoids a fresh AudioStreamWAV allocation per call. Bench
+	# attributed ~1 ms / explosion of physics tick to the previous re-conversion.
+	var bang_wav := _cached_wav(bang_key, Callable(self, "_synth_explosion").bind(float(r_bucket), variant))
+	_play_stream(bang_wav, explosion_bang_db, at, 1.0, "explosion_bang", bang_dist, true, ex_spl)
+	_play_stream(bang_wav, explosion_bang_db + explosion_wet_db, at, 1.0, "_explosion_bang", bang_dist, false, ex_spl)
 	var rumble_key := "explosion_rumble:%d:%d" % [r_bucket, variant]
-	_play(_cached_samples(rumble_key, Callable(self, "_synth_explosion_rumble").bind(float(r_bucket), variant)), explosion_rumble_db, at, "explosion_rumble", rumble_dist, false, ex_spl)
+	var rumble_wav := _cached_wav(rumble_key, Callable(self, "_synth_explosion_rumble").bind(float(r_bucket), variant))
+	_play_stream(rumble_wav, explosion_rumble_db, at, 1.0, "explosion_rumble", rumble_dist, false, ex_spl)
 	# (The distance-bucketed bandpass click was removed — its high-Q resonator
 	# rang at ~350 Hz at mid-range distances and read as a tonal "pong". The
 	# air-absorption filter on the regular 3D player handles the distance

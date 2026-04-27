@@ -804,7 +804,10 @@ static func spawn_bullet_blast(scene: Node, pos: Vector3, radius: float, color: 
 
 	# 4) Big blasts play the full explosion SFX; smaller impacts stay visual.
 	if radius >= 3.5:
-		SFX.explosion(pos, radius)
+		# Bench A/B isolation — gated by BenchFlags so production hits one
+		# static bool branch instead of a scene-root .get() lookup.
+		if not (BenchFlags.active and BenchFlags.no_explosion_audio):
+			SFX.explosion(pos, radius)
 
 static func spawn_heat_distortion(scene: Node, pos: Vector3, radius: float, duration: float, strength: float) -> void:
 	if scene == null:

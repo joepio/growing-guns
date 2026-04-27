@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://b0perfbench01"]
+
+[ext_resource type="Script" path="res://scripts/perf_benchmark.gd" id="1_perfbench"]
+
+[node name="PerfBenchmark" type="Node3D"]
+script = ExtResource("1_perfbench")

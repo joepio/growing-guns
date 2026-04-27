@@ -822,11 +822,16 @@ func _rifle_fired(origin: Vector3, dir: Vector3, shooter_id: int) -> void:
 	var is_self: bool = shooter_id == multiplayer.get_unique_id()
 	SFX.shot(w, origin, is_self)
 
+	# Bench A/B: skip bullet spawning entirely (one static bool branch out
+	# of bench mode). See scripts/bench_flags.gd.
+	if BenchFlags.active and BenchFlags.no_bullets:
+		return
 	var bullet_script: GDScript = preload("res://scripts/bullet.gd")
 	var bullet := Node3D.new()
 	bullet.set_script(bullet_script)
 	get_tree().current_scene.add_child(bullet)
 	bullet.setup(origin, dir, shooter_id, w)
+	BenchFlags.inc("bullets_spawned")
 
 	# Muzzle flash scales with bullet size AND damage so heavy rounds boom.
 	var dmg_ratio: float = clampf(w.get_damage() / Weapon.BASE_DAMAGE, 0.5, 4.0)

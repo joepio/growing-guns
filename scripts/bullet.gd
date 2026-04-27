@@ -13,6 +13,11 @@ var distance_traveled: float = 0.0
 var ricochet_left: int = 0
 var excluded_rids: Array[RID] = []
 
+# Per-bullet ray query — allocated once in setup() and re-used every physics
+# tick by mutating from/to. Avoids the per-tick PhysicsRayQueryParameters3D
+# allocation that dominated bullet physics cost in the perf bench.
+var _ray_query: PhysicsRayQueryParameters3D = null
+
 # Bullet zip-by audio — triggers once when the bullet passes the closest
 # point to the local camera (within ZIP_RADIUS_SQ).
 const ZIP_RADIUS_SQ := 144.0  # 12 m — must match the gate in SFX.bullet_zip
@@ -42,6 +47,11 @@ func setup(origin: Vector3, dir: Vector3, shooter: int, w: Weapon) -> void:
 		var shooter_node: Node3D = players_root.get_node_or_null(str(shooter_id))
 		if shooter_node and shooter_node.has_method("get_hitbox_rids"):
 			excluded_rids = shooter_node.call("get_hitbox_rids")
+
+	_ray_query = PhysicsRayQueryParameters3D.new()
+	_ray_query.collision_mask = 1 | 2 | 4  # world + players + projectiles
+	_ray_query.exclude = excluded_rids
+	_ray_query.collide_with_areas = true
 
 	var mat: StandardMaterial3D = StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -109,12 +119,11 @@ func _physics_process(delta: float) -> void:
 	var step_len: float = step.length()
 
 	var space: PhysicsDirectSpaceState3D = get_world_3d().direct_space_state
-	var q: PhysicsRayQueryParameters3D = PhysicsRayQueryParameters3D.create(global_position, global_position + step)
-	q.collision_mask = 1 | 2 | 4 # world + players + projectiles
-	q.exclude = excluded_rids
-	q.collide_with_areas = true
-
-	var result: Dictionary = space.intersect_ray(q)
+	# Mutate the cached query — only from/to change tick-to-tick. exclude is
+	# kept in sync at setup + in the ghost-passthrough branch of _handle_collision.
+	_ray_query.from = global_position
+	_ray_query.to = global_position + step
+	var result: Dictionary = space.intersect_ray(_ray_query)
 	if result.is_empty():
 		global_position += step
 		distance_traveled += step_len
@@ -159,6 +168,13 @@ func _maybe_zip_by() -> void:
 	# physics ticks (sniper rounds at 660 m/s move ~11 m per tick).
 	var v_norm: Vector3 = velocity / v_speed
 	var t_close: float = to_cam.dot(v_norm) / v_speed
+	# Past the closest-pass and outside the audible bubble — the bullet
+	# already missed and will only get further away. Latch _zipped so this
+	# function early-exits for the rest of the bullet's lifetime instead of
+	# recomputing the dot/length every tick.
+	if t_close < 0.0 and d_sq > ZIP_RADIUS_SQ:
+		_zipped = true
+		return
 	var closest_pos: Vector3 = global_position + velocity * maxf(t_close, 0.0)
 	var closest_d_sq: float = cam.global_position.distance_squared_to(closest_pos)
 	# Trigger if either:
@@ -186,6 +202,13 @@ func _handle_collision(result: Dictionary) -> void:
 	var normal: Vector3 = result.normal
 
 	global_position = hit_pos
+
+	# Bench instrumentation. BenchFlags.active is false outside the bench so
+	# these calls hit one static bool branch and short-circuit.
+	BenchFlags.inc("collisions")
+	if weapon_stats.explosive_radius > 0.0:
+		BenchFlags.inc("explosions")
+	var bench_skip_visuals: bool = BenchFlags.active and BenchFlags.no_explosion_visuals
 
 	var players_root: Node = get_tree().current_scene.get_node_or_null("Players")
 	if not players_root:
@@ -219,6 +242,8 @@ func _handle_collision(result: Dictionary) -> void:
 	if hit_player and hit_player.get("ghost_mode") == true:
 		var ghosts_rids: Array = hit_player.call("get_hitbox_rids") if hit_player.has_method("get_hitbox_rids") else [hit_player.get_rid()]
 		excluded_rids.append_array(ghosts_rids)
+		if _ray_query:
+			_ray_query.exclude = excluded_rids
 		return # Continue through ghosts
 
 	# Visuals on all peers
@@ -228,7 +253,7 @@ func _handle_collision(result: Dictionary) -> void:
 		shooter_node.call("_spawn_impact", hit_pos, weapon_stats.bullet_color, weapon_stats.bullet_scale, dmg_ratio)
 		SFX.impact(hit_pos, dmg_ratio)
 
-	if weapon_stats.explosive_radius > 0.0:
+	if weapon_stats.explosive_radius > 0.0 and not bench_skip_visuals:
 		shooter_node.call("_spawn_bullet_blast", hit_pos, weapon_stats.explosive_radius, weapon_stats.bullet_color)
 
 	# Server logic
