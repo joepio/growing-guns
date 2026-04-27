@@ -11,6 +11,9 @@ var max_range: float = 200.0
 var distance_traveled: float = 0.0
 
 var ricochet_left: int = 0
+var world_pierce_left: int = 0
+var ricochet_hits: int = 0
+var shot_damage_mult: float = 1.0
 var excluded_rids: Array[RID] = []
 
 # Per-bullet ray query — allocated once in setup() and re-used every physics
@@ -30,15 +33,17 @@ var _prev_listener_dist_sq: float = INF
 var _trail_inst: MeshInstance3D = null
 var _max_trail_length: float = 2.0
 
-func setup(origin: Vector3, dir: Vector3, shooter: int, w: Weapon) -> void:
+func setup(origin: Vector3, dir: Vector3, shooter: int, w: Weapon, damage_mult: float = 1.0, speed_mult: float = 1.0) -> void:
 	global_position = origin
 	direction = dir.normalized()
 	shooter_id = shooter
 	weapon_stats = w
+	shot_damage_mult = damage_mult
 	add_to_group("projectiles")
-	speed = w.get_bullet_speed()
+	speed = w.get_bullet_speed() * speed_mult
 	velocity = direction * speed
 	ricochet_left = w.ricochet_count
+	world_pierce_left = w.world_pierce_count
 
 	look_at(global_position + direction)
 
@@ -142,6 +147,14 @@ func _physics_process(delta: float) -> void:
 	if distance_traveled > max_range:
 		queue_free()
 
+func _current_damage() -> float:
+	var dmg := weapon_stats.get_damage() * shot_damage_mult
+	if weapon_stats.grow_damage_per_meter > 0.0:
+		dmg *= 1.0 + distance_traveled * weapon_stats.grow_damage_per_meter
+	if ricochet_hits > 0 and weapon_stats.ricochet_damage_mult > 1.0:
+		dmg *= pow(weapon_stats.ricochet_damage_mult, float(ricochet_hits))
+	return dmg
+
 # Detect when the bullet passes its closest point to the local camera and
 # play one zip sound. Predictive — extrapolates the bullet's straight-line
 # trajectory so fast rounds (supersonic bullets traverse the 12 m bubble in
@@ -220,12 +233,13 @@ func _handle_collision(result: Dictionary) -> void:
 		queue_free()
 		return
 
-	var dmg_ratio: float = clampf(weapon_stats.get_damage() / Weapon.BASE_DAMAGE, 0.5, 5.0)
+	var bullet_damage := _current_damage()
+	var dmg_ratio: float = clampf(bullet_damage / Weapon.BASE_DAMAGE, 0.5, 5.0)
 
 	# Corpse hits run cosmetic-only on every peer (no networked health change).
 	# The corpse accumulates damage and disintegrates at CORPSE_DISINTEGRATE_DMG.
 	if collider and collider.is_in_group("corpses"):
-		var corpse_dmg: float = weapon_stats.get_damage()
+		var corpse_dmg: float = bullet_damage
 		Violence.hit_corpse(collider as RigidBody3D, hit_pos, direction, corpse_dmg)
 		# Bullet stops on corpse — same as hitting a wall. Explosive rounds
 		# still detonate below.
@@ -260,9 +274,9 @@ func _handle_collision(result: Dictionary) -> void:
 	if multiplayer.is_server():
 		if hit_player:
 			var is_head: bool = shooter_node.call("_is_head_hit", collider)
-			var dmg: int = int(weapon_stats.get_damage() * (weapon_stats.get_headshot_mult() if is_head else 1.0))
+			var dmg: int = int(bullet_damage * (weapon_stats.get_headshot_mult() if is_head else 1.0))
 			var knock_dir: Vector3 = (direction + Vector3.UP * 0.18).normalized()
-			var gib_force := weapon_stats.knockback if weapon_stats.knockback > 0.0 else weapon_stats.get_damage() * 0.08
+			var gib_force := weapon_stats.knockback if weapon_stats.knockback > 0.0 else bullet_damage * 0.08
 			hit_player.take_damage.rpc_id(
 				hit_player.get_multiplayer_authority(),
 				dmg,
@@ -285,6 +299,21 @@ func _handle_collision(result: Dictionary) -> void:
 				var heal_amt: int = int(float(dmg) * weapon_stats.lifesteal)
 				if heal_amt > 0:
 					shooter_node.heal.rpc_id(shooter_node.get_multiplayer_authority(), heal_amt)
+			if weapon_stats.damage_over_time > 0.0 and hit_player.has_method("apply_damage_over_time"):
+				hit_player.apply_damage_over_time.rpc_id(
+					hit_player.get_multiplayer_authority(),
+					int(weapon_stats.damage_over_time * shot_damage_mult),
+					weapon_stats.dot_duration,
+					shooter_id
+				)
+			if weapon_stats.slow_on_hit < 1.0 and weapon_stats.slow_duration > 0.0 and hit_player.has_method("apply_slow"):
+				hit_player.apply_slow.rpc_id(
+					hit_player.get_multiplayer_authority(),
+					weapon_stats.slow_on_hit,
+					weapon_stats.slow_duration
+				)
+			if shooter_node and shooter_node.has_method("_on_dealt_damage"):
+				shooter_node._on_dealt_damage.rpc_id(shooter_node.get_multiplayer_authority(), dmg)
 
 		elif collider and collider.is_in_group("grenades") and collider.has_method("detonate"):
 			collider.detonate()
@@ -296,10 +325,25 @@ func _handle_collision(result: Dictionary) -> void:
 			# doesn't immediately self-intersect the wall we just hit.
 			var splash_pos: Vector3 = hit_pos + normal * 0.1
 			shooter_node.call("_apply_bullet_splash", splash_pos, weapon_stats.explosive_radius, weapon_stats.explosive_damage, shooter_id)
+		if not hit_player and weapon_stats.impact_mines > 0 and shooter_node and shooter_node.has_method("_spawn_impact_mine"):
+			shooter_node.call("_spawn_impact_mine", hit_pos + normal * 0.14, shooter_id)
+
+	# Drill logic happens before ricochet: the bullet continues through the
+	# struck surface, excluding that collider RID so the next ray starts cleanly.
+	if not hit_player and world_pierce_left > 0:
+		world_pierce_left -= 1
+		if result.has("rid"):
+			excluded_rids.append(result.rid)
+			if _ray_query:
+				_ray_query.exclude = excluded_rids
+		global_position = hit_pos + direction * 0.12
+		distance_traveled += 0.12
+		return
 
 	# Ricochet logic
 	if not hit_player and ricochet_left > 0:
 		ricochet_left -= 1
+		ricochet_hits += 1
 		# Bounce the full velocity so drop / homing keep working post-ricochet.
 		# Reflecting only `direction` would be overwritten next tick when
 		# direction is re-derived from velocity.

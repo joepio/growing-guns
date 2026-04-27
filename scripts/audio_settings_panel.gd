@@ -103,11 +103,22 @@ func _input(event: InputEvent) -> void:
 
 func toggle() -> void:
 	visible = not visible
-	if visible:
+	if _host_handles_mouse_mode():
+		_sync_host_mouse_mode()
+	elif visible:
 		_saved_mouse_mode = Input.mouse_mode
 		Input.mouse_mode = open_mouse_mode
 	else:
 		Input.mouse_mode = _saved_mouse_mode
+
+func _host_handles_mouse_mode() -> bool:
+	var p := get_parent()
+	return p != null and p.has_method("_sync_mouse_mode")
+
+func _sync_host_mouse_mode() -> void:
+	var p := get_parent()
+	if p != null and p.has_method("_sync_mouse_mode"):
+		p.call("_sync_mouse_mode")
 
 func _build_ui() -> void:
 	# Centered, full-height-with-margin panel so the slider list always has

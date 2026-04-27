@@ -260,12 +260,215 @@ static func all() -> Array:
 				w.extra_jumps += 2,
 		},
 		{
+			"id": "glass_cannon",
+			"name": "GLASS CANNON",
+			"desc": "Huge damage and speed, much lower health",
+			"color": Color(1.0, 0.25, 0.45),
+			"apply": func(w: Weapon) -> void:
+				w.damage_mult *= 2.2
+				w.bullet_speed_mult *= 1.35
+				w.max_hp_bonus -= 45
+				w.bullet_scale *= 1.15
+				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.12, 0.32), 0.45),
+		},
+		{
+			"id": "spray",
+			"name": "SPRAY",
+			"desc": "Full-auto bullet hose with messy spread",
+			"color": Color(1.0, 0.78, 0.18),
+			"apply": func(w: Weapon) -> void:
+				w.full_auto = true
+				w.fire_rate_mult *= 2.2
+				w.mag_size_bonus += 15
+				w.damage_mult *= 0.65
+				w.spread += deg_to_rad(2.0)
+				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.72, 0.12), 0.4),
+		},
+		{
+			"id": "careful_planning",
+			"name": "CAREFUL PLANNING",
+			"desc": "Massive shots, slow fire and reload",
+			"color": Color(0.95, 0.65, 0.35),
+			"apply": func(w: Weapon) -> void:
+				w.damage_mult *= 2.5
+				w.fire_rate_mult *= 0.45
+				w.reload_mult *= 0.65
+				w.recoil_per_shot *= 1.25
+				w.bullet_scale *= 1.35,
+		},
+		{
+			"id": "wind_up",
+			"name": "WIND UP",
+			"desc": "Harder, faster bullets with slower cadence",
+			"color": Color(0.45, 0.85, 1.0),
+			"apply": func(w: Weapon) -> void:
+				w.damage_mult *= 1.7
+				w.bullet_speed_mult *= 1.8
+				w.fire_rate_mult *= 0.65
+				w.bullet_color = w.bullet_color.lerp(Color(0.35, 0.8, 1.0), 0.4),
+		},
+		{
+			"id": "trick_shot",
+			"name": "TRICK SHOT",
+			"desc": "Ricochets get deadlier after every bounce",
+			"rarity": "rare",
+			"color": Color(1.0, 0.58, 0.2),
+			"apply": func(w: Weapon) -> void:
+				w.ricochet_count += 3
+				w.ricochet_damage_mult *= 1.75
+				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.5, 0.12), 0.45),
+		},
+		{
+			"id": "grow",
+			"name": "GROW",
+			"desc": "Bullets gain damage the farther they fly",
+			"rarity": "rare",
+			"color": Color(0.6, 1.0, 0.45),
+			"apply": func(w: Weapon) -> void:
+				w.grow_damage_per_meter += 0.015
+				w.bullet_speed_mult *= 0.85
+				w.bullet_scale *= 1.15
+				w.bullet_color = w.bullet_color.lerp(Color(0.45, 1.0, 0.25), 0.4),
+		},
+		{
+			"id": "poison",
+			"name": "POISON",
+			"desc": "Hits keep hurting after impact",
+			"color": Color(0.45, 1.0, 0.25),
+			"apply": func(w: Weapon) -> void:
+				w.damage_over_time += 45.0
+				w.dot_duration = maxf(w.dot_duration, 3.5)
+				w.damage_mult *= 0.85
+				w.bullet_color = w.bullet_color.lerp(Color(0.35, 1.0, 0.1), 0.45),
+		},
+		{
+			"id": "chilling_rounds",
+			"name": "CHILLING ROUNDS",
+			"desc": "Hits slow enemy movement briefly",
+			"color": Color(0.55, 0.9, 1.0),
+			"apply": func(w: Weapon) -> void:
+				w.slow_on_hit = minf(w.slow_on_hit, 0.55)
+				w.slow_duration = maxf(w.slow_duration, 1.6)
+				w.bullet_speed_mult *= 0.9
+				w.bullet_color = w.bullet_color.lerp(Color(0.45, 0.85, 1.0), 0.45),
+		},
+		{
+			"id": "scavenger",
+			"name": "SCAVENGER",
+			"desc": "Damaging enemies feeds ammo back into the mag",
+			"color": Color(0.3, 1.0, 0.55),
+			"apply": func(w: Weapon) -> void:
+				w.reload_on_hit += 2,
+		},
+		{
+			"id": "phoenix",
+			"name": "PHOENIX",
+			"desc": "Revive once per round at low health",
+			"rarity": "rare",
+			"color": Color(1.0, 0.45, 0.12),
+			"apply": func(w: Weapon) -> void:
+				w.phoenix_revives += 1
+				w.max_hp_bonus -= 10
+				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.45, 0.08), 0.35),
+		},
+		{
+			"id": "drill_rounds",
+			"name": "DRILL ROUNDS",
+			"desc": "Bullets bore through walls before stopping",
+			"rarity": "rare",
+			"color": Color(0.75, 0.75, 0.82),
+			"apply": func(w: Weapon) -> void:
+				w.world_pierce_count += 2
+				w.damage_mult *= 1.25
+				w.bullet_speed_mult *= 0.8
+				w.bullet_scale *= 1.2,
+		},
+		{
+			"id": "landmine_rounds",
+			"name": "LANDMINE ROUNDS",
+			"desc": "Bullet impacts plant proximity mines",
+			"rarity": "rare",
+			"color": Color(0.05, 0.9, 0.72),
+			"apply": func(w: Weapon) -> void:
+				w.impact_mines += 1
+				w.fire_rate_mult *= 0.55
+				w.bullet_speed_mult *= 0.75
+				w.bullet_color = w.bullet_color.lerp(Color(0.0, 0.95, 0.75), 0.5),
+		},
+		{
 			"id": "quick_recharge",
 			"name": "QUICK RECHARGE",
 			"desc": "",
 			"color": Color(0.85, 0.55, 1.0),
 			"apply": func(w: Weapon) -> void:
 				w.special_cooldown_mult *= 0.85,
+		},
+		{
+			"id": "echo",
+			"name": "ECHO",
+			"desc": "RMB repeats a moment later",
+			"rarity": "rare",
+			"color": Color(0.8, 0.55, 1.0),
+			"apply": func(w: Weapon) -> void:
+				w.special_echo_count += 1
+				w.special_cooldown_mult *= 0.95,
+		},
+		{
+			"id": "tactical_reload",
+			"name": "TACTICAL RELOAD",
+			"desc": "RMB also loads rounds into your mag",
+			"color": Color(0.3, 1.0, 0.75),
+			"apply": func(w: Weapon) -> void:
+				w.special_reload_amount += 3,
+		},
+		{
+			"id": "refreshed",
+			"name": "REFRESHED",
+			"desc": "Damaging enemies refunds RMB cooldown",
+			"color": Color(0.65, 0.95, 1.0),
+			"apply": func(w: Weapon) -> void:
+				w.special_cooldown_refund_on_hit += 0.45,
+		},
+		{
+			"id": "empower",
+			"name": "EMPOWER",
+			"desc": "RMB charges your next shot",
+			"rarity": "rare",
+			"color": Color(1.0, 0.85, 0.25),
+			"apply": func(w: Weapon) -> void:
+				w.special_empower_damage *= 2.0
+				w.special_empower_speed *= 1.4
+				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.85, 0.18), 0.35),
+		},
+		{
+			"id": "shockwave",
+			"name": "SHOCKWAVE",
+			"desc": "RMB emits a close-range blast",
+			"rarity": "rare",
+			"color": Color(0.35, 0.75, 1.0),
+			"apply": func(w: Weapon) -> void:
+				w.shield_pulse_damage += 70.0
+				w.special_cooldown_mult *= 1.1,
+		},
+		{
+			"id": "blink_blast",
+			"name": "BLINK BLAST",
+			"desc": "RMB teleport blasts both endpoints",
+			"rarity": "rare",
+			"color": Color(0.78, 0.35, 1.0),
+			"apply": func(w: Weapon) -> void:
+				w.special = Weapon.SPECIAL_TELEPORT
+				w.teleport_blast_radius = maxf(w.teleport_blast_radius, 4.5),
+		},
+		{
+			"id": "ambush",
+			"name": "AMBUSH",
+			"desc": "RMB vanish; first shot out hits harder",
+			"rarity": "rare",
+			"color": Color(0.55, 1.0, 0.85),
+			"apply": func(w: Weapon) -> void:
+				w.special = Weapon.SPECIAL_INVISIBLE
+				w.invisible_first_shot_mult *= 2.2,
 		},
 		{
 			"id": "teleport",

@@ -107,6 +107,15 @@ var frozen: bool = false
 var ghost_mode: bool = false
 var invisible_mode: bool = false
 var is_zooming: bool = false
+var _poison_damage_left: float = 0.0
+var _poison_dps: float = 0.0
+var _poison_from_id: int = 0
+var _poison_tick_accum: float = 0.0
+var _slow_timer: float = 0.0
+var _slow_mult: float = 1.0
+var _phoenix_charges_left: int = 0
+var _next_shot_damage_mult: float = 1.0
+var _next_shot_speed_mult: float = 1.0
 
 # Last broadcast state — avoids flooding the wire when idle.
 var _last_sync_pos: Vector3 = Vector3.INF
@@ -611,6 +620,7 @@ func _unhandled_input(event: InputEvent) -> void:
 func _physics_process(delta: float) -> void:
 	if not is_multiplayer_authority():
 		return
+	_tick_status_effects(delta)
 
 	if is_bot:
 		_bot_physics(delta)
@@ -760,7 +770,7 @@ func _physics_process(delta: float) -> void:
 	tilt_z = input_x * TILT_MAX_DEG
 
 	var wish_dir := _input_vector()
-	var current_walk_speed := WALK_SPEED * weapon.move_speed_mult
+	var current_walk_speed := WALK_SPEED * weapon.move_speed_mult * _slow_mult
 	var target_vel := wish_dir * current_walk_speed
 
 	# Horizontal velocity only for momentum calculations
@@ -937,6 +947,13 @@ func _fire_rifle() -> void:
 	# then add the per-shot recoil so the next shot is sloppier.
 	var spread: float = get_effective_spread()
 	_recoil_spread += weapon.recoil_per_shot
+	var shot_damage_mult := _next_shot_damage_mult
+	var shot_speed_mult := _next_shot_speed_mult
+	if invisible_mode and weapon.invisible_first_shot_mult > 1.0:
+		shot_damage_mult *= weapon.invisible_first_shot_mult
+		_end_invisible()
+	_next_shot_damage_mult = 1.0
+	_next_shot_speed_mult = 1.0
 	# Multi-shot: fire N rays with random yaw+pitch spread (MULTI-SHOT card).
 	var shots: int = weapon.get_shots_per_trigger()
 	var cam_right: Vector3 = camera.global_transform.basis.x
@@ -950,7 +967,7 @@ func _fire_rifle() -> void:
 			var theta: float = randf() * TAU
 			var r: float = spread * randf() * randf()
 			dir = base_dir.rotated(cam_up, r * cos(theta)).rotated(cam_right, r * sin(theta)).normalized()
-		_rifle_fired.rpc(origin, dir, player_id)
+		_rifle_fired.rpc(origin, dir, player_id, shot_damage_mult, shot_speed_mult)
 	# Barrel overheating — pump in heat per shot, scaled by damage. Cooldown
 	# happens passively in procedural_gun._process. Heavy / fast builds
 	# steady-state into a red glow; the base gun stays under the threshold.
@@ -969,7 +986,13 @@ func _fire_rifle() -> void:
 			_procedural_gun.eject_casing()
 
 @rpc("any_peer", "call_local", "reliable")
-func _rifle_fired(origin: Vector3, dir: Vector3, shooter_id: int) -> void:
+func _rifle_fired(
+	origin: Vector3,
+	dir: Vector3,
+	shooter_id: int,
+	shot_damage_mult: float = 1.0,
+	shot_speed_mult: float = 1.0,
+) -> void:
 	var shooter_node: Node3D = get_parent().get_node_or_null(str(shooter_id))
 	var w: Weapon = shooter_node.weapon if shooter_node else Weapon.new()
 	# `is_self` = the local human is the shooter. Their copy plays a 2D
@@ -985,7 +1008,7 @@ func _rifle_fired(origin: Vector3, dir: Vector3, shooter_id: int) -> void:
 	var bullet := Node3D.new()
 	bullet.set_script(bullet_script)
 	get_tree().current_scene.add_child(bullet)
-	bullet.setup(origin, dir, shooter_id, w)
+	bullet.setup(origin, dir, shooter_id, w, shot_damage_mult, shot_speed_mult)
 	BenchFlags.inc("bullets_spawned")
 
 	# Muzzle flash scales with bullet size AND damage so heavy rounds boom.
@@ -999,6 +1022,7 @@ func _rifle_fired(origin: Vector3, dir: Vector3, shooter_id: int) -> void:
 		_spawn_third_person_casing(w)
 
 func _apply_bullet_splash(pos: Vector3, radius: float, damage: float, shooter_id: int) -> void:
+	var shooter := get_parent().get_node_or_null(str(shooter_id))
 	for p: Node3D in get_tree().get_nodes_in_group("players"):
 		if not is_instance_valid(p):
 			continue
@@ -1026,7 +1050,6 @@ func _apply_bullet_splash(pos: Vector3, radius: float, damage: float, shooter_id
 			dmg = int(dmg * 0.5)
 
 		# Explosion Knockback
-		var shooter := get_parent().get_node_or_null(str(shooter_id))
 		var kb_mult: float = 24.0 # Doubled base for explosions
 		var weapon_kb: float = shooter.weapon.knockback if shooter and shooter.get("weapon") != null else 1.0
 
@@ -1051,7 +1074,71 @@ func _apply_bullet_splash(pos: Vector3, radius: float, damage: float, shooter_id
 			)
 			if p.player_id != shooter_id and shooter and is_instance_valid(shooter):
 				shooter._hit_confirm.rpc_id(shooter.get_multiplayer_authority(), false, dmg, p.global_position + Vector3.UP * 0.6)
+				if shooter.has_method("_on_dealt_damage"):
+					shooter._on_dealt_damage.rpc_id(shooter.get_multiplayer_authority(), dmg)
 		p.apply_knockback.rpc_id(p.get_multiplayer_authority(), impulse)
+
+@rpc("any_peer", "call_local", "reliable")
+func _on_dealt_damage(damage: int) -> void:
+	var sender := multiplayer.get_remote_sender_id()
+	if sender != 1 and sender != 0:
+		return
+	if not is_multiplayer_authority():
+		return
+	if damage <= 0:
+		return
+	if weapon.reload_on_hit > 0:
+		mag = mini(weapon.get_mag_size(), mag + weapon.reload_on_hit)
+		if mag > 0 and reloading:
+			reloading = false
+			rifle_cooldown = 0.0
+			_stop_reload_audio()
+	if weapon.special_cooldown_refund_on_hit > 0.0:
+		grenade_cooldown = maxf(0.0, grenade_cooldown - weapon.special_cooldown_refund_on_hit)
+	cooldowns_changed.emit()
+
+@rpc("any_peer", "call_local", "reliable")
+func apply_damage_over_time(total_damage: int, duration: float, from_id: int) -> void:
+	var sender := multiplayer.get_remote_sender_id()
+	if sender != 1 and sender != 0:
+		return
+	if not is_multiplayer_authority():
+		return
+	if total_damage <= 0 or duration <= 0.0:
+		return
+	_poison_damage_left += float(total_damage)
+	_poison_dps += float(total_damage) / duration
+	_poison_from_id = from_id
+
+@rpc("any_peer", "call_local", "reliable")
+func apply_slow(multiplier: float, duration: float) -> void:
+	var sender := multiplayer.get_remote_sender_id()
+	if sender != 1 and sender != 0:
+		return
+	if not is_multiplayer_authority():
+		return
+	_slow_mult = minf(_slow_mult, clampf(multiplier, 0.2, 1.0))
+	_slow_timer = maxf(_slow_timer, duration)
+
+func _tick_status_effects(delta: float) -> void:
+	if _slow_timer > 0.0:
+		_slow_timer = maxf(0.0, _slow_timer - delta)
+		if _slow_timer <= 0.0:
+			_slow_mult = 1.0
+	if _poison_damage_left <= 0.0 or _poison_dps <= 0.0:
+		return
+	_poison_tick_accum += delta
+	if _poison_tick_accum < 0.25:
+		return
+	var tick_dt := _poison_tick_accum
+	_poison_tick_accum = 0.0
+	var amount := mini(int(ceil(_poison_dps * tick_dt)), int(ceil(_poison_damage_left)))
+	if amount <= 0:
+		return
+	_poison_damage_left -= float(amount)
+	if _poison_damage_left <= 0.0:
+		_poison_dps = 0.0
+	_apply_damage(amount, _poison_from_id)
 
 func _player_from_hit_collider(collider: Node) -> Node:
 	if collider == null:
@@ -1305,18 +1392,46 @@ func _use_special() -> void:
 	match weapon.special:
 		Weapon.SPECIAL_TELEPORT:
 			grenade_cooldown = TELEPORT_RELOAD * mult
-			_use_teleport()
 		Weapon.SPECIAL_SHIELD:
 			grenade_cooldown = SHIELD_RELOAD * mult
-			_use_shield()
 		Weapon.SPECIAL_INVISIBLE:
 			grenade_cooldown = INVISIBLE_RELOAD * mult
-			_use_invisible()
 		Weapon.SPECIAL_SWORD:
 			grenade_cooldown = MELEE_RELOAD * mult
-			_swing_melee()
 		_:
 			grenade_cooldown = GRENADE_RELOAD * mult
+	_apply_special_mods_on_use()
+	_activate_special_effect(false)
+	for i in weapon.special_echo_count:
+		var delay := 0.16 * float(i + 1)
+		get_tree().create_timer(delay).timeout.connect(func() -> void:
+			if is_instance_valid(self) and not ghost_mode and health > 0:
+				_activate_special_effect(true))
+
+func _apply_special_mods_on_use() -> void:
+	if weapon.special_reload_amount > 0:
+		mag = mini(weapon.get_mag_size(), mag + weapon.special_reload_amount)
+		if mag > 0 and reloading:
+			reloading = false
+			rifle_cooldown = 0.0
+			_stop_reload_audio()
+	if weapon.special_empower_damage > 1.0 or weapon.special_empower_speed > 1.0:
+		_next_shot_damage_mult = maxf(_next_shot_damage_mult, weapon.special_empower_damage)
+		_next_shot_speed_mult = maxf(_next_shot_speed_mult, weapon.special_empower_speed)
+	cooldowns_changed.emit()
+
+func _activate_special_effect(is_echo: bool) -> void:
+	match weapon.special:
+		Weapon.SPECIAL_TELEPORT:
+			_use_teleport()
+		Weapon.SPECIAL_SHIELD:
+			_use_shield()
+		Weapon.SPECIAL_INVISIBLE:
+			if not is_echo:
+				_use_invisible()
+		Weapon.SPECIAL_SWORD:
+			_swing_melee()
+		_:
 			_fire_grenade()
 
 # -------------------- RELOAD --------------------
@@ -1443,6 +1558,9 @@ func _use_teleport() -> void:
 	_teleport_fx.rpc(from, target)
 	global_position = target
 	velocity = Vector3.ZERO
+	if weapon.teleport_blast_radius > 0.0:
+		_request_special_blast.rpc_id(1, from, weapon.teleport_blast_radius, 55.0, player_id, weapon.bullet_color)
+		_request_special_blast.rpc_id(1, target, weapon.teleport_blast_radius, 55.0, player_id, weapon.bullet_color)
 	_broadcast_state.rpc(global_position, rotation.y)
 	_last_sync_pos = global_position
 	_last_sync_yaw = rotation.y
@@ -1491,9 +1609,20 @@ func _spawn_teleport_vfx(pos: Vector3) -> void:
 
 func _use_shield() -> void:
 	_shield_on.rpc(SHIELD_DURATION)
+	if weapon.shield_pulse_damage > 0.0:
+		_request_special_blast.rpc_id(1, global_position, 5.5, weapon.shield_pulse_damage, player_id, Color(0.35, 0.75, 1.0))
 
 func _use_invisible() -> void:
 	_invisible_on.rpc(INVISIBLE_DURATION)
+
+@rpc("any_peer", "call_local", "reliable")
+func _request_special_blast(pos: Vector3, radius: float, damage: float, shooter_id: int, color: Color) -> void:
+	if not multiplayer.is_server():
+		return
+	if multiplayer.get_remote_sender_id() != 0 and multiplayer.get_remote_sender_id() != shooter_id:
+		return
+	_spawn_bullet_blast(pos, radius, color)
+	_apply_bullet_splash(pos + Vector3.UP * 0.1, radius, damage, shooter_id)
 
 @rpc("authority", "call_local", "reliable")
 func _invisible_on(duration: float) -> void:
@@ -1645,6 +1774,12 @@ func _spawn_mine(pos: Vector3, shooter: int, uname: String) -> void:
 	if shooter_node == null or shooter_node.get("ghost_mode") != true:
 		SFX.grenade_launch(pos)
 
+func _spawn_impact_mine(pos: Vector3, shooter: int) -> void:
+	if not multiplayer.is_server():
+		return
+	var uname := "IM_%d_%d" % [shooter, Time.get_ticks_usec()]
+	_spawn_mine.rpc(pos, shooter, uname)
+
 # -------------------- MELEE --------------------
 
 func _swing_melee() -> void:
@@ -1705,6 +1840,8 @@ func _melee_swung(origin: Vector3, dir: Vector3, attacker_id: int) -> void:
 		target.apply_knockback.rpc_id(target.get_multiplayer_authority(), melee_impulse)
 	if shooter_node:
 		_hit_confirm.rpc_id(shooter_node.get_multiplayer_authority(), backstab, dmg, result.position)
+		if shooter_node.has_method("_on_dealt_damage"):
+			shooter_node._on_dealt_damage.rpc_id(shooter_node.get_multiplayer_authority(), dmg)
 
 func _animate_gun_slash(m_scale: float = 1.0) -> void:
 	if muzzle == null:
@@ -1825,6 +1962,16 @@ func _apply_damage(
 			_view_punch_pos = -local_dir * 0.15
 			# Add some random rotational kick
 			_view_punch_rot = Vector3(randf_range(-0.1, 0.1), randf_range(-0.1, 0.1), randf_range(-0.1, 0.1))
+	if health <= 0 and _phoenix_charges_left > 0:
+		_phoenix_charges_left -= 1
+		health = max(1, int(float(MAX_HEALTH + weapon.max_hp_bonus) * 0.35))
+		velocity = Vector3.UP * 8.0
+		_poison_damage_left = 0.0
+		_poison_dps = 0.0
+		_slow_timer = 0.0
+		_slow_mult = 1.0
+		_phoenix_fx.rpc(global_position)
+		return
 	if health > 0:
 		_play_hurt_sound.rpc(global_position)
 	else:
@@ -1856,6 +2003,13 @@ func _apply_damage(
 		_ragdoll.rpc(push, force_origin, ctx_force, blast_radius, blast_severity, is_head)
 		died.emit(from_id)
 		_report_death.rpc_id(1, from_id)
+
+@rpc("authority", "call_local", "reliable")
+func _phoenix_fx(pos: Vector3) -> void:
+	var scene := get_tree().current_scene
+	if scene == null:
+		return
+	_spawn_bullet_blast(pos + Vector3.UP * 0.8, 5.0, Color(1.0, 0.55, 0.15))
 
 @rpc("any_peer", "call_local", "unreliable")
 func _play_hurt_sound(pos: Vector3) -> void:
@@ -1906,6 +2060,14 @@ func server_respawn(pos: Vector3) -> void:
 	ghost_mode = false
 	invisible_mode = false
 	health = MAX_HEALTH + weapon.max_hp_bonus
+	_phoenix_charges_left = weapon.phoenix_revives
+	_poison_damage_left = 0.0
+	_poison_dps = 0.0
+	_poison_tick_accum = 0.0
+	_slow_timer = 0.0
+	_slow_mult = 1.0
+	_next_shot_damage_mult = 1.0
+	_next_shot_speed_mult = 1.0
 	rifle_cooldown = 0.0
 	grenade_cooldown = 0.0
 	melee_cooldown = 0.0
@@ -1965,6 +2127,7 @@ func set_ghost_mode(enabled: bool) -> void:
 	else:
 		invisible_mode = false
 		health = MAX_HEALTH + weapon.max_hp_bonus
+		_phoenix_charges_left = weapon.phoenix_revives
 	_apply_ghost_visuals()
 
 # -------------------- STATE REPLICATION --------------------
@@ -2026,6 +2189,7 @@ func apply_card(card_id: String) -> void:
 	# Top up HP if the card just raised the cap.
 	if is_multiplayer_authority():
 		health = max(health, MAX_HEALTH + weapon.max_hp_bonus)
+		_phoenix_charges_left = max(_phoenix_charges_left, weapon.phoenix_revives)
 	_update_gun_visuals()
 	_update_body_scale()
 
@@ -2035,6 +2199,13 @@ func reset_weapon() -> void:
 	mag = weapon.get_mag_size()
 	reloading = false
 	rifle_cooldown = 0.0
+	_phoenix_charges_left = weapon.phoenix_revives
+	_poison_damage_left = 0.0
+	_poison_dps = 0.0
+	_slow_timer = 0.0
+	_slow_mult = 1.0
+	_next_shot_damage_mult = 1.0
+	_next_shot_speed_mult = 1.0
 	_update_gun_visuals()
 	_update_body_scale()
 
@@ -2239,7 +2410,7 @@ func _bot_physics(delta: float) -> void:
 		if not ghost_mode: SFX.dash(global_position)
 
 	# --- Movement ---
-	var target_vel := move_dir * BOT_MOVE_SPEED
+	var target_vel := move_dir * BOT_MOVE_SPEED * _slow_mult
 	var accel := GROUND_ACCEL if is_on_floor() else AIR_ACCEL
 
 	if dash_timer > 0.0:

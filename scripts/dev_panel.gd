@@ -52,9 +52,7 @@ func toggle() -> void:
 	visible = not visible
 	if visible:
 		_refresh()
-		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-	else:
-		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	_sync_host_mouse_mode()
 
 
 func is_open() -> bool:
@@ -69,6 +67,12 @@ func close() -> void:
 func refresh_if_visible() -> void:
 	if visible:
 		call_deferred("_refresh")
+
+func _sync_host_mouse_mode() -> void:
+	if _game and _game.has_method("_sync_mouse_mode"):
+		_game.call("_sync_mouse_mode")
+	else:
+		Input.mouse_mode = Input.MOUSE_MODE_HIDDEN if visible else Input.MOUSE_MODE_CAPTURED
 
 
 # Resolve the currently-targeted player. Used by Game's keybindings so

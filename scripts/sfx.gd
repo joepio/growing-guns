@@ -73,8 +73,8 @@ var impact_db: float = -16.0
 # Brass shell hitting a hard surface. Quiet but bright — short ping that
 # cuts through without ducking anything important.
 var casing_db: float = -18.0
-var bullet_zip_close_db: float = -12.0
-var bullet_zip_far_db: float = -32.0
+var bullet_zip_close_db: float = -24.0
+var bullet_zip_far_db: float = -36.0
 # Bullet-zip pitch knobs. nominal = base + speed_coef * speed_factor (Hz).
 # speed_factor itself is bullet_speed / 165 m/s, clamped 0.2..5.0.
 var bullet_zip_base_hz: float = 2400.0
@@ -1396,41 +1396,45 @@ func _synth_dash() -> PackedVector2Array:
 		out[i] = Vector2(s, s)
 	return out
 func _synth_card_flip(variant: int) -> PackedVector2Array:
-	# Soft filtered-noise swoosh (the card travelling) followed by a slightly
-	# louder tick at the end (the card landing flat). Per-variant RNG seeding
-	# gives 3 stable, distinct samples — band center, tick freq, and timing
-	# all vary so consecutive flips never sound identical.
+	# Wide-band noise wash (the card travelling) then a short, brighter
+	# highpass-noise click (the card landing flat). Both layers are pure
+	# noise — no sine — so the result reads as paper/airy clatter rather
+	# than a pitched tone. Per-variant RNG seeding gives 3 stable samples.
 	var rng := RandomNumberGenerator.new()
 	rng.seed = hash([variant, "card_flip"])
 	var dur: float = lerpf(0.16, 0.22, rng.randf())
-	var noise_dur: float = dur * lerpf(0.65, 0.78, rng.randf())
-	var tick_start: float = dur * lerpf(0.82, 0.92, rng.randf())
-	var tick_freq: float = lerpf(2400.0, 4200.0, rng.randf())
-	var tick_decay: float = lerpf(220.0, 380.0, rng.randf())
-	var noise_center: float = lerpf(900.0, 1900.0, rng.randf())
+	var noise_dur: float = dur * lerpf(0.65, 0.80, rng.randf())
+	var tick_start: float = dur * lerpf(0.78, 0.90, rng.randf())
+	var tick_decay: float = lerpf(180.0, 320.0, rng.randf())
+	# Phase-1 lowpass coefficient — broad lowpass so the wash stays "white"
+	# rather than nasal/banded. Higher = brighter wash.
+	var wash_lp_k: float = lerpf(0.20, 0.45, rng.randf())
+	# Phase-2 highpass cutoff — the tick subtracts a slow average of the
+	# noise from itself, leaving only the high-frequency burst. Higher k =
+	# more low-end chopped, brighter click.
+	var tick_hp_k: float = lerpf(0.30, 0.55, rng.randf())
 	var n: int = int(dur * MIX_RATE)
 	var out := PackedVector2Array()
 	out.resize(n)
-	var lp_hi: float = 0.0
-	var lp_lo: float = 0.0
+	var wash_lp: float = 0.0
+	var tick_lp: float = 0.0
 	for i in range(n):
 		var t: float = float(i) / MIX_RATE
 		var s: float = 0.0
-		# Phase 1 — soft 1.5-octave-bandpassed noise with a sin envelope.
-		# Quiet by design (gain 0.18) so the tick at the end reads louder.
+		# Phase 1 — broadband noise with sin-envelope swell. Lightly lowpassed
+		# (warm hiss) instead of band-passed (nasal whistle).
 		if t < noise_dur:
 			var noise_phase: float = t / noise_dur
-			var env: float = sin(PI * noise_phase) * 0.18
+			var env: float = sin(PI * noise_phase) * 0.20
 			var noise: float = rng.randf_range(-1.0, 1.0)
-			var lp_k: float = clampf(noise_center * (TAU * 1.6) / MIX_RATE, 0.05, 0.95)
-			var hp_k: float = clampf(noise_center * (TAU * 0.5) / MIX_RATE, 0.005, 0.6)
-			lp_hi = lerpf(lp_hi, noise, lp_k)
-			lp_lo = lerpf(lp_lo, lp_hi, hp_k)
-			s += (lp_hi - lp_lo) * env
-		# Phase 2 — short, brighter tick. exp decay → very quick.
+			wash_lp = lerpf(wash_lp, noise, wash_lp_k)
+			s += wash_lp * env
+		# Phase 2 — short highpass-noise click. exp decay → ~10-20 ms burst.
 		if t >= tick_start:
 			var dt: float = t - tick_start
-			s += sin(TAU * tick_freq * dt) * exp(-dt * tick_decay) * 0.35
+			var n_t: float = rng.randf_range(-1.0, 1.0)
+			tick_lp = lerpf(tick_lp, n_t, tick_hp_k)
+			s += (n_t - tick_lp) * exp(-dt * tick_decay) * 0.5
 		out[i] = Vector2(s, s)
 	return out
 
