@@ -509,8 +509,15 @@ func _rebuild() -> void:
 	var n_barrels: int = max(1, barrel_count)
 	var barrel_pitch: float = barrel_radius * 2.4    # centre-to-centre spacing
 	var barrel_span: float = barrel_pitch * float(n_barrels - 1)
-	var min_receiver_w_init: float = barrel_span + barrel_radius * 3.0
-	var effective_receiver_size := Vector3(maxf(receiver_size.x, min_receiver_w_init), receiver_size.y, receiver_size.z)
+	
+	var muzzle_r: float = barrel_radius * muzzle_flare
+	var bundle_radius: float = barrel_radius * 1.8
+	
+	# We calculate the final "effective" size once, ensuring it's large enough 
+	# to wrap all barrels (linear or minigun bundle) before spawning the mesh.
+	var min_receiver_w: float = (bundle_radius + barrel_radius) * 2.2 if is_minigun else barrel_span + barrel_radius * 3.0
+	var min_receiver_h: float = (bundle_radius + barrel_radius) * 2.2 if is_minigun else receiver_size.y
+	var effective_receiver_size := Vector3(maxf(receiver_size.x, min_receiver_w), maxf(receiver_size.y, min_receiver_h), receiver_size.z)
 
 	# Receiver body
 	_add_box("Receiver", effective_receiver_size, Vector3.ZERO, metal)
@@ -558,15 +565,12 @@ func _rebuild() -> void:
 	var barrel_centre_z: float = receiver_front_z - barrel_length * 0.5
 	var muzzle_centre_z: float = receiver_front_z - barrel_length - muzzle_length * 0.5
 
-	var muzzle_r: float = barrel_radius * muzzle_flare
-	var bundle_radius: float = barrel_radius * 1.8
-	var min_receiver_w: float = (bundle_radius + barrel_radius) * 2.2 if is_minigun else barrel_span + barrel_radius * 3.0
-	var min_receiver_h: float = (bundle_radius + barrel_radius) * 2.2 if is_minigun else receiver_size.y
-	effective_receiver_size = Vector3(maxf(receiver_size.x, min_receiver_w), maxf(receiver_size.y, min_receiver_h), receiver_size.z)
-
-	# Sight rail repositioned after effective_receiver_size is final
-	var rail_y: float = effective_receiver_size.y * 0.5 + sight_rail_height * 0.5
-	_add_picatinny_rail(Vector3(0, rail_y, 0), Vector3(effective_receiver_size.x * 0.8, sight_rail_height, effective_receiver_size.z * 0.85), darker_metal)
+	# Sight rail repositioned after effective_receiver_size is final.
+	# We use the original receiver_size.y for rail height so bazooka barrels
+	# don't push the optics into the ceiling. Capped at 4cm wide.
+	var rail_y: float = receiver_size.y * 0.5 + sight_rail_height * 0.5
+	var rail_w: float = minf(effective_receiver_size.x * 0.8, 0.04)
+	_add_picatinny_rail(Vector3(0, rail_y, 0), Vector3(rail_w, sight_rail_height, effective_receiver_size.z * 0.85), darker_metal)
 
 	if is_minigun:
 		_barrel_group = Node3D.new()
