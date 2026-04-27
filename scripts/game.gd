@@ -840,15 +840,21 @@ func _start_round_now() -> void:
 		var pick := _pick_spawn(used)
 		used.append(pick["pos"])
 		p.set_ghost_mode.rpc(false)
-		p.server_respawn.rpc_id(p.get_multiplayer_authority(), pick["pos"], pick["yaw"])
-		# Stay frozen during the ready phase; _round_countdown lifts the
-		# freeze on every player after the 500ms beep.
-		p.set_frozen.rpc(true)
+		# Rocket-spawn: catch the player ~60m above the landing spot already
+		# moving at terminal speed (80 m/s constant — no gravity ramp). 0.75s
+		# from spawn to impact. Each player auto-ends their launch on first
+		# floor contact, so there's no central timer gating the round start.
+		var sky_pos: Vector3 = pick["pos"] + Vector3(0.0, 60.0, 0.0)
+		p.server_respawn.rpc_id(p.get_multiplayer_authority(), sky_pos, pick["yaw"])
+		# Clear any leftover freeze (e.g. losers were frozen during card-pick
+		# at the end of the previous round) before kicking off the launch —
+		# otherwise the player lands and can't move.
+		p.set_frozen.rpc(false)
+		p.set_launching.rpc(true, 80.0)
 		p.clear_ragdoll.rpc()
 	_clear_projectiles.rpc()
 	_clear_craters.rpc()
 	_hide_rematch_overlay.rpc()
-	_round_countdown.rpc()
 
 @rpc("authority", "call_local", "reliable")
 func _clear_projectiles() -> void:
@@ -1561,21 +1567,6 @@ func _set_banner(text: String, duration: float, font_size: int = -1) -> void:
 		banner_timer.start()
 
 
-@rpc("authority", "call_local", "reliable")
-func _round_countdown() -> void:
-	# Brief "ready phase": players stay frozen, banner shows READY..., then a
-	# pong cue and START! while the server lifts the freeze. Runs locally on
-	# every peer (call_local); the freeze release is server-only since
-	# set_frozen is gated to sender id 1.
-	_set_banner("READY...", 0.6)
-	await get_tree().create_timer(0.5).timeout
-	SFX.pling(0.7)
-	_set_banner("START!", 0.9)
-	if multiplayer.is_server():
-		for pid in NetworkManager.players:
-			var p := players_root.get_node_or_null(str(pid))
-			if p:
-				p.set_frozen.rpc(false)
 
 @rpc("authority", "call_local", "reliable")
 func _match_over(winner_id: int) -> void:

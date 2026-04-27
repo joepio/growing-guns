@@ -106,6 +106,10 @@ var weapon: Weapon = Weapon.new()
 var mag: int = Weapon.BASE_MAG_SIZE
 var reloading: bool = false
 var frozen: bool = false
+# Round-start "rocket spawn": physics drives the descent but input is gated
+# until the server flips this back off. Distinct from `frozen` because we DO
+# want gravity + move_and_slide to run while it's on.
+var launching: bool = false
 var ghost_mode: bool = false
 var invisible_mode: bool = false
 var is_zooming: bool = false
@@ -628,6 +632,27 @@ func _physics_process(delta: float) -> void:
 		_bot_physics(delta)
 		return
 
+	if launching:
+		# Rocket-spawn descent. Constant downward velocity (set in
+		# set_launching), no gravity ramp, no input, no combat. Apply the
+		# tilt-down camera + shake jitter every frame; on the first floor
+		# contact we end the launch ourselves and play the existing landing
+		# thump scaled by impact velocity.
+		var pre_impact_y: float = velocity.y
+		move_and_slide()
+		if not is_bot:
+			camera.rotation.x = look_pitch + recoil_pitch + _view_punch_rot.x
+			camera.position = _camera_rest_pos + Vector3(
+				randf_range(-1.0, 1.0) * shake_amt,
+				randf_range(-1.0, 1.0) * shake_amt,
+				0.0,
+			)
+		if is_on_floor():
+			launching = false
+			if not is_bot:
+				SFX.landing(absf(pre_impact_y), global_position)
+		return
+
 	if frozen:
 		velocity = Vector3.ZERO
 		return
@@ -877,6 +902,20 @@ func _handle_fell_off_map() -> void:
 	else:
 		var lethal_amount: int = max(health, MAX_HEALTH)
 		_apply_damage(lethal_amount, player_id)
+
+
+func handle_environmental_death(_reason: String = "void") -> void:
+	# Called by external triggers (lava Area3D, future hazards) when the
+	# player crosses into a lethal volume. Each peer's local hitbox fires its
+	# own area-entered signal, so the authority guard prevents duplicate
+	# damage. Self-attribution keeps it out of the kill-credit log without
+	# inventing a fake from_id.
+	if not is_multiplayer_authority():
+		return
+	if ghost_mode or god_mode or health <= 0 or frozen or launching:
+		return
+	var lethal_amount: int = max(health, MAX_HEALTH)
+	_apply_damage(lethal_amount, player_id)
 
 func _move_vector() -> Vector2:
 	if local_input_device < 0:
@@ -2194,6 +2233,30 @@ func set_frozen(f: bool) -> void:
 	elif is_multiplayer_authority():
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
+
+@rpc("any_peer", "call_local", "reliable")
+func set_launching(v: bool, downward_vel: float = 0.0) -> void:
+	# Round-start rocket-spawn: when v=true, set constant downward velocity,
+	# tilt camera down so the player sees the ground rushing up, and pump
+	# shake_amt for a sustained "we're being rocketed" rumble. Server-only.
+	var sender := multiplayer.get_remote_sender_id()
+	if sender != 1 and sender != 0:
+		return
+	launching = v
+	if v and is_multiplayer_authority():
+		velocity = Vector3(0.0, -downward_vel, 0.0)
+		# Bots have a camera node but server doesn't drive its view — these
+		# adjustments only matter for the local human controlling this body.
+		if not is_bot:
+			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+			# ~25° down — enough to see where you're rocketing into without
+			# losing the horizon.
+			look_pitch = -0.44
+			# Sustained rumble during the descent. The launching path skips
+			# the normal shake-decay step, so this stays high until landing.
+			shake_amt = 0.06
+			SFX.rocket_descent()
+
 @rpc("any_peer", "call_local", "reliable")
 func heal(amount: int) -> void:
 	if multiplayer.get_remote_sender_id() != 1 and multiplayer.get_remote_sender_id() != 0:
@@ -2332,6 +2395,11 @@ func _update_body_scale() -> void:
 # -------------------- BOT AI --------------------
 
 func _bot_physics(delta: float) -> void:
+	if launching:
+		move_and_slide()
+		if is_on_floor():
+			launching = false
+		return
 	if frozen:
 		velocity = Vector3.ZERO
 		return
