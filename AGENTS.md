@@ -25,7 +25,9 @@ Multiplayer FPS in Godot 4.6. Last-man-standing rounds; round losers pick stacki
 | `procedural_gun.gd` (~1k lines) | `@tool`, builds first-person rifle from primitives. | Re-read the file before editing — has many setters that all call `_rebuild()`. `apply_weapon_stats(w)` is the entry point that maps stats → geometry. |
 | `violence.gd` | Static helpers for blood, gibs, ragdolls, explosion VFX, view punch. | All calls are static. Many cached `MeshInstance3D` resources at the top of the file. |
 | `sfx.gd` (~1.4k lines) | Procedural audio synthesis (no WAV samples on disk for shots/explosions/casings). HDR ducking, raytraced reverb bus, distance-delay simulation. | Hot path uses `_cached_wav(key, gen)` — caches the converted `AudioStreamWAV`, not just the raw `PackedVector2Array`. Don't reintroduce per-call `_samples_to_wav(...)`. |
-| `game.gd` (~2k lines) | Round flow, scoreboard, card pick UI, state machine. | Big — search before adding. |
+| `game.gd` (~2.3k lines) | Round flow, scoreboard, card pick UI, state machine, HUD overlays. | Still the biggest file — search before adding. Two child managers split out: `dev_panel.gd` and `splitscreen_manager.gd`. |
+| `dev_panel.gd` | F1 inspector — read-mostly view of the local-or-targeted player + card add/remove buttons. | `_ready()` self-builds; instantiated by Game and added under `$HUD`. Game routes its dev keybindings (G/P/M/1-5/?) through it via `_dev_panel.get_target()` / `refresh_if_visible()`. |
+| `splitscreen_manager.gd` | Couch-coop layer: per-gamepad spawn + SubViewports + per-device pause menu. | Child of Game; checks `NetworkManager.has_meta("splitscreen_on_start")` in `_ready` to decide whether to build its UI. RPCs (`_do_spawn`, `_despawn`, `_broadcast_scores`) stay on Game; manager calls `_game._do_spawn.rpc(...)`. |
 
 ## Runnable scenes (besides `game.tscn`)
 

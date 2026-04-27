@@ -2,6 +2,8 @@ extends Node3D
 
 const PLAYER_SCENE := preload("res://scenes/player.tscn")
 const HUD_ICON_SCRIPT := preload("res://scripts/hud_icon.gd")
+const DEV_PANEL_SCRIPT := preload("res://scripts/dev_panel.gd")
+const SPLITSCREEN_MANAGER_SCRIPT := preload("res://scripts/splitscreen_manager.gd")
 
 # Maps that can be picked at the start of each round. Server picks an index
 # and broadcasts via _swap_arena.rpc(idx) so all peers agree. Add new maps
@@ -9,6 +11,7 @@ const HUD_ICON_SCRIPT := preload("res://scripts/hud_icon.gd")
 const MAP_POOL: Array[PackedScene] = [
 	preload("res://scenes/arena.tscn"),
 	preload("res://scenes/arena_platforms.tscn"),
+	preload("res://scenes/arena_factory.tscn"),
 ]
 # Position offset applied to whichever arena is loaded — matches the static
 # transform game.tscn used to apply to its embedded Arena instance, so spawn
@@ -91,10 +94,10 @@ var _rematch_requested: bool = false
 var _extend_votes: Dictionary = {} # id -> bool
 
 # --- Dev panel (F1) ---
-var _dev_root: PanelContainer = null
-var _dev_target_id: int = 0  # 0 = follow local player; otherwise a specific player_id
-var _dev_content: VBoxContainer
+# Owned by scripts/dev_panel.gd, instantiated in _ready and added under $HUD.
+var _dev_panel: Node = null
 # Dev-only: bots keep full AI (targeting, chasing, aiming) but never fire.
+# Read by Player AI; mutated by F1 panel toggle and the P keybinding.
 var bots_hold_fire: bool = false
 
 # --- Tab scoreboard overlay ---
@@ -121,18 +124,18 @@ var _flash_alpha_target: float = 0.0
 var _dash_segments: Array[ProgressBar] = []
 var _dash_text_hbox: Control = null
 var _last_input_was_controller := false
-var _splitscreen_enabled := false
-var _split_layer: CanvasLayer = null
-var _split_grid: Control = null
-var _split_join_label: Label = null
-var _split_pause_menu: Control = null
-var _split_pause_device: int = -1
-var _split_players_by_device: Dictionary = {}
-var _split_views_by_player: Dictionary = {}
+# Owned by scripts/splitscreen_manager.gd, instantiated in _ready as a child
+# Node. Reads NetworkManager metadata to decide whether to build its layer.
+var _splitscreen: Node = null
 
 func _ready() -> void:
 	_install_controller_input_map()
-	_splitscreen_enabled = NetworkManager.has_meta("splitscreen_on_start") and NetworkManager.get_meta("splitscreen_on_start")
+	# Splitscreen manager: builds a CanvasLayer + per-device viewports if the
+	# NetworkManager flag is set. Inert otherwise (still a Node, but no UI).
+	_splitscreen = SPLITSCREEN_MANAGER_SCRIPT.new()
+	_splitscreen.name = "Splitscreen"
+	add_child(_splitscreen)
+	_splitscreen.setup(self)
 	# F2 brings up the live audio-tuning panel — same sliders as action_lab.
 	add_child(AudioSettingsPanel.new())
 
@@ -256,6 +259,10 @@ func _ready() -> void:
 	_build_retro_filter()
 	_build_tab_overlay()
 	_build_stats_panel()
+	# Dev panel (F1). Self-builds in its own _ready; we just attach + wire it.
+	_dev_panel = DEV_PANEL_SCRIPT.new()
+	_dev_panel.setup(self)
+	$HUD.add_child(_dev_panel)
 	var we := $Arena/WorldEnvironment
 	if we and we.environment:
 		_arena_env = we.environment
@@ -275,7 +282,7 @@ func _ready() -> void:
 
 		# SP fallback: if nobody else has joined yet, and no bot was specifically requested,
 		# we still give a bot to fight as a default "sandbox" experience.
-		if not bot_requested and not _splitscreen_enabled:
+		if not bot_requested and not _splitscreen.is_enabled():
 			_spawn_bots.call_deferred(1)
 	else:
 		# Instantly show the client state — makes it obvious when you thought
@@ -286,9 +293,7 @@ func _ready() -> void:
 		_client_request_spawn_when_ready()
 
 	_update_scoreboard()
-	if _splitscreen_enabled:
-		_build_split_screen_layer()
-		_update_split_screen_views()
+	# Splitscreen manager auto-builds its layer in its own _ready when enabled.
 
 func _track_input_device(event: InputEvent) -> void:
 	var controller_input := event is InputEventJoypadButton or event is InputEventJoypadMotion
@@ -339,224 +344,6 @@ func _add_joy_axis_action(action: StringName, axis: int, axis_value: float) -> v
 	if not InputMap.action_has_event(action, event):
 		InputMap.action_add_event(action, event)
 
-func _handle_splitscreen_input(event: InputEvent) -> bool:
-	if not (event is InputEventJoypadButton) or not event.pressed:
-		return false
-	var device := event.device
-	if _split_pause_menu and _split_pause_menu.visible and device == _split_pause_device:
-		if event.button_index == JOY_BUTTON_B:
-			_close_split_pause_menu()
-			return true
-		if event.button_index == JOY_BUTTON_X or event.button_index == JOY_BUTTON_A:
-			_leave_split_player(device)
-			_close_split_pause_menu()
-			return true
-	if event.button_index == JOY_BUTTON_X and not _split_players_by_device.has(device):
-		_join_split_player(device)
-		return true
-	if event.button_index == JOY_BUTTON_START and _split_players_by_device.has(device):
-		_open_split_pause_menu(device)
-		return true
-	return false
-
-func _build_split_screen_layer() -> void:
-	if _split_layer:
-		return
-	_split_layer = CanvasLayer.new()
-	_split_layer.layer = 0
-	add_child(_split_layer)
-
-	_split_grid = Control.new()
-	_split_grid.name = "SplitScreenGrid"
-	_split_grid.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	_split_grid.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_split_layer.add_child(_split_grid)
-	_split_grid.resized.connect(_update_split_screen_views)
-
-	_split_join_label = Label.new()
-	_split_join_label.name = "JoinPrompt"
-	_split_join_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_split_join_label.text = "PRESS X TO JOIN"
-	_split_join_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_split_join_label.add_theme_font_size_override("font_size", 22)
-	_split_join_label.add_theme_color_override("font_color", Color(1.0, 0.9, 0.45))
-	_split_join_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.8))
-	_split_join_label.add_theme_constant_override("outline_size", 8)
-	_split_join_label.set_anchors_preset(Control.PRESET_TOP_WIDE)
-	_split_join_label.offset_top = 18.0
-	_split_join_label.offset_bottom = 48.0
-	_split_layer.add_child(_split_join_label)
-
-	_build_split_pause_menu()
-
-func _join_split_player(device: int) -> void:
-	if not multiplayer.is_server() or _split_players_by_device.has(device):
-		return
-	var id := SPLIT_PLAYER_ID_BASE + device
-	var suffix := _split_players_by_device.size() + 2
-	var pname := "P%d" % suffix
-	NetworkManager.players[id] = pname
-	round_wins[id] = 0
-	_do_spawn.rpc(id, pname, _random_spawn(_current_player_positions()), false, device, true)
-	_broadcast_scores.rpc(round_wins)
-	_maybe_start_match()
-	_update_scoreboard()
-
-func _leave_split_player(device: int) -> void:
-	if not multiplayer.is_server() or not _split_players_by_device.has(device):
-		return
-	var id := int(_split_players_by_device[device])
-	_split_players_by_device.erase(device)
-	_remove_split_view(id)
-	_despawn.rpc(id)
-	NetworkManager.players.erase(id)
-	round_wins.erase(id)
-	pending_pick_cards_by_player.erase(id)
-	completed_picks.erase(id)
-	eliminated_players.erase(id)
-	if pending_picker_id == id:
-		pending_picker_id = 0
-		pending_pick_cards.clear()
-		_hide_card_pick.rpc_id(1)
-	_broadcast_scores.rpc(round_wins)
-	_update_scoreboard()
-	_update_split_screen_views()
-	if _active_match_player_count() < 2:
-		state = State.WAITING
-		_announce.rpc("PRESS X TO JOIN", 99.0)
-
-func _active_match_player_count() -> int:
-	var count := 0
-	for pid in NetworkManager.players:
-		if not _is_bot_id(int(pid)):
-			count += 1
-	return count
-
-func _split_local_player_ids() -> Array[int]:
-	var ids: Array[int] = []
-	var primary_id := multiplayer.get_unique_id()
-	if players_root.has_node(str(primary_id)):
-		ids.append(primary_id)
-	for child in players_root.get_children():
-		if bool(child.get("split_screen_local")):
-			var pid := int(child.get("player_id"))
-			if not ids.has(pid):
-				ids.append(pid)
-	ids.sort()
-	return ids
-
-func _update_split_screen_views() -> void:
-	if not _split_grid:
-		return
-	var ids := _split_local_player_ids()
-	for id in ids:
-		if not _split_views_by_player.has(id):
-			_create_split_view(id)
-	for id in _split_views_by_player.keys():
-		if not ids.has(int(id)):
-			_remove_split_view(int(id))
-
-	var n := ids.size()
-	_split_join_label.visible = n < 4
-	var rect := _split_grid.get_rect()
-	for i in range(n):
-		var id := ids[i]
-		var view: Dictionary = _split_views_by_player[id]
-		var container: SubViewportContainer = view.container
-		var viewport: SubViewport = view.viewport
-		var slot := _split_slot_rect(i, n, rect.size)
-		container.position = slot.position
-		container.size = slot.size
-		viewport.size = Vector2i(maxi(1, int(slot.size.x)), maxi(1, int(slot.size.y)))
-
-func _split_slot_rect(index: int, count: int, size: Vector2) -> Rect2:
-	if count <= 1:
-		return Rect2(Vector2.ZERO, size)
-	if count == 2:
-		var w := size.x * 0.5
-		return Rect2(Vector2(w * index, 0.0), Vector2(w, size.y))
-	var w2 := size.x * 0.5
-	var h2 := size.y * 0.5
-	return Rect2(Vector2(w2 * float(index % 2), h2 * float(index / 2)), Vector2(w2, h2))
-
-func _create_split_view(id: int) -> void:
-	var container := SubViewportContainer.new()
-	container.stretch = true
-	container.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_split_grid.add_child(container)
-
-	var viewport := SubViewport.new()
-	viewport.disable_3d = false
-	viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
-	viewport.world_3d = get_viewport().world_3d
-	container.add_child(viewport)
-
-	var camera := Camera3D.new()
-	camera.current = true
-	viewport.add_child(camera)
-	_split_views_by_player[id] = {"container": container, "viewport": viewport, "camera": camera}
-
-func _remove_split_view(id: int) -> void:
-	if not _split_views_by_player.has(id):
-		return
-	var view: Dictionary = _split_views_by_player[id]
-	var container: Node = view.container
-	if is_instance_valid(container):
-		container.queue_free()
-	_split_views_by_player.erase(id)
-
-func _update_split_screen_cameras() -> void:
-	_update_split_screen_views()
-	for id in _split_views_by_player.keys():
-		var player := players_root.get_node_or_null(str(id))
-		if player == null:
-			continue
-		var source := player.get_node_or_null("Camera") as Camera3D
-		if source == null:
-			continue
-		var view: Dictionary = _split_views_by_player[id]
-		var camera: Camera3D = view.camera
-		camera.global_transform = source.global_transform
-		camera.fov = source.fov
-
-func _build_split_pause_menu() -> void:
-	_split_pause_menu = PanelContainer.new()
-	_split_pause_menu.visible = false
-	_split_pause_menu.mouse_filter = Control.MOUSE_FILTER_STOP
-	_split_pause_menu.set_anchors_preset(Control.PRESET_CENTER)
-	_split_pause_menu.offset_left = -170.0
-	_split_pause_menu.offset_top = -78.0
-	_split_pause_menu.offset_right = 170.0
-	_split_pause_menu.offset_bottom = 78.0
-	_split_layer.add_child(_split_pause_menu)
-
-	var vb := VBoxContainer.new()
-	vb.alignment = BoxContainer.ALIGNMENT_CENTER
-	vb.add_theme_constant_override("separation", 10)
-	_split_pause_menu.add_child(vb)
-
-	var title := Label.new()
-	title.name = "Title"
-	title.text = "PLAYER MENU"
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.add_theme_font_size_override("font_size", 18)
-	vb.add_child(title)
-
-	var hint := Label.new()
-	hint.text = "A/X LEAVE   B RESUME"
-	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	hint.add_theme_font_size_override("font_size", 13)
-	vb.add_child(hint)
-
-func _open_split_pause_menu(device: int) -> void:
-	_split_pause_device = device
-	_split_pause_menu.visible = true
-
-func _close_split_pause_menu() -> void:
-	_split_pause_device = -1
-	if _split_pause_menu:
-		_split_pause_menu.visible = false
-
 func _client_request_spawn_when_ready() -> void:
 	# The scene change happens before `connected_to_server` fires, so the
 	# client can reach _ready with a peer that isn't fully connected yet.
@@ -582,8 +369,7 @@ func _process(delta: float) -> void:
 		# reticle visibly blooms when sprinting / spamming.
 		if _custom_crosshair:
 			_custom_crosshair.spread = local_player.get_effective_spread()
-	if _splitscreen_enabled:
-		_update_split_screen_cameras()
+	# Splitscreen camera sync runs from splitscreen_manager._process when enabled.
 
 	if _pick_timeout_active:
 		_pick_timeout_timer -= delta
@@ -609,7 +395,7 @@ func _process(delta: float) -> void:
 
 func _input(event: InputEvent) -> void:
 	_track_input_device(event)
-	if _splitscreen_enabled and _handle_splitscreen_input(event):
+	if _splitscreen and _splitscreen.handle_input(event):
 		get_viewport().set_input_as_handled()
 		return
 
@@ -624,7 +410,7 @@ func _input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 		return
 	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_F1:
-		_toggle_dev_panel()
+		_dev_panel.toggle()
 		return
 
 	# Pause menu: ui_cancel (Esc), Enter, and numpad Enter.
@@ -634,8 +420,8 @@ func _input(event: InputEvent) -> void:
 			or event.keycode == KEY_KP_ENTER
 		))
 	if pause_pressed:
-		if _dev_root and _dev_root.visible:
-			_toggle_dev_panel()
+		if _dev_panel.is_open():
+			_dev_panel.toggle()
 			return
 		_toggle_pause_menu()
 		return
@@ -644,51 +430,51 @@ func _input(event: InputEvent) -> void:
 		var cheat_handled := true
 		match event.keycode:
 			KEY_G:
-				var t = _dev_target_player()
+				var t = _dev_panel.get_target()
 				if t:
 					t.god_mode = not t.god_mode
 					_announce.rpc("GODMODE: %s" % ("ON" if t.god_mode else "OFF"), 1.0)
-					if _dev_root and _dev_root.visible: _refresh_dev_panel()
+					_dev_panel.refresh_if_visible()
 			KEY_P:
 				bots_hold_fire = not bots_hold_fire
 				_announce.rpc("PASSIVE AI: %s" % ("ON" if bots_hold_fire else "OFF"), 1.0)
-				if _dev_root and _dev_root.visible: _refresh_dev_panel()
+				_dev_panel.refresh_if_visible()
 			KEY_M:
 				if multiplayer.is_server():
 					_restart_match()
 			KEY_1:
-				var t = _dev_target_player()
+				var t = _dev_panel.get_target()
 				if t:
 					t.reset_weapon.rpc()
 					_announce.rpc("WEAPON RESET", 1.0)
-					if _dev_root and _dev_root.visible: _refresh_dev_panel()
+					_dev_panel.refresh_if_visible()
 			KEY_2:
-				var t = _dev_target_player()
+				var t = _dev_panel.get_target()
 				if t:
 					t.apply_card.rpc("sniper")
 					_announce.rpc("APPLIED: SNIPER", 1.0)
-					if _dev_root and _dev_root.visible: _refresh_dev_panel()
+					_dev_panel.refresh_if_visible()
 			KEY_3:
-				var t = _dev_target_player()
+				var t = _dev_panel.get_target()
 				if t:
 					t.apply_card.rpc("shotgun")
 					_announce.rpc("APPLIED: SHOTGUN", 1.0)
-					if _dev_root and _dev_root.visible: _refresh_dev_panel()
+					_dev_panel.refresh_if_visible()
 			KEY_4:
-				var t = _dev_target_player()
+				var t = _dev_panel.get_target()
 				if t:
 					t.apply_card.rpc("uzi")
 					_announce.rpc("APPLIED: UZI", 1.0)
-					if _dev_root and _dev_root.visible: _refresh_dev_panel()
+					_dev_panel.refresh_if_visible()
 			KEY_5:
-				var t = _dev_target_player()
+				var t = _dev_panel.get_target()
 				if t:
 					t.apply_card.rpc("bazooka")
 					_announce.rpc("APPLIED: BAZOOKA", 1.0)
-					if _dev_root and _dev_root.visible: _refresh_dev_panel()
+					_dev_panel.refresh_if_visible()
 			KEY_SLASH:
 				if event.shift_pressed: # '?'
-					_show_dev_help()
+					_dev_panel.show_help()
 			_:
 				cheat_handled = false
 
@@ -878,10 +664,10 @@ func _do_spawn(
 			var listener := RaytracedAudioListener.new()
 			cam.add_child(listener)
 			listener.owner = cam
-	if _splitscreen_enabled and split_local:
-		if input_device >= 0:
-			_split_players_by_device[input_device] = id
-		_update_split_screen_views()
+	if _splitscreen and _splitscreen.is_enabled() and split_local:
+		# Manager owns the device→player_id map server-side; on clients we
+		# just need the view layout refreshed so the new SubViewport appears.
+		_splitscreen.update_views()
 
 @rpc("authority", "call_local", "reliable")
 func _despawn(id: int) -> void:
@@ -1609,7 +1395,7 @@ func _server_card_picked(card_id: String) -> void:
 	var sender := multiplayer.get_remote_sender_id()
 	if sender == 0:
 		sender = multiplayer.get_unique_id()
-	if _splitscreen_enabled and not pending_pick_cards_by_player.has(sender) \
+	if _splitscreen and _splitscreen.is_enabled() and not pending_pick_cards_by_player.has(sender) \
 			and pending_picker_id >= SPLIT_PLAYER_ID_BASE:
 		sender = pending_picker_id
 	if not pending_pick_cards_by_player.has(sender):
@@ -2264,7 +2050,7 @@ func is_any_modal_open() -> bool:
 	# UI overlay (card pick, dev panel, pause menu, rematch) is visible.
 	if pick_overlay and pick_overlay.visible:
 		return true
-	if _dev_root and _dev_root.visible:
+	if _dev_panel and _dev_panel.is_open():
 		return true
 	if _pause_menu and _pause_menu.visible:
 		return true
@@ -2507,232 +2293,6 @@ func _tab_card_pill(text: String, col: Color) -> Control:
 	pc.add_child(lbl)
 	return pc
 
-# -------------------- DEV PANEL (F1) --------------------
-
-func _toggle_dev_panel() -> void:
-	if _dev_root == null:
-		_build_dev_panel()
-	_dev_root.visible = not _dev_root.visible
-	if _dev_root.visible:
-		_refresh_dev_panel()
-		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-	else:
-		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
-
-func _build_dev_panel() -> void:
-	_dev_root = PanelContainer.new()
-	_dev_root.anchor_left = 0.5
-	_dev_root.anchor_right = 0.5
-	_dev_root.anchor_top = 0.0
-	_dev_root.anchor_bottom = 1.0
-	_dev_root.offset_left = -420.0
-	_dev_root.offset_right = 420.0
-	_dev_root.offset_top = 30.0
-	_dev_root.offset_bottom = -30.0
-	_dev_root.mouse_filter = Control.MOUSE_FILTER_STOP
-	_dev_root.visible = false
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0.05, 0.05, 0.08, 0.96)
-	style.set_border_width_all(2)
-	style.border_color = Color(0.4, 0.8, 1.0)
-	style.set_corner_radius_all(6)
-	style.content_margin_left = 16
-	style.content_margin_right = 16
-	style.content_margin_top = 12
-	style.content_margin_bottom = 12
-	_dev_root.add_theme_stylebox_override("panel", style)
-	var scroll := ScrollContainer.new()
-	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	_dev_root.add_child(scroll)
-	_dev_content = VBoxContainer.new()
-	_dev_content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_dev_content.add_theme_constant_override("separation", 6)
-	scroll.add_child(_dev_content)
-	$HUD.add_child(_dev_root)
-
-func _refresh_dev_panel() -> void:
-	for c in _dev_content.get_children():
-		c.queue_free()
-	_dev_heading("DEV  ·  F1 to close", Color(0.5, 0.9, 1.0), 20)
-	_dev_note("Quick shortcuts: G (god), P (passive AI), M (restart), 1-5 (cards), ? (help)")
-	_dev_toggle("Bots hold fire (move + aim, no shooting)", bots_hold_fire, func(v: bool) -> void:
-		bots_hold_fire = v
-		call_deferred("_refresh_dev_panel"))
-
-	var target: Node = _dev_target_player()
-	if target and is_instance_valid(target):
-		_dev_toggle("God mode (this player)", target.get("god_mode") == true, func(v: bool) -> void:
-			target.god_mode = v
-			call_deferred("_refresh_dev_panel"))
-
-	_dev_player_picker()
-	# Cards first — rare ones (uzi, bazooka, etc.) at the top so they're easy
-	# to spam-add for testing. Common cards follow.
-	_dev_heading("— CARDS —", Color(1.0, 0.6, 0.9), 15)
-	if target and is_instance_valid(target):
-		var applied: Array = target.weapon.applied_cards
-		var counts := {}
-		for cid in applied:
-			counts[cid] = counts.get(cid, 0) + 1
-		var sorted_cards: Array = CardLibrary.all().duplicate()
-		sorted_cards.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-			# rare (0) before common (1); stable name order within each.
-			var ra: int = 0 if str(a.get("rarity", "common")) == "rare" else 1
-			var rb: int = 0 if str(b.get("rarity", "common")) == "rare" else 1
-			if ra != rb:
-				return ra < rb
-			return str(a.get("name", "")) < str(b.get("name", "")))
-		for card in sorted_cards:
-			_dev_card_row(card, counts.get(card.id, 0))
-	else:
-		_dev_note("(target player not spawned)")
-	# Stats moved to the bottom — useful for verifying card effects but the
-	# cards themselves are the primary action surface.
-	_dev_heading("— WEAPON STATS —", Color(1.0, 0.9, 0.5), 15)
-	if target and is_instance_valid(target):
-		var w: Weapon = target.weapon
-		_dev_stat("damage", "%.1f  (base %.0f × %.2f)" % [w.get_damage(), Weapon.BASE_DAMAGE, w.damage_mult])
-		_dev_stat("fire interval", "%.3fs  (×%.2f)  %s" % [w.get_fire_interval(), w.fire_rate_mult, "FULL-AUTO" if w.full_auto else "semi-auto"])
-		_dev_stat("mag size", "%d  (base %d %+d)" % [w.get_mag_size(), Weapon.BASE_MAG_SIZE, w.mag_size_bonus])
-		_dev_stat("reload time", "%.2fs  (×%.2f)" % [w.get_reload_time(), w.reload_mult])
-		_dev_stat("headshot mult", "×%.2f" % w.get_headshot_mult())
-		_dev_stat("shots / trigger", str(w.get_shots_per_trigger()))
-		_dev_stat("ricochet", str(w.ricochet_count))
-		_dev_stat("spread", "%.4f rad  (%.2f°)" % [w.spread, rad_to_deg(w.spread)])
-		_dev_stat("lifesteal", "%.0f%%" % (w.lifesteal * 100.0))
-		_dev_stat("explosive radius / dmg", "%.1fm  /  %.1f" % [w.explosive_radius, w.explosive_damage])
-		_dev_stat("bullet scale", "%.2f" % w.bullet_scale)
-		_dev_stat("bullet color", "#%s" % w.bullet_color.to_html(false))
-	else:
-		_dev_note("(target player not spawned)")
-
-func _dev_target_player() -> Node:
-	# 0 = "Local player" — follow whoever local_player resolves to.
-	if _dev_target_id == 0:
-		return local_player if (local_player and is_instance_valid(local_player)) else null
-	return players_root.get_node_or_null(str(_dev_target_id))
-
-func _dev_player_picker() -> void:
-	var hbox := HBoxContainer.new()
-	hbox.add_theme_constant_override("separation", 8)
-	var lbl := Label.new()
-	lbl.text = "Edit player:"
-	lbl.add_theme_color_override("font_color", Color(0.7, 0.7, 0.85))
-	hbox.add_child(lbl)
-	var opt := OptionButton.new()
-	opt.focus_mode = Control.FOCUS_NONE
-	# Index 0 is always "Local" so the panel keeps following you across deaths.
-	opt.add_item("Local player", 0)
-	var selected_idx: int = 0
-	var i: int = 1
-	for raw_id in NetworkManager.players:
-		var pid := int(raw_id)
-		var pname: String = str(NetworkManager.players[raw_id])
-		var label_text: String = "%s  (id %d)" % [pname, pid]
-		if _is_bot_id(pid):
-			label_text += "  [bot]"
-		opt.add_item(label_text, pid)
-		if pid == _dev_target_id:
-			selected_idx = i
-		i += 1
-	opt.select(selected_idx)
-	opt.item_selected.connect(func(idx: int) -> void:
-		_dev_target_id = int(opt.get_item_id(idx))
-		call_deferred("_refresh_dev_panel"))
-	hbox.add_child(opt)
-	_dev_content.add_child(hbox)
-
-func _dev_heading(text: String, color: Color, font_size: int) -> void:
-	var lbl := Label.new()
-	lbl.text = text
-	lbl.add_theme_color_override("font_color", color)
-	lbl.add_theme_font_size_override("font_size", font_size)
-	_dev_content.add_child(lbl)
-
-func _dev_stat(stat_name: String, value: String) -> void:
-	var hbox := HBoxContainer.new()
-	var n := Label.new()
-	n.text = stat_name
-	n.custom_minimum_size = Vector2(220, 0)
-	n.add_theme_color_override("font_color", Color(0.7, 0.7, 0.85))
-	hbox.add_child(n)
-	var v := Label.new()
-	v.text = value
-	v.add_theme_color_override("font_color", Color(1, 1, 1))
-	hbox.add_child(v)
-	_dev_content.add_child(hbox)
-
-func _dev_note(text: String) -> void:
-	var lbl := Label.new()
-	lbl.text = text
-	lbl.add_theme_color_override("font_color", Color(0.6, 0.6, 0.7))
-	_dev_content.add_child(lbl)
-
-func _dev_toggle(label: String, value: bool, on_changed: Callable) -> void:
-	var cb := CheckBox.new()
-	cb.text = label
-	cb.button_pressed = value
-	cb.focus_mode = Control.FOCUS_NONE
-	cb.add_theme_color_override("font_color", Color(1, 1, 1))
-	cb.toggled.connect(on_changed)
-	_dev_content.add_child(cb)
-
-func _dev_card_row(card: Dictionary, count: int) -> void:
-	var hbox := HBoxContainer.new()
-	hbox.add_theme_constant_override("separation", 10)
-
-	var n := Label.new()
-	n.text = "%s  —  %s" % [card.name, card.desc]
-	n.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	n.add_theme_color_override("font_color", card.color)
-	hbox.add_child(n)
-
-	var clbl := Label.new()
-	clbl.text = str(count)
-	clbl.custom_minimum_size = Vector2(30, 0)
-	clbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	clbl.add_theme_color_override("font_color", Color(1, 1, 1) if count > 0 else Color(0.4, 0.4, 0.4))
-	hbox.add_child(clbl)
-
-	var btn_minus := Button.new()
-	btn_minus.text = "-"
-	btn_minus.custom_minimum_size = Vector2(30, 30)
-	btn_minus.focus_mode = Control.FOCUS_NONE
-	btn_minus.disabled = count <= 0
-	btn_minus.pressed.connect(_dev_remove_card.bind(card.id))
-	hbox.add_child(btn_minus)
-
-	var btn_plus := Button.new()
-	btn_plus.text = "+"
-	btn_plus.custom_minimum_size = Vector2(30, 30)
-	btn_plus.focus_mode = Control.FOCUS_NONE
-	btn_plus.pressed.connect(_dev_apply_card.bind(card.id))
-	hbox.add_child(btn_plus)
-
-	_dev_content.add_child(hbox)
-
-func _dev_apply_card(card_id: String) -> void:
-	var target: Node = _dev_target_player()
-	if target == null or not is_instance_valid(target):
-		return
-	target.apply_card.rpc(card_id)
-	call_deferred("_refresh_dev_panel")
-
-func _dev_remove_card(card_id: String) -> void:
-	# Cards mutate weapon cumulatively and have no inverse — easiest way to
-	# drop one is to reset and reapply every OTHER card in the stack.
-	var target: Node = _dev_target_player()
-	if target == null or not is_instance_valid(target):
-		return
-	var remaining: Array = target.weapon.applied_cards.duplicate()
-	var idx := remaining.find(card_id)
-	if idx >= 0:
-		remaining.remove_at(idx)
-	target.reset_weapon.rpc()
-	for c in remaining:
-		target.apply_card.rpc(str(c))
-	call_deferred("_refresh_dev_panel")
-
 func _restart_match() -> void:
 	if not multiplayer.is_server():
 		return
@@ -2742,16 +2302,3 @@ func _restart_match() -> void:
 		round_wins[pid] = 0
 	_broadcast_scores.rpc(round_wins)
 	_maybe_start_match()
-
-func _show_dev_help() -> void:
-	var help_text = "DEV SHORTCUTS:\n" + \
-		"G: Toggle Godmode\n" + \
-		"P: Toggle Passive AI\n" + \
-		"M: Restart Match\n" + \
-		"1: Reset Weapon\n" + \
-		"2: Apply Sniper\n" + \
-		"3: Apply Shotgun\n" + \
-		"4: Apply Uzi\n" + \
-		"5: Apply Bazooka\n" + \
-		"F1: Full Dev Panel"
-	_announce.rpc(help_text, 4.0)
