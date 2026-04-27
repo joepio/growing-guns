@@ -66,16 +66,20 @@ const INVISIBLE_ALPHA := 0.06
 @onready var blob_rig: Node3D = $BodyModel/BlobRig
 @onready var blob_core: MeshInstance3D = $BodyModel/BlobRig/BlobCore
 @onready var head_blob: MeshInstance3D = $BodyModel/BlobRig/HeadBlob
+@onready var face_plate: MeshInstance3D = $BodyModel/BlobRig/HeadBlob/FacePlate
 @onready var eye_left: MeshInstance3D = $BodyModel/BlobRig/HeadBlob/EyeLeft
 @onready var eye_right: MeshInstance3D = $BodyModel/BlobRig/HeadBlob/EyeRight
 @onready var pupil_left: MeshInstance3D = $BodyModel/BlobRig/HeadBlob/PupilLeft
 @onready var pupil_right: MeshInstance3D = $BodyModel/BlobRig/HeadBlob/PupilRight
 @onready var hit_eye_left: Node3D = $BodyModel/BlobRig/HeadBlob/HitEyeLeft
 @onready var hit_eye_right: Node3D = $BodyModel/BlobRig/HeadBlob/HitEyeRight
+@onready var mouth: MeshInstance3D = $BodyModel/BlobRig/HeadBlob/Mouth
 @onready var hand_anchor: Node3D = $BodyModel/BlobRig/HandAnchor
 @onready var head_hitbox: Area3D = $HeadHitbox
 
 var _third_person_gun: Node3D = null
+var _third_person_gun_rest_pos: Vector3 = Vector3.ZERO
+var _third_person_gun_rest_rot: Vector3 = Vector3.ZERO
 @onready var torso_hitbox: Area3D = $TorsoHitbox
 @onready var legs_hitbox: Area3D = $LegsHitbox
 @onready var name_label: Label3D = $NameLabel
@@ -178,6 +182,9 @@ const BOT_SPREAD := 0.09                 # ~5.2° — miss-prone but threatening
 const BOT_MISS_CHANCE := 0.45            # fraction of shots that get huge extra spread
 const BOT_JUMP_CHANCE := 0.025           # per physics tick, when on floor
 const BOT_DASH_CHANCE := 0.018           # per physics tick, when charge available
+const BOT_EDGE_PROBE_DIST := 1.8
+const BOT_GAP_JUMP_MIN_LANDING := 4.5
+const BOT_GAP_JUMP_MAX_LANDING := 12.0
 
 var _bot_target: Node3D = null
 var _bot_shoot_cooldown: float = 0.0
@@ -210,6 +217,7 @@ func _ready() -> void:
 	if legs_hitbox:
 		_legs_hitbox_rest_y = legs_hitbox.position.y
 	_setup_gun_visuals()
+	_apply_identity_cosmetics()
 	_capture_body_materials()  # after gun setup so we capture the original gun material too
 	_update_gun_visuals()
 	_update_body_scale()
@@ -254,6 +262,141 @@ func _setup_third_person_gun() -> void:
 	gun_root.rotation_degrees = Vector3(10.0, 0.0, 0.0)
 	gun_root.add_child(gun)
 	_third_person_gun = gun_root
+	_third_person_gun_rest_pos = gun_root.position
+	_third_person_gun_rest_rot = gun_root.rotation
+
+func _apply_identity_cosmetics() -> void:
+	if head_blob == null:
+		return
+	var seed := _identity_seed()
+	var hue := float(seed % 360) / 360.0
+	var sat := 0.44 + float((seed >> 3) % 24) / 100.0
+	var val := 0.72 + float((seed >> 7) % 18) / 100.0
+	var skin := Color.from_hsv(hue, sat, val, 1.0)
+	var face := skin.lerp(Color(1.0, 0.96, 0.88), 0.64)
+	var skin_mat := _make_mat(skin, 0.95, 0.0)
+	var face_mat := _make_mat(face, 0.86, 0.0)
+	if blob_core:
+		blob_core.material_override = skin_mat
+	if head_blob:
+		head_blob.material_override = skin_mat
+	if face_plate:
+		face_plate.material_override = face_mat
+
+	var eye_kind := int((seed >> 11) % 3)
+	var has_glasses := ((seed >> 15) & 1) == 1
+	var mouth_kind := int((seed >> 16) % 3)
+	_apply_eye_variant(eye_kind, face_mat)
+	if has_glasses:
+		_add_glasses()
+	_apply_mouth_variant(mouth_kind)
+
+func _identity_seed() -> int:
+	var s := "%d:%s" % [player_id, player_name]
+	var h := 2166136261
+	for i in s.length():
+		h = int((h ^ s.unicode_at(i)) * 16777619) & 0x7fffffff
+	return h
+
+func _make_mat(color: Color, roughness: float = 0.8, metallic: float = 0.0) -> StandardMaterial3D:
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = color
+	mat.roughness = roughness
+	mat.metallic = metallic
+	return mat
+
+func _apply_eye_variant(kind: int, eyelid_mat: StandardMaterial3D) -> void:
+	if eye_left == null or eye_right == null or pupil_left == null or pupil_right == null:
+		return
+	match kind:
+		1:
+			eye_left.scale.y *= 0.78
+			eye_right.scale.y *= 0.78
+			pupil_left.scale.y *= 0.72
+			pupil_right.scale.y *= 0.72
+		2:
+			eye_left.scale.y *= 0.52
+			eye_right.scale.y *= 0.52
+			pupil_left.scale.y *= 0.45
+			pupil_right.scale.y *= 0.45
+			_add_eyelid(-0.14, eyelid_mat)
+			_add_eyelid(0.14, eyelid_mat)
+
+func _add_eyelid(x: float, mat: StandardMaterial3D) -> void:
+	var lid := MeshInstance3D.new()
+	lid.name = "BoredEyelid"
+	var mesh := BoxMesh.new()
+	mesh.size = Vector3(0.17, 0.06, 0.025)
+	lid.mesh = mesh
+	lid.material_override = mat
+	lid.position = Vector3(x, 0.065, -0.456)
+	head_blob.add_child(lid)
+
+func _add_glasses() -> void:
+	if head_blob == null:
+		return
+	var mat := _make_mat(Color(0.035, 0.03, 0.025), 0.35, 0.15)
+	var root := Node3D.new()
+	root.name = "Glasses"
+	head_blob.add_child(root)
+	for x in [-0.14, 0.14]:
+		_add_face_bar(root, mat, Vector3(x, 0.088, -0.482), Vector3(0.2, 0.018, 0.018))
+		_add_face_bar(root, mat, Vector3(x, -0.018, -0.482), Vector3(0.2, 0.018, 0.018))
+		_add_face_bar(root, mat, Vector3(x - 0.09, 0.035, -0.482), Vector3(0.018, 0.12, 0.018))
+		_add_face_bar(root, mat, Vector3(x + 0.09, 0.035, -0.482), Vector3(0.018, 0.12, 0.018))
+	_add_face_bar(root, mat, Vector3(0.0, 0.04, -0.485), Vector3(0.08, 0.018, 0.018))
+
+func _add_face_bar(parent: Node3D, mat: StandardMaterial3D, pos: Vector3, size: Vector3) -> MeshInstance3D:
+	var bar := MeshInstance3D.new()
+	var mesh := BoxMesh.new()
+	mesh.size = size
+	bar.mesh = mesh
+	bar.material_override = mat
+	bar.position = pos
+	parent.add_child(bar)
+	return bar
+
+func _apply_mouth_variant(kind: int) -> void:
+	if mouth == null:
+		return
+	mouth.visible = kind != 2
+	match kind:
+		0:
+			_add_mouth_corner(-0.16, true)
+			_add_mouth_corner(0.16, true)
+		1:
+			mouth.position.y -= 0.015
+			_add_mouth_corner(-0.16, false)
+			_add_mouth_corner(0.16, false)
+		2:
+			_add_o_mouth()
+
+func _add_mouth_corner(x: float, smile: bool) -> void:
+	var corner := MeshInstance3D.new()
+	corner.name = "MouthCorner"
+	var mesh := BoxMesh.new()
+	mesh.size = Vector3(0.025, 0.085, 0.025)
+	corner.mesh = mesh
+	corner.material_override = mouth.material_override
+	corner.position = Vector3(x, -0.135 if smile else -0.17, -0.425)
+	corner.rotation.z = deg_to_rad(-34.0 if (x < 0.0) == smile else 34.0)
+	corner.scale = Vector3(1.0, 0.75, 1.0)
+	head_blob.add_child(corner)
+
+func _add_o_mouth() -> void:
+	var o := MeshInstance3D.new()
+	o.name = "OMouth"
+	var mesh := TorusMesh.new()
+	mesh.inner_radius = 0.018
+	mesh.outer_radius = 0.055
+	mesh.rings = 12
+	mesh.ring_segments = 8
+	o.mesh = mesh
+	o.material_override = mouth.material_override
+	o.position = Vector3(0.0, -0.145, -0.43)
+	o.rotation.x = PI * 0.5
+	o.scale = Vector3(0.85, 1.15, 0.85)
+	head_blob.add_child(o)
 
 func _process(delta: float) -> void:
 	if _ragdoll_head and is_instance_valid(_ragdoll_head):
@@ -688,12 +831,7 @@ func _physics_process(delta: float) -> void:
 		is_zooming = false # Auto-cancel zoom if weapon special changes (e.g. card reset)
 
 	# --- Fell off the map ---
-	if global_position.y < -30.0:
-		if ghost_mode:
-			global_position = Vector3(0, 5, 0)
-			_last_sync_pos = Vector3.INF
-		else:
-			_apply_damage(MAX_HEALTH, player_id)
+	_handle_fell_off_map()
 
 func _input_vector() -> Vector3:
 	var input := _move_vector()
@@ -703,6 +841,17 @@ func _input_vector() -> Vector3:
 
 func _can_accept_gameplay_input() -> bool:
 	return split_screen_local or Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
+
+func _handle_fell_off_map() -> void:
+	if global_position.y >= -30.0:
+		return
+	if ghost_mode:
+		global_position = Vector3(0, 5, 0)
+		velocity = Vector3.ZERO
+		_last_sync_pos = Vector3.INF
+	else:
+		var lethal_amount: int = max(health, MAX_HEALTH)
+		_apply_damage(lethal_amount, player_id)
 
 func _move_vector() -> Vector2:
 	if local_input_device < 0:
@@ -835,7 +984,13 @@ func _rifle_fired(origin: Vector3, dir: Vector3, shooter_id: int) -> void:
 
 	# Muzzle flash scales with bullet size AND damage so heavy rounds boom.
 	var dmg_ratio: float = clampf(w.get_damage() / Weapon.BASE_DAMAGE, 0.5, 4.0)
-	_spawn_muzzle_flash(w.bullet_color, w.bullet_scale * sqrt(dmg_ratio))
+	var local_first_person := shooter_id == multiplayer.get_unique_id() and is_multiplayer_authority() and not is_bot
+	var visual_anchor := muzzle if local_first_person else _third_person_gun
+	if visual_anchor == null:
+		visual_anchor = muzzle
+	_spawn_muzzle_flash(w.bullet_color, w.bullet_scale * sqrt(dmg_ratio), visual_anchor, local_first_person)
+	if not local_first_person:
+		_spawn_third_person_casing(w)
 
 func _apply_bullet_splash(pos: Vector3, radius: float, damage: float, shooter_id: int) -> void:
 	for p: Node3D in get_tree().get_nodes_in_group("players"):
@@ -921,13 +1076,22 @@ func _spawn_bullet_blast(pos: Vector3, radius: float, color: Color) -> void:
 func apply_explosion_view_punch(pos: Vector3, radius: float, peak: float = 1.0) -> void:
 	Violence.apply_explosion_view_punch(self, pos, radius, peak)
 
-func _spawn_muzzle_flash(color: Color = Color(1.0, 0.88, 0.45), scale_f: float = 1.0) -> void:
+func _spawn_muzzle_flash(
+	color: Color = Color(1.0, 0.88, 0.45),
+	scale_f: float = 1.0,
+	anchor: Node3D = null,
+	first_person: bool = true,
+) -> void:
+	if anchor == null:
+		anchor = muzzle
+	if anchor == null:
+		return
 	# Directional flash: a short starburst plus a forward flame plume reads
 	# better than a glowing orb and stays cheap enough for multiplayer.
 	var flash_root := Node3D.new()
 	flash_root.position = Vector3(0.0, 0.0, -0.35)
 	flash_root.rotation.z = randf_range(0.0, TAU)
-	muzzle.add_child(flash_root)
+	anchor.add_child(flash_root)
 
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -980,10 +1144,82 @@ func _spawn_muzzle_flash(color: Color = Color(1.0, 0.88, 0.45), scale_f: float =
 	gun_light.light_energy = 1.4 * scale_f
 	gun_light.omni_range = 1.7 * scale_f
 	gun_light.position = Vector3(0.0, 0.0, 0.06)
-	muzzle.add_child(gun_light)
+	anchor.add_child(gun_light)
 	tw.tween_property(gun_light, "light_energy", 0.0, 0.08)
 	tw.chain().tween_callback(gun_light.queue_free)
 	tw.chain().tween_callback(flash_root.queue_free)
+
+	if not first_person:
+		var rest_pos := anchor.position
+		anchor.position = rest_pos + Vector3(0.0, 0.0, 0.05 * scale_f)
+		var kick_tw := create_tween()
+		kick_tw.tween_property(anchor, "position", rest_pos, 0.08)\
+			.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+
+func _spawn_third_person_casing(w: Weapon) -> void:
+	if BenchFlags.active and BenchFlags.no_casings:
+		return
+	if _third_person_gun == null:
+		return
+	var scene := get_tree().current_scene
+	if scene == null:
+		return
+	BenchFlags.inc("casings_spawned")
+	var rb := RigidBody3D.new()
+	rb.mass = 0.018
+	rb.collision_layer = 0
+	rb.collision_mask = 1
+	var pmat := PhysicsMaterial.new()
+	pmat.bounce = 0.3
+	pmat.friction = 0.6
+	rb.physics_material_override = pmat
+
+	var size := clampf(w.bullet_scale, 0.65, 2.2)
+	if not BenchFlags.active:
+		var mi := MeshInstance3D.new()
+		var cm := CylinderMesh.new()
+		cm.top_radius = 0.035 * size
+		cm.bottom_radius = 0.04 * size
+		cm.height = 0.16 * size
+		cm.radial_segments = 8
+		mi.mesh = cm
+		var mat := StandardMaterial3D.new()
+		mat.albedo_color = Color(0.95, 0.66, 0.28)
+		mat.metallic = 0.9
+		mat.roughness = 0.38
+		mi.material_override = mat
+		mi.rotation = Vector3(PI * 0.5, 0.0, 0.0)
+		rb.add_child(mi)
+
+	var cs := CollisionShape3D.new()
+	var shape := CylinderShape3D.new()
+	shape.radius = 0.04 * size
+	shape.height = 0.16 * size
+	cs.shape = shape
+	cs.rotation = Vector3(PI * 0.5, 0.0, 0.0)
+	rb.add_child(cs)
+
+	var basis := _third_person_gun.global_transform.basis
+	var spawn_pos := _third_person_gun.global_position + basis.x * 0.16 + basis.y * 0.08 + basis.z * -0.08
+	rb.transform = Transform3D(basis, spawn_pos)
+	scene.add_child(rb)
+
+	var dir := (basis.x * 1.0 + basis.y * 1.3 + basis.z * 0.15).normalized()
+	dir = (dir + Vector3(
+		randf_range(-0.25, 0.25),
+		randf_range(-0.1, 0.2),
+		randf_range(-0.25, 0.25),
+	)).normalized()
+	rb.linear_velocity = dir * randf_range(2.3, 4.2)
+	rb.angular_velocity = Vector3(
+		randf_range(-10.0, 10.0),
+		randf_range(-10.0, 10.0),
+		randf_range(-10.0, 10.0),
+	)
+	var cleanup := get_tree().create_timer(4.0)
+	cleanup.timeout.connect(func() -> void:
+		if is_instance_valid(rb):
+			rb.queue_free())
 
 @rpc("any_peer", "call_local", "reliable")
 func _hit_confirm(is_headshot: bool, dmg: int = 0, hit_pos: Vector3 = Vector3.INF) -> void:
@@ -1085,11 +1321,26 @@ func _start_reload() -> void:
 	if mag >= weapon.get_mag_size():
 		return
 	reloading = true
-	rifle_cooldown = weapon.get_reload_time()
-	_animate_reload(rifle_cooldown)
+	var duration := weapon.get_reload_time()
+	rifle_cooldown = duration
 	_stop_reload_audio()
-	if is_multiplayer_authority() and not is_bot:
-		_reload_audio = SFX.reload(rifle_cooldown)
+	_reload_started.rpc(duration)
+
+@rpc("any_peer", "call_local", "reliable")
+func _reload_started(duration: float) -> void:
+	var sender := multiplayer.get_remote_sender_id()
+	if sender != 0 and sender != 1 and sender != get_multiplayer_authority():
+		return
+	var local_first_person := is_multiplayer_authority() and not is_bot
+	if local_first_person:
+		_animate_reload(duration)
+		_stop_reload_audio()
+		_reload_audio = SFX.reload(duration)
+	else:
+		_animate_third_person_reload(duration)
+		_stop_reload_audio()
+		var at := _third_person_gun.global_position if _third_person_gun else global_position
+		_reload_audio = SFX.reload(duration, at)
 
 func _stop_reload_audio() -> void:
 	if _reload_audio and is_instance_valid(_reload_audio):
@@ -1149,6 +1400,23 @@ func _animate_reload(duration: float) -> void:
 
 func _set_reload_offset(v: Vector3) -> void:
 	reload_offset = v
+
+func _animate_third_person_reload(duration: float) -> void:
+	if _third_person_gun == null:
+		return
+	_third_person_gun.position = _third_person_gun_rest_pos
+	_third_person_gun.rotation = _third_person_gun_rest_rot
+	var lift := _third_person_gun_rest_pos + Vector3(0.0, 0.1, 0.04)
+	var tilt := _third_person_gun_rest_rot + Vector3(deg_to_rad(-22.0), deg_to_rad(10.0), deg_to_rad(7.0))
+	var tw := create_tween().set_parallel(true)
+	tw.tween_property(_third_person_gun, "position", lift, duration * 0.22)\
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	tw.tween_property(_third_person_gun, "rotation", tilt, duration * 0.22)\
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	tw.tween_property(_third_person_gun, "position", _third_person_gun_rest_pos, duration * 0.24)\
+		.set_delay(duration * 0.68).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
+	tw.tween_property(_third_person_gun, "rotation", _third_person_gun_rest_rot, duration * 0.24)\
+		.set_delay(duration * 0.68).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
 
 # -------------------- TELEPORT --------------------
 
@@ -1861,6 +2129,11 @@ func _bot_physics(delta: float) -> void:
 	_bot_shoot_cooldown = maxf(0.0, _bot_shoot_cooldown - delta)
 	_bot_jump_cooldown = maxf(0.0, _bot_jump_cooldown - delta)
 	_bot_dash_cooldown = maxf(0.0, _bot_dash_cooldown - delta)
+	rifle_cooldown = maxf(0.0, rifle_cooldown - delta)
+
+	if reloading and rifle_cooldown <= 0.0:
+		mag = weapon.get_mag_size()
+		reloading = false
 
 	# Dash charges tick back up the same as for real players.
 	if dash_charges < MAX_DASH_CHARGES:
@@ -1874,6 +2147,8 @@ func _bot_physics(delta: float) -> void:
 	# Gravity
 	if not is_on_floor():
 		velocity.y -= GRAVITY * delta
+	else:
+		jumps_left = 2 + weapon.extra_jumps
 
 	if _bot_target == null or not is_instance_valid(_bot_target) or _bot_target.get("ghost_mode") == true:
 		_bot_target = _bot_find_target()
@@ -1913,8 +2188,36 @@ func _bot_physics(delta: float) -> void:
 	if move_dir.length() > 1.0:
 		move_dir = move_dir.normalized()
 
+	var gap_jump_started := false
+	if is_on_floor() and move_dir.length_squared() > 0.01 and not _bot_has_floor_ahead(move_dir, BOT_EDGE_PROBE_DIST):
+		var landing_dist := _bot_gap_landing_distance(move_dir)
+		if landing_dist > 0.0:
+			velocity.y = JUMP_VELOCITY
+			jumps_left = 1 + weapon.extra_jumps
+			_bot_jump_cooldown = randf_range(0.8, 1.8)
+			gap_jump_started = true
+			if not ghost_mode:
+				SFX.jump(global_position)
+			if landing_dist > 7.0 and dash_timer <= 0.0 and dash_charges > 0 and _bot_dash_cooldown <= 0.0:
+				dash_dir = move_dir.normalized()
+				dash_timer = DASH_TIME
+				dash_charges -= 1
+				_bot_dash_cooldown = randf_range(2.0, 4.0)
+				if not ghost_mode:
+					SFX.dash(global_position)
+		else:
+			move_dir = Vector3.ZERO
+			_bot_strafe_timer = 0.0
+	elif not is_on_floor() and velocity.y < 1.0 and jumps_left > 0 and move_dir.length_squared() > 0.01:
+		if not _bot_has_floor_ahead(move_dir, BOT_EDGE_PROBE_DIST) and _bot_gap_landing_distance(move_dir) > 0.0:
+			velocity.y = DOUBLE_JUMP_VELOCITY
+			jumps_left -= 1
+			gap_jump_started = true
+			if not ghost_mode:
+				SFX.jump(global_position)
+
 	# Occasional hop — keeps the bot moving vertically, harder to track.
-	if is_on_floor() and _bot_jump_cooldown <= 0.0 and randf() < BOT_JUMP_CHANCE:
+	if not gap_jump_started and is_on_floor() and _bot_jump_cooldown <= 0.0 and randf() < BOT_JUMP_CHANCE:
 		velocity.y = JUMP_VELOCITY
 		_bot_jump_cooldown = randf_range(1.2, 3.0)
 		if not ghost_mode: SFX.jump(global_position)
@@ -1948,21 +2251,49 @@ func _bot_physics(delta: float) -> void:
 	_maybe_broadcast_state()
 	_tick_footsteps(delta)
 
-	# Fell off map — teleport back up.
-	if global_position.y < -30.0:
-		global_position = Vector3(0, 5, 0)
-		_last_sync_pos = Vector3.INF  # force resync
+	# Fell off map.
+	_handle_fell_off_map()
 
-	if not ghost_mode and _bot_shoot_cooldown <= 0.0 and _bot_has_los(_bot_target):
+	if not ghost_mode and _bot_shoot_cooldown <= 0.0 and not reloading and _bot_has_los(_bot_target):
 		var game_scene: Node = get_tree().current_scene
 		# Round must be live (no shooting at corpses during card pick / match
 		# over), and the dev toggle in the F1 panel can hold fire entirely.
 		var is_playing: bool = game_scene and int(game_scene.get("state")) == 1  # State.PLAYING == 1
 		var hold_fire: bool = game_scene and game_scene.get("bots_hold_fire") == true
 		if is_playing and not hold_fire:
-			_bot_shoot()
-		# Bots auto-fire at the weapon's natural cadence.
-		_bot_shoot_cooldown = weapon.get_fire_interval()
+			if _bot_shoot():
+				# Bots auto-fire at the weapon's natural cadence, but now obey
+				# the same magazine and reload gates as humans.
+				_bot_shoot_cooldown = weapon.get_fire_interval()
+
+func _bot_has_floor_ahead(move_dir: Vector3, distance: float) -> bool:
+	if move_dir.length_squared() <= 0.001:
+		return true
+	var dir: Vector3 = move_dir.normalized()
+	var origin: Vector3 = global_position + dir * distance + Vector3.UP * 0.8
+	var target: Vector3 = origin + Vector3.DOWN * 3.0
+	var q: PhysicsRayQueryParameters3D = PhysicsRayQueryParameters3D.create(origin, target, 1)
+	q.exclude = [get_rid()]
+	return not get_world_3d().direct_space_state.intersect_ray(q).is_empty()
+
+func _bot_gap_landing_distance(move_dir: Vector3) -> float:
+	if move_dir.length_squared() <= 0.001:
+		return 0.0
+	var dir: Vector3 = move_dir.normalized()
+	var space: PhysicsDirectSpaceState3D = get_world_3d().direct_space_state
+	var landing_probes: Array[float] = [BOT_GAP_JUMP_MIN_LANDING, 6.5, 8.5, 10.5, BOT_GAP_JUMP_MAX_LANDING]
+	for distance: float in landing_probes:
+		var origin: Vector3 = global_position + dir * distance + Vector3.UP * 3.0
+		var target: Vector3 = origin + Vector3.DOWN * 9.0
+		var q: PhysicsRayQueryParameters3D = PhysicsRayQueryParameters3D.create(origin, target, 1)
+		q.exclude = [get_rid()]
+		var hit: Dictionary = space.intersect_ray(q)
+		if hit.is_empty():
+			continue
+		var landing_y := float((hit["position"] as Vector3).y)
+		if landing_y >= global_position.y - 4.5 and landing_y <= global_position.y + 3.5:
+			return float(distance)
+	return 0.0
 
 func _tick_footsteps(delta: float) -> void:
 	if ghost_mode or not is_on_floor() or dash_timer > 0.0:
@@ -2011,9 +2342,15 @@ func _bot_has_los(target: Node3D) -> bool:
 	q.exclude = get_hitbox_rids()
 	return get_world_3d().direct_space_state.intersect_ray(q).is_empty()
 
-func _bot_shoot() -> void:
+func _bot_shoot() -> bool:
 	if _bot_target == null or not is_instance_valid(_bot_target):
-		return
+		return false
+	if reloading:
+		return false
+	if mag <= 0:
+		_start_reload()
+		return false
+	mag -= 1
 	var from := global_position + Vector3.UP * 0.7
 	var to: Vector3 = _bot_target.global_position + Vector3.UP * 0.4
 	var dist := from.distance_to(to)
@@ -2053,3 +2390,6 @@ func _bot_shoot() -> void:
 		dir = dir.rotated(right.normalized(), pitch)
 
 	_rifle_fired.rpc(from, dir.normalized(), player_id)
+	if mag <= 0:
+		_start_reload()
+	return true

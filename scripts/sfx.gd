@@ -44,7 +44,12 @@ var _hurt_sounds: Array[AudioStreamWAV] = []
 var _death_sounds: Array[AudioStreamWAV] = []
 var _gun_sounds: Array[AudioStreamWAV] = []
 var _step_sounds: Array[AudioStream] = []
-var _card_pick_sound: AudioStreamWAV = null
+# Card flip — 3 procedural variants. Played in shuffled order (each cycle
+# through the 3 reshuffles) so consecutive flips don't repeat the same sample
+# but you also never hear a flat round-robin pattern.
+const CARD_FLIP_VARIANTS := 3
+var _card_flip_order: Array[int] = []
+var _card_flip_idx: int = 0
 
 # Tunable mix knobs — adjust live via scenes/action_lab.tscn.
 var shot_self_db: float = -10.0
@@ -170,16 +175,13 @@ func _load_assets() -> void:
 	# Procedural gun synth handles all weapons now — gun1.wav was a single
 	# fixed-character sample that didn't differentiate weapon types.
 
-	if ResourceLoader.exists("res://assets/audio/Card Pick.wav"):
-		_card_pick_sound = load("res://assets/audio/Card Pick.wav")
 	for i in range(1, 14):
 		var path := "res://assets/audio/Step-%d.wav" % i
 		if ResourceLoader.exists(path):
 			_step_sounds.append(load(path))
-	print("[SFX] loaded hurt=%d death=%d step=%d gun=%d card=%s" % [
+	print("[SFX] loaded hurt=%d death=%d step=%d gun=%d" % [
 		_hurt_sounds.size(), _death_sounds.size(),
-		_step_sounds.size(), _gun_sounds.size(),
-		"YES" if _card_pick_sound != null else "NO"])
+		_step_sounds.size(), _gun_sounds.size()])
 
 # Master chain (two stacked compressors + limiter):
 #   1. Fast transient comp — instant attack, ~60 ms release. Catches sharp
@@ -753,12 +755,24 @@ func kill_confirm() -> void:
 func pling(pitch_ratio: float = 1.0) -> void:
 	var key := "pling_%d" % int(round(pitch_ratio * 100.0))
 	_play(_cached_samples(key, Callable(self, "_synth_pling").bind(pitch_ratio)), -10.0, NO_POS, "pling", -1.0, false, 70.0)
-func card_flip(pitch_ratio: float = 1.0) -> void:
-	if _card_pick_sound:
-		_play_stream(_card_pick_sound, -4.0, NO_POS, pitch_ratio, "card_flip", -1.0, false, 60.0)
-		return
-	var key := "card_flip_%d" % int(round(pitch_ratio * 100.0))
-	_play(_cached_samples(key, Callable(self, "_synth_card_flip").bind(pitch_ratio)), -6.0, NO_POS, "card_flip", -1.0, false, 60.0)
+func card_flip(_pitch_ratio: float = 1.0) -> void:
+	# pitch_ratio kept for callsite compatibility but no longer used —
+	# variation comes from the 3 deterministic synthesised variants instead.
+	var variant := _next_card_flip_variant()
+	var key := "card_flip:%d" % variant
+	_play(_cached_samples(key, Callable(self, "_synth_card_flip").bind(variant)), -10.0, NO_POS, "card_flip", -1.0, false, 60.0)
+
+func _next_card_flip_variant() -> int:
+	if _card_flip_idx >= _card_flip_order.size():
+		var ids: Array[int] = []
+		for i in CARD_FLIP_VARIANTS:
+			ids.append(i)
+		ids.shuffle()
+		_card_flip_order = ids
+		_card_flip_idx = 0
+	var v := _card_flip_order[_card_flip_idx]
+	_card_flip_idx += 1
+	return v
 func reload(duration: float, at: Vector3 = NO_POS) -> Node:
 	# Continuous rattle for the full reload duration. Returns the player node
 	# so the caller can stop it early (e.g. on respawn / round end).
@@ -1381,20 +1395,42 @@ func _synth_dash() -> PackedVector2Array:
 		var s := lp * env * 0.18
 		out[i] = Vector2(s, s)
 	return out
-func _synth_card_flip(pitch_ratio: float = 1.0) -> PackedVector2Array:
-	# A quick, airy "woosh" to sound like paper or a digital card flipping.
-	var dur := 0.12
-	var n := int(dur * MIX_RATE)
+func _synth_card_flip(variant: int) -> PackedVector2Array:
+	# Soft filtered-noise swoosh (the card travelling) followed by a slightly
+	# louder tick at the end (the card landing flat). Per-variant RNG seeding
+	# gives 3 stable, distinct samples — band center, tick freq, and timing
+	# all vary so consecutive flips never sound identical.
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash([variant, "card_flip"])
+	var dur: float = lerpf(0.16, 0.22, rng.randf())
+	var noise_dur: float = dur * lerpf(0.65, 0.78, rng.randf())
+	var tick_start: float = dur * lerpf(0.82, 0.92, rng.randf())
+	var tick_freq: float = lerpf(2400.0, 4200.0, rng.randf())
+	var tick_decay: float = lerpf(220.0, 380.0, rng.randf())
+	var noise_center: float = lerpf(900.0, 1900.0, rng.randf())
+	var n: int = int(dur * MIX_RATE)
 	var out := PackedVector2Array()
 	out.resize(n)
-	var lp := 0.0
+	var lp_hi: float = 0.0
+	var lp_lo: float = 0.0
 	for i in range(n):
-		var t := float(i) / MIX_RATE
-		var env := sin(PI * clampf(t / dur, 0.0, 1.0))
-		var noise := randf_range(-1.0, 1.0)
-		var cutoff_k := lerpf(0.6, 0.1, t / dur) * pitch_ratio
-		lp = lerpf(lp, noise, clampf(cutoff_k, 0.01, 0.99))
-		var s := lp * env * 0.5
+		var t: float = float(i) / MIX_RATE
+		var s: float = 0.0
+		# Phase 1 — soft 1.5-octave-bandpassed noise with a sin envelope.
+		# Quiet by design (gain 0.18) so the tick at the end reads louder.
+		if t < noise_dur:
+			var noise_phase: float = t / noise_dur
+			var env: float = sin(PI * noise_phase) * 0.18
+			var noise: float = rng.randf_range(-1.0, 1.0)
+			var lp_k: float = clampf(noise_center * (TAU * 1.6) / MIX_RATE, 0.05, 0.95)
+			var hp_k: float = clampf(noise_center * (TAU * 0.5) / MIX_RATE, 0.005, 0.6)
+			lp_hi = lerpf(lp_hi, noise, lp_k)
+			lp_lo = lerpf(lp_lo, lp_hi, hp_k)
+			s += (lp_hi - lp_lo) * env
+		# Phase 2 — short, brighter tick. exp decay → very quick.
+		if t >= tick_start:
+			var dt: float = t - tick_start
+			s += sin(TAU * tick_freq * dt) * exp(-dt * tick_decay) * 0.35
 		out[i] = Vector2(s, s)
 	return out
 

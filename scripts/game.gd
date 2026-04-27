@@ -233,18 +233,9 @@ func _ready() -> void:
 	_custom_crosshair.set_script(load("res://scripts/crosshair.gd"))
 	$HUD.add_child(_custom_crosshair)
 
-	# Keep the game controller and its UI running when the tree is paused.
-
-	# No menu — bootstrap networking on the fly. First launcher hosts, later
-	# launches fall back to client. Note: Godot 4 installs a default
-	# OfflineMultiplayerPeer so a plain null check isn't enough — we have to
-	# check for a real ENet peer.
-	if multiplayer.multiplayer_peer == null \
-			or multiplayer.multiplayer_peer is OfflineMultiplayerPeer:
-		var auto_name := "Player_%d" % (randi() % 1000)
-		if not NetworkManager.auto_connect(auto_name):
-			push_error("Could not start or join a game.")
-			return
+	# Networking auto-bootstrap moved further down — see the IrohServer.start()
+	# call right before the multiplayer.is_server() branch. Iroh is the only
+	# transport now; LAN/ENet auto-connect was removed with the main menu.
 
 	NetworkManager.player_list_changed.connect(_update_scoreboard)
 	banner_timer.timeout.connect(func() -> void: round_banner.visible = false)
@@ -268,6 +259,17 @@ func _ready() -> void:
 		_arena_env = we.environment
 		_base_tonemap_exposure = _arena_env.tonemap_exposure
 
+	# Auto-host an iroh server unless we're already wired to a real peer
+	# (e.g. the user just clicked Join in the pause menu, which set up an
+	# IrohClient before reloading the scene). This is what makes the boot
+	# experience "open game → playing immediately, ID ready to share".
+	# Godot 4 installs a default OfflineMultiplayerPeer when no peer is set,
+	# so a plain `== null` check never fires — must also reject that.
+	if multiplayer.multiplayer_peer == null \
+			or multiplayer.multiplayer_peer is OfflineMultiplayerPeer:
+		var name_default := "Player_%d" % (randi() % 1000)
+		NetworkManager.host_game_iroh(name_default)
+
 	if multiplayer.is_server():
 		multiplayer.peer_disconnected.connect(_on_peer_disconnected)
 		for pid in NetworkManager.players:
@@ -280,10 +282,23 @@ func _ready() -> void:
 			_spawn_bots(requested_count)
 		_maybe_start_match()
 
-		# SP fallback: if nobody else has joined yet, and no bot was specifically requested,
-		# we still give a bot to fight as a default "sandbox" experience.
-		if not bot_requested and not _splitscreen.is_enabled():
+		# Solo-vs-AI fallback: with the main menu gone, every fresh launch
+		# of game.tscn lands here as the iroh host with no peers yet — give
+		# the player a bot to fight while the lobby waits for friends.
+		# `host_started` meta lets a future flow (pause-menu "host empty
+		# lobby"?) opt out; the splitscreen path also opts out because each
+		# device adds its own real player.
+		var host_started: bool = NetworkManager.has_meta("host_started") and NetworkManager.get_meta("host_started")
+		if not bot_requested and not host_started and not _splitscreen.is_enabled():
 			_spawn_bots.call_deferred(1)
+
+		# Iroh host: re-show the "ID copied — share it" notice on the in-game
+		# banner. Called locally (not .rpc) so only the host sees it. Sticks
+		# until a friend joins and _maybe_start_match overwrites the banner.
+		# Cleared so a manual restart-match later doesn't re-announce stale info.
+		if NetworkManager.get_meta("iroh_host_announce_share", false):
+			_announce("MATCH ID COPIED TO CLIPBOARD\nShare with your friends!", 99.0)
+			NetworkManager.set_meta("iroh_host_announce_share", false)
 	else:
 		# Instantly show the client state — makes it obvious when you thought
 		# you were solo but actually joined an orphan on port 27015.
@@ -1482,10 +1497,10 @@ func _build_rematch_overlay() -> void:
 	vb.add_child(_extend_button)
 
 	_exit_to_menu_button = Button.new()
-	_exit_to_menu_button.text = "EXIT TO MENU"
+	_exit_to_menu_button.text = "EXIT GAME"
 	_exit_to_menu_button.custom_minimum_size = Vector2(260, 46)
 	_exit_to_menu_button.focus_mode = Control.FOCUS_NONE
-	_exit_to_menu_button.pressed.connect(_leave_to_main_menu)
+	_exit_to_menu_button.pressed.connect(_quit_game)
 	vb.add_child(_exit_to_menu_button)
 
 func _show_rematch_overlay(_winner_id: int) -> void:
@@ -2067,6 +2082,10 @@ func _toggle_pause_menu() -> void:
 		_build_pause_menu()
 	_pause_menu.visible = not _pause_menu.visible
 	if _pause_menu.visible:
+		# Refresh the game-ID field — the iroh server may have come up after
+		# _build_pause_menu ran (host_game_iroh in _ready races with the
+		# pause menu's lazy build).
+		_pause_refresh_game_id()
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 		# Pause the world if this is a solo match (local player + bots only).
 		if _human_count() <= 1:
@@ -2104,10 +2123,10 @@ func _build_pause_menu() -> void:
 	sb.border_color = Color(0.35, 0.7, 1.0)
 	sb.set_border_width_all(2)
 	sb.set_corner_radius_all(8)
-	sb.content_margin_left = 24
-	sb.content_margin_right = 24
-	sb.content_margin_top = 20
-	sb.content_margin_bottom = 20
+	sb.content_margin_left = 28
+	sb.content_margin_right = 28
+	sb.content_margin_top = 22
+	sb.content_margin_bottom = 22
 	panel.add_theme_stylebox_override("panel", sb)
 	center.add_child(panel)
 
@@ -2115,16 +2134,86 @@ func _build_pause_menu() -> void:
 	vb.add_theme_constant_override("separation", 12)
 	panel.add_child(vb)
 
+	# Game title — readable from across the room.
 	var title := Label.new()
-	title.text = "PAUSED"
-	title.add_theme_font_size_override("font_size", 32)
+	title.text = "ANOTHER ROUND"
+	title.add_theme_font_size_override("font_size", 36)
+	title.add_theme_color_override("font_color", Color(1, 0.9, 0.45))
+	title.add_theme_color_override("font_outline_color", Color(0.4, 0.0, 0.1))
+	title.add_theme_constant_override("outline_size", 6)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vb.add_child(title)
 
+	# Spacer to separate title from the multiplayer rows.
+	var spacer1 := Control.new()
+	spacer1.custom_minimum_size = Vector2(0, 6)
+	vb.add_child(spacer1)
+
+	# ── Share my game ID ──
+	var share_label := Label.new()
+	share_label.text = "Share your match with friends:"
+	share_label.add_theme_color_override("font_color", Color(0.7, 0.7, 0.85))
+	vb.add_child(share_label)
+
+	var id_row := HBoxContainer.new()
+	id_row.add_theme_constant_override("separation", 8)
+	vb.add_child(id_row)
+	# LineEdit instead of Label so the user can drag-select + Cmd+C the ID
+	# manually if the Copy button isn't enough.
+	var id_field := LineEdit.new()
+	id_field.editable = false
+	id_field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	id_field.custom_minimum_size = Vector2(360, 36)
+	id_field.placeholder_text = "(no game ID — not hosting)"
+	id_row.add_child(id_field)
+	var copy_btn := Button.new()
+	copy_btn.text = "COPY"
+	copy_btn.custom_minimum_size = Vector2(80, 36)
+	id_row.add_child(copy_btn)
+	# Stash so _toggle_pause_menu can refresh the field every time the menu opens.
+	_pause_id_field = id_field
+	_pause_copy_button = copy_btn
+	copy_btn.pressed.connect(_pause_copy_game_id)
+
+	# ── Join someone else's game ──
+	var join_label := Label.new()
+	join_label.text = "Or join a friend:"
+	join_label.add_theme_color_override("font_color", Color(0.7, 0.7, 0.85))
+	vb.add_child(join_label)
+
+	var join_row := HBoxContainer.new()
+	join_row.add_theme_constant_override("separation", 8)
+	vb.add_child(join_row)
+	var join_input := LineEdit.new()
+	join_input.placeholder_text = "Paste a Game ID…"
+	join_input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	join_input.custom_minimum_size = Vector2(360, 36)
+	join_input.text_submitted.connect(func(_t: String) -> void: _pause_join())
+	join_row.add_child(join_input)
+	var join_btn := Button.new()
+	join_btn.text = "JOIN"
+	join_btn.custom_minimum_size = Vector2(80, 36)
+	join_btn.pressed.connect(_pause_join)
+	join_row.add_child(join_btn)
+	_pause_join_input = join_input
+
+	# Spacer before action buttons.
+	var spacer2 := Control.new()
+	spacer2.custom_minimum_size = Vector2(0, 8)
+	vb.add_child(spacer2)
+
+	var restart_btn := Button.new()
+	restart_btn.text = "RESTART MATCH"
+	restart_btn.custom_minimum_size = Vector2(0, 44)
+	restart_btn.pressed.connect(_pause_restart_match)
+	vb.add_child(restart_btn)
+
 	var resume := Button.new()
 	resume.text = "RESUME"
-	resume.custom_minimum_size = Vector2(260, 44)
+	resume.custom_minimum_size = Vector2(0, 44)
 	resume.pressed.connect(_toggle_pause_menu)
+	# Esc / Enter close the menu; the _input handler also routes those keys
+	# through here, but the Shortcut keeps focus-driven controllers happy.
 	var shortcut := Shortcut.new()
 	var ev := InputEventAction.new()
 	ev.action = "ui_cancel"
@@ -2132,19 +2221,82 @@ func _build_pause_menu() -> void:
 	resume.shortcut = shortcut
 	vb.add_child(resume)
 
-	var leave := Button.new()
-	leave.text = "LEAVE TO MAIN MENU"
-	leave.custom_minimum_size = Vector2(260, 44)
-	leave.pressed.connect(_leave_to_main_menu)
-	vb.add_child(leave)
+	var exit_btn := Button.new()
+	exit_btn.text = "EXIT GAME"
+	exit_btn.custom_minimum_size = Vector2(0, 44)
+	exit_btn.pressed.connect(_quit_game)
+	vb.add_child(exit_btn)
 
 	_pause_menu = root
 	_pause_menu.visible = false
 
-func _leave_to_main_menu() -> void:
+
+# Pause-menu controls — set in _build_pause_menu, used by the action handlers
+# below so we don't need to walk the scene tree to find them.
+var _pause_id_field: LineEdit = null
+var _pause_copy_button: Button = null
+var _pause_join_input: LineEdit = null
+
+
+func _pause_refresh_game_id() -> void:
+	# Called whenever the pause menu opens — the iroh server might have been
+	# created after _build_pause_menu ran (or torn down because we became a
+	# client), so the field is refreshed lazily.
+	if _pause_id_field == null:
+		return
+	var id := NetworkManager.current_iroh_game_id
+	_pause_id_field.text = id
+	var hosting := id != ""
+	_pause_copy_button.disabled = not hosting
+	_pause_id_field.editable = false  # always read-only; copying via select+keyboard or button
+
+
+func _pause_copy_game_id() -> void:
+	var id := NetworkManager.current_iroh_game_id
+	if id.is_empty():
+		return
+	DisplayServer.clipboard_set(id)
+	# Brief affordance — flash the button label so the user sees something happened.
+	if _pause_copy_button:
+		var orig := _pause_copy_button.text
+		_pause_copy_button.text = "COPIED!"
+		await get_tree().create_timer(0.8).timeout
+		if is_instance_valid(_pause_copy_button):
+			_pause_copy_button.text = orig
+
+
+func _pause_join() -> void:
+	if _pause_join_input == null:
+		return
+	var game_id := _pause_join_input.text.strip_edges()
+	if game_id.is_empty():
+		return
+	# Tear down the current iroh server (we're switching from host to client),
+	# then reload the scene with the new IrohClient peer in place. The reload
+	# branches into the `else` arm of _ready (multiplayer.is_server() == false)
+	# which waits for connected_to_server before requesting a spawn.
 	get_tree().paused = false
-	NetworkManager.leave_game()
-	get_tree().change_scene_to_file("res://scenes/main.tscn")
+	if multiplayer.multiplayer_peer:
+		multiplayer.multiplayer_peer.close()
+		multiplayer.multiplayer_peer = null
+	NetworkManager.players.clear()
+	if not NetworkManager.join_game_iroh(game_id, "Player_%d" % (randi() % 1000)):
+		push_error("Failed to start iroh client")
+		return
+	get_tree().change_scene_to_file("res://scenes/game.tscn")
+
+
+func _pause_restart_match() -> void:
+	# Close the pause menu first so the round-start banner is visible.
+	if _pause_menu and _pause_menu.visible:
+		_toggle_pause_menu()
+	if multiplayer.is_server():
+		_restart_match()
+
+
+func _quit_game() -> void:
+	get_tree().paused = false
+	get_tree().quit()
 
 func show_damage_direction(from_pos: Vector3) -> void:
 	if not local_player or not is_instance_valid(local_player):

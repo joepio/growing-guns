@@ -71,6 +71,13 @@ What's known about the budget (4-bot stress test):
 
 ## Networking notes
 
+- **iroh-only.** ENet / LAN UDP discovery / `auto_connect` were removed alongside the main menu. `network_manager.gd` exposes:
+  - `host_game_iroh(name) -> String` — returns the game ID; called automatically in `game.gd._ready` if no peer is set.
+  - `join_game_iroh(id, name) -> bool` — called from the pause menu's paste-and-join row; followed by `change_scene_to_file("res://scenes/game.tscn")` so `_ready` re-runs in client mode.
+  - `current_iroh_game_id` — the host's connection string. Empty when this peer is a client.
+  - `leave_game()` — closes the peer and clears bookkeeping.
+- Plugin: `addons/godot_iroh/` ships v0.1.5 pre-built native libs (macOS universal, Windows x64, Linux x64). Wire ALPN is `b"godot-iroh/0.1"` — all peers must run the same plugin version. **No local-LAN discovery in this version**: iroh has it internally but the plugin doesn't surface it. If you want it, contribute upstream or roll your own UDP-broadcast-of-the-game-ID layer (it's transport-independent).
+- Boot flow: `game.tscn` is the main scene; `_ready` auto-hosts iroh and the SP-fallback path spawns one bot, so launching = solo-vs-AI with a shareable game ID immediately. Pause menu (Esc) shows the ID + Copy button + paste-to-join field + Restart Match + Resume + Exit.
 - Single-process / no-peer mode: `multiplayer.is_server()` returns **true** (default peer is server-only with `unique_id == 1`). Server-only RPC branches in `bullet.gd` and `player.gd` therefore **do** execute in the bench / local play.
 - `_rifle_fired` is `@rpc("any_peer", "call_local", "reliable")` — runs on every peer including the shooter. Visual / SFX spawning in `_rifle_fired` shows up everywhere.
 - Health changes go through `take_damage.rpc_id(target_authority, ...)` — don't write directly to remote `health`.

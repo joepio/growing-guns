@@ -298,22 +298,22 @@ mesh = SubResource("Box_AccentStrip")
 [node name="SpawnPoints" type="Node3D" parent="."]
 
 [node name="SHub" type="Marker3D" parent="SpawnPoints" groups=["spawnpoints"]]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.1, 0)
 
 [node name="SMidNW" type="Marker3D" parent="SpawnPoints" groups=["spawnpoints"]]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -22, 6, -22)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -22, 5.1, -22)
 
 [node name="SMidNE" type="Marker3D" parent="SpawnPoints" groups=["spawnpoints"]]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 22, 6, -22)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 22, 5.1, -22)
 
 [node name="SMidSW" type="Marker3D" parent="SpawnPoints" groups=["spawnpoints"]]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -22, 6, 22)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -22, 5.1, 22)
 
 [node name="SMidSE" type="Marker3D" parent="SpawnPoints" groups=["spawnpoints"]]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 22, 6, 22)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 22, 5.1, 22)
 
 [node name="SHighN" type="Marker3D" parent="SpawnPoints" groups=["spawnpoints"]]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 12, -24)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 11.1, -24)
 
 [node name="SHighS" type="Marker3D" parent="SpawnPoints" groups=["spawnpoints"]]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 12, 24)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 11.1, 24)
