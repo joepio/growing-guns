@@ -179,9 +179,6 @@ func _load_assets() -> void:
 		var path := "res://assets/audio/Step-%d.wav" % i
 		if ResourceLoader.exists(path):
 			_step_sounds.append(load(path))
-	print("[SFX] loaded hurt=%d death=%d step=%d gun=%d" % [
-		_hurt_sounds.size(), _death_sounds.size(),
-		_step_sounds.size(), _gun_sounds.size()])
 
 # Master chain (two stacked compressors + limiter):
 #   1. Fast transient comp — instant attack, ~60 ms release. Catches sharp
@@ -307,11 +304,9 @@ func _log_sfx(label: String, vol_db: float, at: Vector3) -> void:
 	if label == "" or label.begins_with("_"):
 		return
 	if at == NO_POS:
-		print("[SFX] %s vol=%+.1fdB (2D)" % [label, vol_db])
 		return
 	var listener := _listener_position()
 	var dist: float = listener.distance_to(at) if listener != NO_POS else -1.0
-	print("[SFX] %s vol=%+.1fdB dist=%.1fm" % [label, vol_db, dist])
 
 func _samples_to_wav(samples: PackedVector2Array) -> AudioStreamWAV:
 	# Convert in-memory PackedVector2Array → 16-bit stereo WAV so the same
@@ -557,7 +552,9 @@ func shot(w: Weapon = null, at: Vector3 = NO_POS, is_self: bool = false) -> void
 			_play(_cached_samples(rumble_key, Callable(self, "_synth_explosion_rumble").bind(float(rumble_radius), rumble_variant)),
 				shot_rumble_db, at, "shot_rumble", rumble_dist, false, spl)
 func grenade_launch(at: Vector3 = NO_POS) -> void:
-	_play(_cached_samples("grenade_launch", Callable(self, "_synth_grenade_launch")), -6.0, at, "grenade_launch", -1.0, false, 110.0)
+	var variant := randi() % 5
+	var key := "grenade_launch:%d" % variant
+	_play(_cached_samples(key, Callable(self, "_synth_grenade_launch").bind(variant)), -6.0, at, "grenade_launch", -1.0, false, 110.0)
 
 # Brief metallic click — bolt cycling / next round chambering between shots.
 # dry=true so the click stays crisp instead of washing through reverb.
@@ -890,21 +887,63 @@ func _synth_shot(w: Weapon, variant: int) -> PackedVector2Array:
 		out[i] = Vector2(s, s)
 	return out
 
-func _synth_grenade_launch() -> PackedVector2Array:
-	# "Thwip": downward pitch sweep with a little grit.
-	var dur := 0.13
+func _synth_grenade_launch(variant: int = 0) -> PackedVector2Array:
+	# Grenade launcher "foomp": rising pressurized gas, a short breech tick,
+	# then a steady 160 Hz tube/body resonance that eases smoothly to silence.
+	var dur := 0.18
 	var n := int(dur * MIX_RATE)
 	var out := PackedVector2Array()
 	out.resize(n)
-	var lp := 0.0
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash([variant, "grenade_launch_v3"])
+	var pitch_offsets := [-5.0, -2.0, 0.0, 2.0, 4.0]
+	var body_hz: float = 160.0 + pitch_offsets[clampi(variant, 0, pitch_offsets.size() - 1)]
+	var noise_lp_hi := 0.0
+	var noise_lp_lo := 0.0
+	var tick_lp_lo := 0.0
+	var body_phase := 0.0
 	for i in range(n):
-		var t := float(i) / MIX_RATE
-		var env := pow(1.0 - t / dur, 1.5)
-		var pitch := lerpf(420.0, 120.0, t / dur)
-		var tone := sin(2.0 * PI * pitch * t)
-		var noise := randf_range(-1.0, 1.0)
-		lp = lerpf(lp, noise, 0.2)
-		var s := (tone * 0.6 + lp * 0.25) * env * 0.5
+		var t: float = float(i) / MIX_RATE
+
+		# Gas layer: white noise band sweeps upward over the first ~65 ms.
+		var sweep_phase: float = clampf(t / 0.065, 0.0, 1.0)
+		var sweep_t: float = sweep_phase * sweep_phase * (3.0 - 2.0 * sweep_phase)
+		var center_hz: float = lerpf(650.0, 4300.0, sweep_t)
+		var lp_hi_k: float = clampf(center_hz * TAU * 1.8 / MIX_RATE, 0.04, 0.92)
+		var lp_lo_k: float = clampf(center_hz * TAU * 0.35 / MIX_RATE, 0.004, 0.45)
+		var gas_env: float = sin(sweep_phase * PI) * exp(-maxf(0.0, t - 0.06) * 55.0)
+		var noise: float = rng.randf_range(-1.0, 1.0)
+		noise_lp_hi = lerpf(noise_lp_hi, noise, lp_hi_k)
+		noise_lp_lo = lerpf(noise_lp_lo, noise_lp_hi, lp_lo_k)
+		var gas: float = (noise_lp_hi - noise_lp_lo) * gas_env * 0.55
+
+		# Mechanical tick: a tiny high-passed snap after pressure builds.
+		var tick_t: float = t - 0.038
+		var tick_env: float = exp(-tick_t * 420.0) if tick_t >= 0.0 else 0.0
+		var tick_noise: float = rng.randf_range(-1.0, 1.0) * tick_env
+		tick_lp_lo = lerpf(tick_lp_lo, tick_noise, 0.035)
+		var tick: float = (tick_noise - tick_lp_lo) * 0.75
+
+		# Launcher tube/body resonance. Fixed pitch; harmonics are almost
+		# absent, just enough to keep the sine from feeling synthetic.
+		var body_t: float = maxf(0.0, t - 0.026)
+		var body_phase_norm: float = clampf(body_t / maxf(0.001, dur - 0.026), 0.0, 1.0)
+		var body_attack: float = clampf(body_t / 0.012, 0.0, 1.0)
+		body_attack = body_attack * body_attack * (3.0 - 2.0 * body_attack)
+		var body_release: float = 1.0 - body_phase_norm
+		body_release = body_release * body_release * (3.0 - 2.0 * body_release)
+		var body_env: float = body_attack * body_release
+		body_phase += TAU * body_hz / MIX_RATE
+		var body: float = (
+			sin(body_phase) * 0.86
+			+ sin(body_phase * 2.0) * 0.018
+			+ sin(body_phase * 3.0) * 0.006
+		) * body_env
+
+		# A small sub push gives the launch mass without turning it into an
+		# explosion; it decays with the body resonance.
+		var sub: float = sin(body_phase * 0.5) * body_env * 0.06
+		var s: float = tanh((gas + tick + body + sub) * 1.35) * 0.72
 		out[i] = Vector2(s, s)
 	return out
 

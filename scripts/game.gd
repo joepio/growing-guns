@@ -775,6 +775,7 @@ func _start_round_now() -> void:
 		p.set_frozen.rpc(false)
 		p.clear_ragdoll.rpc()
 	_clear_projectiles.rpc()
+	_clear_craters.rpc()
 	_hide_rematch_overlay.rpc()
 	_announce.rpc("ROUND %d" % current_round, 1.4)
 
@@ -785,6 +786,12 @@ func _clear_projectiles() -> void:
 	for node in get_tree().get_nodes_in_group("projectiles"):
 		if is_instance_valid(node):
 			node.queue_free()
+
+@rpc("authority", "call_local", "reliable")
+func _clear_craters() -> void:
+	# Persistent bullet-impact scorch marks reset between rounds — old craters
+	# from last round shouldn't litter the new arena.
+	Violence.clear_craters(self)
 
 # Replace the current "Arena" child with the map at MAP_POOL[map_index].
 # Called from _start_round_now via RPC — server picks the index, every peer

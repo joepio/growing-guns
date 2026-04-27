@@ -264,7 +264,7 @@ func _handle_collision(result: Dictionary) -> void:
 	if hit_player:
 		shooter_node.call("_spawn_blood", hit_pos, direction, dmg_ratio)
 	else:
-		shooter_node.call("_spawn_impact", hit_pos, weapon_stats.bullet_color, weapon_stats.bullet_scale, dmg_ratio)
+		shooter_node.call("_spawn_impact", hit_pos, weapon_stats.bullet_color, weapon_stats.bullet_scale, dmg_ratio, normal)
 		SFX.impact(hit_pos, dmg_ratio)
 
 	if weapon_stats.explosive_radius > 0.0 and not bench_skip_visuals:
