@@ -235,6 +235,12 @@ func _ready() -> void:
 	dash_lbl.text = "DASH"
 	_dash_text_hbox.add_child(dash_lbl)
 
+	# Always-process so the retro-shader cursor + mouse-mode keep updating
+	# while the world is paused (pause menu open). Gameplay-tickling parts of
+	# _process and _input are guarded with explicit get_tree().paused checks
+	# below so they still pause correctly.
+	process_mode = Node.PROCESS_MODE_ALWAYS
+
 	_custom_crosshair = Control.new()
 	_custom_crosshair.name = "DynamicCrosshair"
 	_custom_crosshair.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -399,7 +405,7 @@ func _process(delta: float) -> void:
 			_custom_crosshair.spread = local_player.get_effective_spread()
 	# Splitscreen camera sync runs from splitscreen_manager._process when enabled.
 
-	if _pick_timeout_active:
+	if _pick_timeout_active and not get_tree().paused:
 		_pick_timeout_timer -= delta
 		var sec := int(ceil(_pick_timeout_timer))
 
@@ -422,6 +428,11 @@ func _process(delta: float) -> void:
 	# before _process polling can see it, so we intercept it earlier.
 
 func _input(event: InputEvent) -> void:
+	# Pause-menu controls live on a Control with PROCESS_MODE_ALWAYS that has
+	# its own Esc/Enter shortcut. Early-out during pause so the same key
+	# event isn't double-handled here AND on the menu's Resume button.
+	if get_tree().paused:
+		return
 	_track_input_device(event)
 	if _splitscreen and _splitscreen.handle_input(event):
 		get_viewport().set_input_as_handled()
