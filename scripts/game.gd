@@ -263,6 +263,8 @@ func _ready() -> void:
 	_build_death_overlay()
 	_build_explosion_flash_overlay()
 	_build_retro_filter()
+	_load_settings()
+	_apply_settings()
 	_build_tab_overlay()
 	_build_stats_panel()
 	# Dev panel (F1) — cheats. Only built in debug runs (editor + debug
@@ -1705,6 +1707,33 @@ func _build_ghost_overlay() -> void:
 
 var _retro_material: ShaderMaterial = null
 
+# -------------------- VIDEO SETTINGS --------------------
+const SETTINGS_PATH := "user://settings.cfg"
+var _dither_enabled: bool = true
+var _fisheye_enabled: bool = true
+
+
+func _load_settings() -> void:
+	var cfg := ConfigFile.new()
+	if cfg.load(SETTINGS_PATH) != OK:
+		return
+	_dither_enabled = cfg.get_value("video", "dither", true)
+	_fisheye_enabled = cfg.get_value("video", "fisheye", true)
+
+
+func _save_settings() -> void:
+	var cfg := ConfigFile.new()
+	cfg.set_value("video", "dither", _dither_enabled)
+	cfg.set_value("video", "fisheye", _fisheye_enabled)
+	cfg.save(SETTINGS_PATH)
+
+
+func _apply_settings() -> void:
+	if _retro_material == null:
+		return
+	_retro_material.set_shader_parameter("dither_strength", 1.0 if _dither_enabled else 0.0)
+	_retro_material.set_shader_parameter("fisheye_strength", 1.0 if _fisheye_enabled else 0.0)
+
 func _apply_retro_shader(node: Control) -> void:
 	var shader := Shader.new()
 	shader.code = "
@@ -1712,6 +1741,9 @@ func _apply_retro_shader(node: Control) -> void:
 		uniform sampler2D screen_texture : hint_screen_texture, repeat_disable, filter_nearest;
 		uniform vec2 mouse_uv = vec2(-1.0);  // mouse position in pre-distortion UV (0..1)
 		uniform float cursor_visible = 0.0;  // 0 = hidden, 1 = drawn
+		// Settings-driven effect strengths. 0.0 disables, 1.0 = original look.
+		uniform float fisheye_strength = 1.0;
+		uniform float dither_strength = 1.0;
 
 		const float bayer[16] = {
 			0.0/16.0, 8.0/16.0, 2.0/16.0, 10.0/16.0,
@@ -1726,9 +1758,10 @@ func _apply_retro_shader(node: Control) -> void:
 			float aspect = SCREEN_PIXEL_SIZE.y / SCREEN_PIXEL_SIZE.x;
 			vec2 aspect_uv = centered_uv * vec2(aspect, 1.0);
 			float dist = length(aspect_uv);
-			float distortion = 0.15;
+			// Scale lens distortion by the toggle so 0.0 = flat screen.
+			float distortion = 0.15 * fisheye_strength;
 			float max_dist_sq = dot(vec2(0.5 * aspect, 0.5), vec2(0.5 * aspect, 0.5));
-			float zoom = 0.995 / (1.0 + distortion * max_dist_sq);
+			float zoom = mix(1.0, 0.995 / (1.0 + 0.15 * max_dist_sq), fisheye_strength);
 			uv = 0.5 + centered_uv * zoom * (1.0 + distortion * dist * dist);
 
 			vec2 res = 1.0 / SCREEN_PIXEL_SIZE;
@@ -1752,7 +1785,8 @@ func _apply_retro_shader(node: Control) -> void:
 			color += bleed * 0.15;
 
 			ivec2 p = ivec2(FRAGCOORD.xy / float(p_size));
-			float threshold = (bayer[(p.x % 4) * 4 + (p.y % 4)] - 0.5) * 0.5;
+			// Bayer dither pattern, scaled by toggle. 0.0 = visible banding.
+			float threshold = (bayer[(p.x % 4) * 4 + (p.y % 4)] - 0.5) * 0.5 * dither_strength;
 
 			float levels = 32.0;
 			float vignette = clamp(1.0 - dist * 1.4, 0.0, 1.0);
@@ -2203,12 +2237,14 @@ func _show_hit_damage_number(dmg: int, kind: String, world_pos: Vector3) -> void
 
 func is_any_modal_open() -> bool:
 	# Used by Player._unhandled_input to avoid recapturing the mouse when a
-	# UI overlay (card pick, dev panel, pause menu, rematch) is visible.
+	# UI overlay (card pick, dev panel, pause menu, settings, rematch) is visible.
 	if pick_overlay and pick_overlay.visible:
 		return true
 	if _dev_panel and _dev_panel.is_open():
 		return true
 	if _pause_menu and _pause_menu.visible:
+		return true
+	if _settings_panel and _settings_panel.visible:
 		return true
 	if _tab_root and _tab_root.visible:
 		return true
@@ -2224,6 +2260,8 @@ func _is_cursor_modal_open() -> bool:
 	if _dev_panel and _dev_panel.is_open():
 		return true
 	if _pause_menu and _pause_menu.visible:
+		return true
+	if _settings_panel and _settings_panel.visible:
 		return true
 	if _rematch_overlay and _rematch_overlay.visible:
 		return true
@@ -2368,6 +2406,12 @@ func _build_pause_menu() -> void:
 	restart_btn.pressed.connect(_pause_restart_match)
 	vb.add_child(restart_btn)
 
+	var settings_btn := Button.new()
+	settings_btn.text = "SETTINGS"
+	settings_btn.custom_minimum_size = Vector2(0, 44)
+	settings_btn.pressed.connect(_open_settings)
+	vb.add_child(settings_btn)
+
 	var resume := Button.new()
 	resume.text = "RESUME"
 	resume.custom_minimum_size = Vector2(0, 44)
@@ -2416,6 +2460,117 @@ var _pause_id_field: LineEdit = null
 var _pause_copy_button: Button = null
 var _pause_join_input: LineEdit = null
 var _pause_seed_label: Label = null
+var _settings_panel: Control = null
+var _settings_dither_toggle: CheckButton = null
+var _settings_fisheye_toggle: CheckButton = null
+
+
+func _open_settings() -> void:
+	if _settings_panel == null:
+		_build_settings_panel()
+	if _pause_menu:
+		_pause_menu.visible = false
+	# Sync toggles to the live state in case the user changed them via some
+	# other path (CLI flag, save edit, etc.) since the panel was last opened.
+	if _settings_dither_toggle:
+		_settings_dither_toggle.set_pressed_no_signal(_dither_enabled)
+	if _settings_fisheye_toggle:
+		_settings_fisheye_toggle.set_pressed_no_signal(_fisheye_enabled)
+	_settings_panel.visible = true
+
+
+func _close_settings() -> void:
+	if _settings_panel:
+		_settings_panel.visible = false
+	if _pause_menu:
+		_pause_menu.visible = true
+
+
+func _build_settings_panel() -> void:
+	# Mirrors the visual style of _build_pause_menu so the two screens read
+	# as part of the same flow. Toggles persist immediately on change.
+	var root := Control.new()
+	root.name = "SettingsPanel"
+	root.anchor_right = 1.0
+	root.anchor_bottom = 1.0
+	root.mouse_filter = Control.MOUSE_FILTER_STOP
+	root.process_mode = Node.PROCESS_MODE_ALWAYS
+	$HUD.add_child(root)
+
+	var bg := ColorRect.new()
+	bg.color = Color(0, 0, 0, 0.55)
+	bg.anchor_right = 1.0
+	bg.anchor_bottom = 1.0
+	root.add_child(bg)
+
+	var center := CenterContainer.new()
+	center.anchor_right = 1.0
+	center.anchor_bottom = 1.0
+	root.add_child(center)
+
+	var panel := PanelContainer.new()
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.08, 0.08, 0.1, 0.95)
+	sb.border_color = Color(0.35, 0.7, 1.0)
+	sb.set_border_width_all(2)
+	sb.set_corner_radius_all(8)
+	sb.content_margin_left = 28
+	sb.content_margin_right = 28
+	sb.content_margin_top = 22
+	sb.content_margin_bottom = 22
+	panel.add_theme_stylebox_override("panel", sb)
+	center.add_child(panel)
+
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 14)
+	vb.custom_minimum_size = Vector2(420, 0)
+	panel.add_child(vb)
+
+	var title := Label.new()
+	title.text = "SETTINGS"
+	title.add_theme_font_size_override("font_size", 30)
+	title.add_theme_color_override("font_color", Color(1, 0.9, 0.45))
+	title.add_theme_color_override("font_outline_color", Color(0.4, 0.0, 0.1))
+	title.add_theme_constant_override("outline_size", 5)
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vb.add_child(title)
+
+	var spacer1 := Control.new()
+	spacer1.custom_minimum_size = Vector2(0, 6)
+	vb.add_child(spacer1)
+
+	var dither_toggle := CheckButton.new()
+	dither_toggle.text = "Dithering"
+	dither_toggle.button_pressed = _dither_enabled
+	dither_toggle.toggled.connect(func(on: bool) -> void:
+		_dither_enabled = on
+		_apply_settings()
+		_save_settings())
+	vb.add_child(dither_toggle)
+	_settings_dither_toggle = dither_toggle
+
+	var fisheye_toggle := CheckButton.new()
+	fisheye_toggle.text = "Fish-eye distortion"
+	fisheye_toggle.button_pressed = _fisheye_enabled
+	fisheye_toggle.toggled.connect(func(on: bool) -> void:
+		_fisheye_enabled = on
+		_apply_settings()
+		_save_settings())
+	vb.add_child(fisheye_toggle)
+	_settings_fisheye_toggle = fisheye_toggle
+
+	var spacer2 := Control.new()
+	spacer2.custom_minimum_size = Vector2(0, 8)
+	vb.add_child(spacer2)
+
+	var back_btn := Button.new()
+	back_btn.text = "BACK"
+	back_btn.custom_minimum_size = Vector2(0, 44)
+	back_btn.pressed.connect(_close_settings)
+	vb.add_child(back_btn)
+
+	_settings_panel = root
+	_settings_panel.visible = false
 
 # Last map swap inputs — used by the pause menu's seed label (and any future
 # "rejoin same map" feature). Updated in _swap_arena.
