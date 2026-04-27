@@ -6,7 +6,9 @@ extends Node3D
 # cards to the static shooter so you can hear how each weapon variant sounds.
 
 const PLAYER_SCENE := preload("res://scenes/player.tscn")
-const ARENA_SCENE := preload("res://scenes/arena.tscn")
+const ARENA_SCENE := preload("res://scenes/arena_procedural.tscn")
+# Fixed seed so the gun-lab arena stays reproducible across launches.
+const ARENA_SEED := 12345
 const PLAYING_STATE := 1
 # Centre-rear of the arena, facing -Z. Far enough from any wall that bullets
 # fly through open space and the listener can move around all sides.
@@ -73,6 +75,9 @@ func _build_arena() -> void:
 	var arena: Node = ARENA_SCENE.instantiate()
 	arena.name = "Arena"
 	add_child(arena)
+	# arena_procedural is empty until apply_seed runs (regenerate_on_ready=false).
+	if arena.has_method("apply_seed"):
+		arena.apply_seed(ARENA_SEED)
 	# Mirror game.gd's structure — bots/players live under "Players" so player.gd's
 	# get_parent().get_children() lookups (target search, RPC routing) work.
 	var players_root := Node3D.new()

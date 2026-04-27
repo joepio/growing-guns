@@ -1,7 +1,7 @@
 [gd_scene format=3 uid="uid://b0game001"]
 
 [ext_resource type="Script" uid="uid://r582d7dl3f3f" path="res://scripts/game.gd" id="1_game"]
-[ext_resource type="PackedScene" uid="uid://b0arena01" path="res://scenes/arena.tscn" id="2_arena"]
+[ext_resource type="PackedScene" uid="uid://barenaproc01" path="res://scenes/arena_procedural.tscn" id="2_arena"]
 [ext_resource type="Script" uid="uid://dwdfqr76hp64y" path="res://scripts/hit_marker.gd" id="3_hit"]
 [ext_resource type="Script" uid="uid://drgwakc2d3shj" path="res://scripts/damage_indicator.gd" id="4_dmg"]
 
