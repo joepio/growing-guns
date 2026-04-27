@@ -1021,13 +1021,62 @@ static func spawn_impact(scene: Node, pos: Vector3, color: Color = Color(1.0, 0.
 		tw.tween_property(mat, "albedo_color", Color(0.72, 0.66, 0.55, 0.0), 0.4)
 		tw.chain().tween_callback(dust.queue_free)
 
+# Brief high-intensity beam for hitscan bullets. Rendered for 1-2 frames 
+# as a bright white streak.
+static func spawn_laser_tracer(scene: Node, from: Vector3, to: Vector3) -> void:
+	if scene == null:
+		return
+	var dist := from.distance_to(to)
+	if dist < 0.1:
+		return
+
+	var line := MeshInstance3D.new()
+	var mesh := BoxMesh.new()
+	# Laser beam thickness. Long axis is Z.
+	mesh.size = Vector3(0.025, 0.025, dist)
+	line.mesh = mesh
+
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.albedo_color = Color.WHITE
+	mat.emission_enabled = true
+	mat.emission = Color.WHITE
+	mat.emission_energy_multiplier = 22.0
+	line.material_override = mat
+
+	# Add to scene FIRST so global_transform / look_at work in world space.
+	# Then set position and orientation.
+	scene.add_child(line)
+	line.global_position = from.lerp(to, 0.5)
+	
+	var dir := (to - from).normalized()
+	# If pointing straight up/down, use a different up vector for look_at.
+	if absf(dir.dot(Vector3.UP)) > 0.99:
+		line.look_at(to, Vector3.RIGHT)
+	else:
+		line.look_at(to, Vector3.UP)
+
+	# Bright white-hot flash at the muzzle
+	var light := OmniLight3D.new()
+	light.light_color = Color.WHITE
+	light.light_energy = 15.0
+	light.omni_range = 5.0
+	scene.add_child(light)
+	light.global_position = from
+
+	var tw := line.create_tween()
+	tw.tween_interval(0.04) # roughly 2-3 frames
+	tw.tween_callback(line.queue_free)
+
+	var ltw := light.create_tween()
+	ltw.tween_property(light, "light_energy", 0.0, 0.1)
+	ltw.tween_callback(light.queue_free)
+
 # Persistent scorch mark on the impacted surface. Always spawned by
-# spawn_impact; bigger rounds get bigger craters. dmg_ratio > ~3 adds an
+# spawn_impact; bigger rounds get bigger craters. dmg_ratio > ~2 adds an
 # emission "red-hot" phase that fades to black over a few seconds. Lifetime
 # ~25 s — and round-reset clears the "craters" group anyway.
 const CRATER_LIFETIME := 25.0
-# Lowered from 3.0 so common high-damage builds (HEAVY_ROUNDS at 2.0, or
-# DAMAGE×2 at 2.25) actually trigger the molten glow — not just SNIPER alone.
 const CRATER_RED_HOT_DMG := 2.0
 const CRATER_BLINK_DMG := 2.0
 const CRATER_TEXTURE_VARIANTS := 5
@@ -1035,10 +1084,10 @@ const CRATER_TEXTURE_VARIANTS := 5
 # Perf caps for full-auto spam — UZIs / shotguns can produce hundreds of
 # impacts per second. Without these, transparent quads + tween updates
 # accumulate into a noticeable cost.
-const MAX_CRATERS := 80                 # FIFO across the whole scene
-const MAX_HOT_EXTRAS := 12              # concurrent warm + glow + OmniLight sets
+const MAX_CRATERS := 120                # FIFO across the whole scene
+const MAX_HOT_EXTRAS := 32              # concurrent warm + glow + OmniLight sets
 const MAX_BLAST_CRATERS := 40           # outer rings from explosive impacts
-const MAX_CRATERS_PER_FRAME := 6        # cap allocations per tick
+const MAX_CRATERS_PER_FRAME := 10       # cap allocations per tick
 
 # Cached procedural cloud-noise alpha textures. Built lazily on the first
 # crater spawn so we don't pay the cost when no shots are fired. Each
@@ -1155,13 +1204,19 @@ static func spawn_crater(scene: Node, pos: Vector3, normal: Vector3, dmg_ratio: 
 	# root node is non-uniformly scaled.
 	var b := Basis(right, n, bitan)
 	b = b.rotated(n, randf_range(-PI, PI)).scaled(Vector3.ONE * size)
-	splat.global_transform = Transform3D(b, pos + n * 0.012)
+	# Random jitter on the surface offset prevents Z-fighting when multiple 
+	# shots hit the exact same spot.
+	var offset_jitter: float = randf_range(-0.002, 0.002)
+	splat.global_transform = Transform3D(b, pos + n * (0.012 + offset_jitter))
 
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	# Pick one of the 5 cached cloud textures. The texture's alpha shapes
+	# Ensure the base crater stays behind the additive glow layers.
+	mat.render_priority = 0
+	# Pick one of the 5 cached cloud textures.
+	# The texture's alpha shapes
 	# the silhouette; the material's albedo_color tints the dark scorch.
 	mat.albedo_texture = _crater_textures[randi() % _crater_textures.size()]
 	var darkness: float = randf_range(0.04, 0.10)
@@ -1189,12 +1244,14 @@ static func spawn_crater(scene: Node, pos: Vector3, normal: Vector3, dmg_ratio: 
 		warm_node.mesh = _get_crater_mesh()
 		# Use a unique random rotation but same uniform scale for the hot layers
 		var warm_b := b.rotated(n, randf_range(-PI, PI))
-		warm_node.global_transform = Transform3D(warm_b, pos + n * 0.016)
+		warm_node.global_transform = Transform3D(warm_b, pos + n * (0.016 + offset_jitter))
 		var warm_mat := StandardMaterial3D.new()
 		warm_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		warm_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 		warm_mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
 		warm_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		# Render on top of the dark scorch.
+		warm_mat.render_priority = 1
 		warm_mat.albedo_texture = _crater_textures[randi() % _crater_textures.size()]
 		# Soft red — dimmer than the bright spot below; alpha tied to dmg.
 		warm_mat.albedo_color = Color(0.85, 0.18, 0.04, lerpf(0.35, 0.65, hot_amount))
@@ -1209,12 +1266,14 @@ static func spawn_crater(scene: Node, pos: Vector3, normal: Vector3, dmg_ratio: 
 		glow_node.mesh = _get_crater_mesh()
 		# Tiny center spot: 12.5% of the base crater size.
 		var glow_b := b.rotated(n, randf_range(-PI, PI)).scaled(Vector3.ONE * 0.125)
-		glow_node.global_transform = Transform3D(glow_b, pos + n * 0.020)
+		glow_node.global_transform = Transform3D(glow_b, pos + n * (0.020 + offset_jitter))
 		var glow_mat := StandardMaterial3D.new()
 		glow_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		glow_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 		glow_mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
 		glow_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		# Render on top of the warm glow.
+		glow_mat.render_priority = 2
 		glow_mat.albedo_texture = _crater_textures[randi() % _crater_textures.size()]
 		glow_mat.albedo_color = Color(1.0, 0.45, 0.10, lerpf(0.6, 1.0, hot_amount))
 		glow_node.material_override = glow_mat
