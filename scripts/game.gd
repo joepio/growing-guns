@@ -3,6 +3,18 @@ extends Node3D
 const PLAYER_SCENE := preload("res://scenes/player.tscn")
 const HUD_ICON_SCRIPT := preload("res://scripts/hud_icon.gd")
 
+# Maps that can be picked at the start of each round. Server picks an index
+# and broadcasts via _swap_arena.rpc(idx) so all peers agree. Add new maps
+# here — they need at least one node in the "spawnpoints" group.
+const MAP_POOL: Array[PackedScene] = [
+	preload("res://scenes/arena.tscn"),
+	preload("res://scenes/arena_platforms.tscn"),
+]
+# Position offset applied to whichever arena is loaded — matches the static
+# transform game.tscn used to apply to its embedded Arena instance, so spawn
+# points and player coords stay consistent across both maps.
+const ARENA_OFFSET := Vector3(1.7405052, 4.5380306, 16.383654)
+
 enum State { WAITING, PLAYING, PICKING_CARD, MATCH_OVER }
 
 const CARDS_PER_PICK := 3
@@ -938,6 +950,11 @@ func _maybe_start_match() -> void:
 
 func _start_round_now() -> void:
 	_reset_round_tracking()
+	# Pick a random map for this round and broadcast the swap to all peers
+	# before respawning, so _random_spawn() reads the new arena's spawn
+	# points (the call_local RPC runs the swap synchronously here too).
+	if multiplayer.is_server() and MAP_POOL.size() > 1:
+		_swap_arena.rpc(randi() % MAP_POOL.size())
 	# Respawn everyone, reset HP + cooldowns, unfreeze, announce.
 	# Track already-assigned spawn positions so nobody lands on top of another.
 	var used: Array[Vector3] = []
@@ -962,6 +979,31 @@ func _clear_projectiles() -> void:
 	for node in get_tree().get_nodes_in_group("projectiles"):
 		if is_instance_valid(node):
 			node.queue_free()
+
+# Replace the current "Arena" child with the map at MAP_POOL[map_index].
+# Called from _start_round_now via RPC — server picks the index, every peer
+# (including the server thanks to call_local) swaps in lockstep.
+# remove_child happens synchronously so the OLD spawnpoints leave the tree
+# before _random_spawn() runs; the deferred queue_free does the actual delete.
+@rpc("authority", "call_local", "reliable")
+func _swap_arena(map_index: int) -> void:
+	if map_index < 0 or map_index >= MAP_POOL.size():
+		return
+	var existing := get_node_or_null("Arena")
+	if existing:
+		remove_child(existing)
+		existing.queue_free()
+	var new_arena: Node = MAP_POOL[map_index].instantiate()
+	new_arena.name = "Arena"
+	add_child(new_arena)
+	if new_arena is Node3D:
+		(new_arena as Node3D).position = ARENA_OFFSET
+	# Re-grab WorldEnvironment so explosion-tonemap-duck logic (_arena_env in
+	# _process) keeps working against the new arena's environment resource.
+	var we := new_arena.get_node_or_null("WorldEnvironment") as WorldEnvironment
+	if we and we.environment:
+		_arena_env = we.environment
+		_base_tonemap_exposure = _arena_env.tonemap_exposure
 
 func _reset_round_tracking() -> void:
 	pending_picker_id = 0
