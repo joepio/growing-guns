@@ -99,7 +99,7 @@ What's known about the budget (4-bot stress test):
 ## Build / export
 
 ```bash
-tools/build_release.sh                       # mac + win → build/{macos,windows}/AnotherRound.zip
+tools/build_release.sh                       # mac + win → build/{macos,windows}/MoreRounds.zip
 tools/build_release.sh all --itch user/game  # build both AND push to itch.io via tools/bin/butler
 ```
 
