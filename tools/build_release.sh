@@ -95,7 +95,6 @@ fi
 build_mac() {
 	echo "==> macOS"
 	mkdir -p build/macos
-	rm -rf build/macos/AnotherRound.zip build/macos/JumpShoot.zip build/macos/JumpShoot.app
 	rm -f build/macos/MoreRounds.zip
 	"$GODOT_BIN" --headless --path . --export-release "macOS LAN Debug" build/macos/MoreRounds.zip
 	# Re-zip the .app bundle so itch.io / browsers don't end up with a quarantine flag
@@ -116,8 +115,6 @@ build_win() {
 		return 1
 	fi
 	mkdir -p build/windows
-	rm -f build/windows/AnotherRound.exe build/windows/AnotherRound.pck build/windows/AnotherRound.zip
-	rm -f build/windows/JumpShoot.exe build/windows/JumpShoot.pck build/windows/JumpShoot.zip
 	rm -f build/windows/MoreRounds.exe build/windows/MoreRounds.pck build/windows/MoreRounds.zip
 	"$GODOT_BIN" --headless --path . --export-release "Windows LAN" build/windows/MoreRounds.exe
 	# Zip exe + pck (and any DLLs Godot dropped) into one download.

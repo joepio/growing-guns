@@ -93,7 +93,16 @@ var _extend_votes: Dictionary = {} # id -> bool
 
 # --- Dev panel (F1) ---
 # Owned by scripts/dev_panel.gd, instantiated in _ready and added under $HUD.
+# Stays null in release builds (no --dev flag) — cheats are unreachable.
 var _dev_panel: Node = null
+
+
+func _dev_tools_enabled() -> bool:
+	# Editor + debug exports → on. Release exports → off unless the user
+	# explicitly opts in by passing --dev on the command line.
+	if OS.is_debug_build():
+		return true
+	return "--dev" in OS.get_cmdline_args()
 # Dev-only: bots keep full AI (targeting, chasing, aiming) but never fire.
 # Read by Player AI; mutated by F1 panel toggle and the P keybinding.
 var bots_hold_fire: bool = false
@@ -250,10 +259,13 @@ func _ready() -> void:
 	_build_retro_filter()
 	_build_tab_overlay()
 	_build_stats_panel()
-	# Dev panel (F1). Self-builds in its own _ready; we just attach + wire it.
-	_dev_panel = DEV_PANEL_SCRIPT.new()
-	_dev_panel.setup(self)
-	$HUD.add_child(_dev_panel)
+	# Dev panel (F1) — cheats. Only built in debug runs (editor + debug
+	# exports) or when --dev is on the command line. Released zips ship
+	# without it so the F1 panel + G/P/M/1-5 cheat hotkeys are dormant.
+	if _dev_tools_enabled():
+		_dev_panel = DEV_PANEL_SCRIPT.new()
+		_dev_panel.setup(self)
+		$HUD.add_child(_dev_panel)
 	var we := $Arena/WorldEnvironment
 	if we and we.environment:
 		_arena_env = we.environment
@@ -426,8 +438,9 @@ func _input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 		return
 	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_F1:
-		_dev_panel.toggle()
-		_sync_mouse_mode()
+		if _dev_panel != null:
+			_dev_panel.toggle()
+			_sync_mouse_mode()
 		return
 
 	# Pause menu: ui_cancel (Esc), Enter, and numpad Enter.
@@ -437,14 +450,15 @@ func _input(event: InputEvent) -> void:
 			or event.keycode == KEY_KP_ENTER
 		))
 	if pause_pressed:
-		if _dev_panel.is_open():
+		if _dev_panel != null and _dev_panel.is_open():
 			_dev_panel.toggle()
 			_sync_mouse_mode()
 			return
 		_toggle_pause_menu()
 		return
 
-	if event is InputEventKey and event.pressed and not event.echo:
+	# Cheat hotkeys (G / P / M / 1-5 / ?) — only when dev tools are enabled.
+	if event is InputEventKey and event.pressed and not event.echo and _dev_panel != null:
 		var cheat_handled := true
 		match event.keycode:
 			KEY_G:
@@ -2271,7 +2285,7 @@ func _build_pause_menu() -> void:
 
 	# Game title — readable from across the room.
 	var title := Label.new()
-	title.text = "ANOTHER ROUND"
+	title.text = "MORE ROUNDS"
 	title.add_theme_font_size_override("font_size", 36)
 	title.add_theme_color_override("font_color", Color(1, 0.9, 0.45))
 	title.add_theme_color_override("font_outline_color", Color(0.4, 0.0, 0.1))
