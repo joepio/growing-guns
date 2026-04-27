@@ -1,0 +1,297 @@
+[gd_scene format=3 uid="uid://b0arena03"]
+
+[sub_resource type="ProceduralSkyMaterial" id="Sky_1"]
+sky_top_color = Color(0.015, 0.012, 0.01, 1)
+sky_horizon_color = Color(0.18, 0.13, 0.08, 1)
+ground_bottom_color = Color(0.006, 0.005, 0.004, 1)
+ground_horizon_color = Color(0.08, 0.055, 0.035, 1)
+
+[sub_resource type="Sky" id="Sky_2"]
+sky_material = SubResource("Sky_1")
+
+[sub_resource type="Environment" id="Env_1"]
+background_mode = 2
+sky = SubResource("Sky_2")
+ambient_light_source = 2
+ambient_light_color = Color(0.55, 0.45, 0.34, 1)
+ambient_light_energy = 0.48
+glow_enabled = true
+glow_intensity = 0.85
+glow_bloom = 0.24
+fog_enabled = true
+fog_light_color = Color(0.28, 0.18, 0.1, 1)
+fog_density = 0.02
+
+[sub_resource type="StandardMaterial3D" id="Mat_Floor"]
+albedo_color = Color(0.11, 0.105, 0.095, 1)
+roughness = 0.92
+
+[sub_resource type="StandardMaterial3D" id="Mat_Wall"]
+albedo_color = Color(0.19, 0.17, 0.14, 1)
+roughness = 0.86
+
+[sub_resource type="StandardMaterial3D" id="Mat_Catwalk"]
+albedo_color = Color(0.24, 0.22, 0.18, 1)
+roughness = 0.72
+
+[sub_resource type="StandardMaterial3D" id="Mat_Machine"]
+albedo_color = Color(0.09, 0.115, 0.11, 1)
+roughness = 0.78
+
+[sub_resource type="StandardMaterial3D" id="Mat_Hazard"]
+albedo_color = Color(1, 0.56, 0.04, 1)
+emission_enabled = true
+emission = Color(1, 0.42, 0.02, 1)
+emission_energy_multiplier = 1.8
+
+[sub_resource type="StandardMaterial3D" id="Mat_Sodium"]
+albedo_color = Color(1, 0.63, 0.18, 1)
+emission_enabled = true
+emission = Color(1, 0.5, 0.12, 1)
+emission_energy_multiplier = 2.6
+
+[sub_resource type="BoxMesh" id="Box_Floor"]
+size = Vector3(52, 1, 40)
+[sub_resource type="BoxShape3D" id="Shape_Floor"]
+size = Vector3(52, 1, 40)
+
+[sub_resource type="BoxMesh" id="Box_WallLong"]
+size = Vector3(52, 12, 1)
+[sub_resource type="BoxShape3D" id="Shape_WallLong"]
+size = Vector3(52, 12, 1)
+
+[sub_resource type="BoxMesh" id="Box_WallShort"]
+size = Vector3(1, 12, 40)
+[sub_resource type="BoxShape3D" id="Shape_WallShort"]
+size = Vector3(1, 12, 40)
+
+[sub_resource type="BoxMesh" id="Box_CatwalkLong"]
+size = Vector3(42, 0.6, 4)
+[sub_resource type="BoxShape3D" id="Shape_CatwalkLong"]
+size = Vector3(42, 0.6, 4)
+
+[sub_resource type="BoxMesh" id="Box_CatwalkCross"]
+size = Vector3(4, 0.6, 28)
+[sub_resource type="BoxShape3D" id="Shape_CatwalkCross"]
+size = Vector3(4, 0.6, 28)
+
+[sub_resource type="BoxMesh" id="Box_Ramp"]
+size = Vector3(5, 0.6, 12)
+[sub_resource type="BoxShape3D" id="Shape_Ramp"]
+size = Vector3(5, 0.6, 12)
+
+[sub_resource type="BoxMesh" id="Box_MachineWide"]
+size = Vector3(8, 3, 4)
+[sub_resource type="BoxShape3D" id="Shape_MachineWide"]
+size = Vector3(8, 3, 4)
+
+[sub_resource type="BoxMesh" id="Box_MachineTall"]
+size = Vector3(3, 6, 3)
+[sub_resource type="BoxShape3D" id="Shape_MachineTall"]
+size = Vector3(3, 6, 3)
+
+[sub_resource type="BoxMesh" id="Box_Crate"]
+size = Vector3(3, 2.4, 3)
+[sub_resource type="BoxShape3D" id="Shape_Crate"]
+size = Vector3(3, 2.4, 3)
+
+[sub_resource type="BoxMesh" id="Box_HazardStrip"]
+size = Vector3(9, 0.12, 0.35)
+
+[node name="Arena" type="Node3D"]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Env_1")
+
+[node name="KeyLight" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.866025, -0.353553, 0.353553, 0, 0.707107, 0.707107, -0.5, -0.612372, 0.612372, 0, 18, 0)
+light_color = Color(1, 0.58, 0.32, 1)
+light_energy = 0.85
+shadow_enabled = true
+
+[node name="SodiumFill" type="OmniLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 8, 0)
+light_color = Color(1, 0.48, 0.13, 1)
+light_energy = 1.35
+omni_range = 46.0
+
+[node name="Floor" type="StaticBody3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.5, 0)
+[node name="Mesh" type="MeshInstance3D" parent="Floor"]
+material_override = SubResource("Mat_Floor")
+mesh = SubResource("Box_Floor")
+[node name="Shape" type="CollisionShape3D" parent="Floor"]
+shape = SubResource("Shape_Floor")
+
+[node name="Walls" type="Node3D" parent="."]
+
+[node name="WallN" type="StaticBody3D" parent="Walls"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 6, -20)
+[node name="Mesh" type="MeshInstance3D" parent="Walls/WallN"]
+material_override = SubResource("Mat_Wall")
+mesh = SubResource("Box_WallLong")
+[node name="Shape" type="CollisionShape3D" parent="Walls/WallN"]
+shape = SubResource("Shape_WallLong")
+
+[node name="WallS" type="StaticBody3D" parent="Walls"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 6, 20)
+[node name="Mesh" type="MeshInstance3D" parent="Walls/WallS"]
+material_override = SubResource("Mat_Wall")
+mesh = SubResource("Box_WallLong")
+[node name="Shape" type="CollisionShape3D" parent="Walls/WallS"]
+shape = SubResource("Shape_WallLong")
+
+[node name="WallW" type="StaticBody3D" parent="Walls"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -26, 6, 0)
+[node name="Mesh" type="MeshInstance3D" parent="Walls/WallW"]
+material_override = SubResource("Mat_Wall")
+mesh = SubResource("Box_WallShort")
+[node name="Shape" type="CollisionShape3D" parent="Walls/WallW"]
+shape = SubResource("Shape_WallShort")
+
+[node name="WallE" type="StaticBody3D" parent="Walls"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 26, 6, 0)
+[node name="Mesh" type="MeshInstance3D" parent="Walls/WallE"]
+material_override = SubResource("Mat_Wall")
+mesh = SubResource("Box_WallShort")
+[node name="Shape" type="CollisionShape3D" parent="Walls/WallE"]
+shape = SubResource("Shape_WallShort")
+
+[node name="Catwalks" type="Node3D" parent="."]
+
+[node name="NorthCatwalk" type="StaticBody3D" parent="Catwalks"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 4.7, -14)
+[node name="Mesh" type="MeshInstance3D" parent="Catwalks/NorthCatwalk"]
+material_override = SubResource("Mat_Catwalk")
+mesh = SubResource("Box_CatwalkLong")
+[node name="Shape" type="CollisionShape3D" parent="Catwalks/NorthCatwalk"]
+shape = SubResource("Shape_CatwalkLong")
+
+[node name="SouthCatwalk" type="StaticBody3D" parent="Catwalks"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 4.7, 14)
+[node name="Mesh" type="MeshInstance3D" parent="Catwalks/SouthCatwalk"]
+material_override = SubResource("Mat_Catwalk")
+mesh = SubResource("Box_CatwalkLong")
+[node name="Shape" type="CollisionShape3D" parent="Catwalks/SouthCatwalk"]
+shape = SubResource("Shape_CatwalkLong")
+
+[node name="CenterCatwalk" type="StaticBody3D" parent="Catwalks"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 4.7, 0)
+[node name="Mesh" type="MeshInstance3D" parent="Catwalks/CenterCatwalk"]
+material_override = SubResource("Mat_Catwalk")
+mesh = SubResource("Box_CatwalkCross")
+[node name="Shape" type="CollisionShape3D" parent="Catwalks/CenterCatwalk"]
+shape = SubResource("Shape_CatwalkCross")
+
+[node name="RampNW" type="StaticBody3D" parent="Catwalks"]
+transform = Transform3D(1, 0, 0, 0, 0.92, -0.391, 0, 0.391, 0.92, -17, 2.2, -8)
+[node name="Mesh" type="MeshInstance3D" parent="Catwalks/RampNW"]
+material_override = SubResource("Mat_Catwalk")
+mesh = SubResource("Box_Ramp")
+[node name="Shape" type="CollisionShape3D" parent="Catwalks/RampNW"]
+shape = SubResource("Shape_Ramp")
+
+[node name="RampSE" type="StaticBody3D" parent="Catwalks"]
+transform = Transform3D(1, 0, 0, 0, 0.92, -0.391, 0, 0.391, 0.92, 17, 2.2, 8)
+[node name="Mesh" type="MeshInstance3D" parent="Catwalks/RampSE"]
+material_override = SubResource("Mat_Catwalk")
+mesh = SubResource("Box_Ramp")
+[node name="Shape" type="CollisionShape3D" parent="Catwalks/RampSE"]
+shape = SubResource("Shape_Ramp")
+
+[node name="Machines" type="Node3D" parent="."]
+
+[node name="PressA" type="StaticBody3D" parent="Machines"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -10, 1.5, 1)
+[node name="Mesh" type="MeshInstance3D" parent="Machines/PressA"]
+material_override = SubResource("Mat_Machine")
+mesh = SubResource("Box_MachineWide")
+[node name="Shape" type="CollisionShape3D" parent="Machines/PressA"]
+shape = SubResource("Shape_MachineWide")
+
+[node name="PressB" type="StaticBody3D" parent="Machines"]
+transform = Transform3D(0, 0, 1, 0, 1, 0, -1, 0, 0, 11, 1.5, -2)
+[node name="Mesh" type="MeshInstance3D" parent="Machines/PressB"]
+material_override = SubResource("Mat_Machine")
+mesh = SubResource("Box_MachineWide")
+[node name="Shape" type="CollisionShape3D" parent="Machines/PressB"]
+shape = SubResource("Shape_MachineWide")
+
+[node name="BoilerW" type="StaticBody3D" parent="Machines"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -20, 3, 11)
+[node name="Mesh" type="MeshInstance3D" parent="Machines/BoilerW"]
+material_override = SubResource("Mat_Machine")
+mesh = SubResource("Box_MachineTall")
+[node name="Shape" type="CollisionShape3D" parent="Machines/BoilerW"]
+shape = SubResource("Shape_MachineTall")
+
+[node name="BoilerE" type="StaticBody3D" parent="Machines"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 20, 3, -11)
+[node name="Mesh" type="MeshInstance3D" parent="Machines/BoilerE"]
+material_override = SubResource("Mat_Machine")
+mesh = SubResource("Box_MachineTall")
+[node name="Shape" type="CollisionShape3D" parent="Machines/BoilerE"]
+shape = SubResource("Shape_MachineTall")
+
+[node name="CrateN" type="StaticBody3D" parent="Machines"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -5, 1.2, -7)
+[node name="Mesh" type="MeshInstance3D" parent="Machines/CrateN"]
+material_override = SubResource("Mat_Wall")
+mesh = SubResource("Box_Crate")
+[node name="Shape" type="CollisionShape3D" parent="Machines/CrateN"]
+shape = SubResource("Shape_Crate")
+
+[node name="CrateS" type="StaticBody3D" parent="Machines"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 5, 1.2, 7)
+[node name="Mesh" type="MeshInstance3D" parent="Machines/CrateS"]
+material_override = SubResource("Mat_Wall")
+mesh = SubResource("Box_Crate")
+[node name="Shape" type="CollisionShape3D" parent="Machines/CrateS"]
+shape = SubResource("Shape_Crate")
+
+[node name="Hazards" type="Node3D" parent="."]
+
+[node name="H1" type="MeshInstance3D" parent="Hazards"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -10, 3.06, 3.25)
+material_override = SubResource("Mat_Hazard")
+mesh = SubResource("Box_HazardStrip")
+
+[node name="H2" type="MeshInstance3D" parent="Hazards"]
+transform = Transform3D(0, 0, 1, 0, 1, 0, -1, 0, 0, 13.25, 3.06, -2)
+material_override = SubResource("Mat_Hazard")
+mesh = SubResource("Box_HazardStrip")
+
+[node name="L1" type="OmniLight3D" parent="Hazards"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -15, 8, -14)
+light_color = Color(1, 0.45, 0.1, 1)
+light_energy = 0.8
+omni_range = 16.0
+
+[node name="L2" type="OmniLight3D" parent="Hazards"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 15, 8, 14)
+light_color = Color(1, 0.45, 0.1, 1)
+light_energy = 0.8
+omni_range = 16.0
+
+[node name="SpawnPoints" type="Node3D" parent="."]
+
+[node name="SFloorW" type="Marker3D" parent="SpawnPoints" groups=["spawnpoints"]]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -18, 2, -8)
+
+[node name="SFloorE" type="Marker3D" parent="SpawnPoints" groups=["spawnpoints"]]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 18, 2, 8)
+
+[node name="SFloorN" type="Marker3D" parent="SpawnPoints" groups=["spawnpoints"]]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 8, 2, -10)
+
+[node name="SFloorS" type="Marker3D" parent="SpawnPoints" groups=["spawnpoints"]]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 2, 10)
+
+[node name="SCatwalkN" type="Marker3D" parent="SpawnPoints" groups=["spawnpoints"]]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -14, 6.2, -14)
+
+[node name="SCatwalkS" type="Marker3D" parent="SpawnPoints" groups=["spawnpoints"]]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 14, 6.2, 14)
+
+[node name="SCenter" type="Marker3D" parent="SpawnPoints" groups=["spawnpoints"]]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 6.2, 0)
