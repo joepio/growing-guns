@@ -2312,6 +2312,19 @@ func _bot_physics(delta: float) -> void:
 	if frozen:
 		velocity = Vector3.ZERO
 		return
+
+	# Passive AI mode: do absolutely nothing.
+	var game_scene: Node = get_tree().current_scene
+	if game_scene and game_scene.get("bots_hold_fire") == true:
+		if not is_on_floor():
+			velocity.y -= GRAVITY * delta
+		else:
+			velocity.y = 0.0
+		velocity.x = move_toward(velocity.x, 0.0, BOT_MOVE_SPEED * 3.0 * delta)
+		velocity.z = move_toward(velocity.z, 0.0, BOT_MOVE_SPEED * 3.0 * delta)
+		move_and_slide()
+		return
+
 	_bot_shoot_cooldown = maxf(0.0, _bot_shoot_cooldown - delta)
 	_bot_jump_cooldown = maxf(0.0, _bot_jump_cooldown - delta)
 	_bot_dash_cooldown = maxf(0.0, _bot_dash_cooldown - delta)
@@ -2441,12 +2454,11 @@ func _bot_physics(delta: float) -> void:
 	_handle_fell_off_map()
 
 	if not ghost_mode and _bot_shoot_cooldown <= 0.0 and not reloading and _bot_has_los(_bot_target):
-		var game_scene: Node = get_tree().current_scene
 		# Round must be live (no shooting at corpses during card pick / match
 		# over), and the dev toggle in the F1 panel can hold fire entirely.
-		var is_playing: bool = game_scene and int(game_scene.get("state")) == 1  # State.PLAYING == 1
-		var hold_fire: bool = game_scene and game_scene.get("bots_hold_fire") == true
-		if is_playing and not hold_fire:
+		var game_scene_shoot: Node = get_tree().current_scene
+		var is_playing: bool = game_scene_shoot and int(game_scene_shoot.get("state")) == 1  # State.PLAYING == 1
+		if is_playing:
 			if _bot_shoot():
 				# Bots auto-fire at the weapon's natural cadence, but now obey
 				# the same magazine and reload gates as humans.

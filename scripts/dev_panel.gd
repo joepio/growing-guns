@@ -91,6 +91,12 @@ func get_target() -> Node:
 func show_help() -> void:
 	if _game == null:
 		return
+
+	# Toggle off if already showing help
+	if _game.round_banner.visible and _game.round_banner.text.begins_with("DEV SHORTCUTS:"):
+		_game._announce.rpc("", 0.0)
+		return
+
 	var help_text := "DEV SHORTCUTS:\n" + \
 		"G: Toggle Godmode\n" + \
 		"P: Toggle Passive AI\n" + \
@@ -101,7 +107,8 @@ func show_help() -> void:
 		"4: Apply Uzi\n" + \
 		"5: Apply Bazooka\n" + \
 		"F1: Full Dev Panel"
-	_game._announce.rpc(help_text, 4.0)
+	# Use smaller font size (24) for the help block
+	_game._announce.rpc(help_text, 10.0, 24)
 
 
 # ── Content rebuild ────────────────────────────────────────────────────────
@@ -113,7 +120,7 @@ func _refresh() -> void:
 		c.queue_free()
 	_heading("DEV  ·  F1 to close", Color(0.5, 0.9, 1.0), 20)
 	_note("Quick shortcuts: G (god), P (passive AI), M (restart), 1-5 (cards), ? (help)")
-	_toggle_row("Bots hold fire (move + aim, no shooting)", _game.bots_hold_fire, func(v: bool) -> void:
+	_toggle_row("Passive AI (stationary, no shooting)", _game.bots_hold_fire, func(v: bool) -> void:
 		_game.bots_hold_fire = v
 		call_deferred("_refresh"))
 
