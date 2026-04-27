@@ -693,8 +693,11 @@ func _physics_process(delta: float) -> void:
 	# Horizontal sway runs at half the vertical frequency — classic figure-8 feel.
 	var bob_x: float = sin(_walk_bob_phase * 0.5) * GUN_BOB_AMP_X * bob_intensity
 	_gun_jump_bump = lerp(_gun_jump_bump, 0.0, clampf(delta * 8.0, 0.0, 1.0))
-	var input_x_tilt: float = _move_axis_x() * -1.0
-	_gun_tilt_z = lerp(_gun_tilt_z, deg_to_rad(input_x_tilt * GUN_STRAFE_TILT_DEG), clampf(delta * 8.0, 0.0, 1.0))
+	# Tilt the gun proportional to actual lateral velocity, not button state —
+	# blocked-against-a-wall strafe shouldn't tilt, momentum-only sideways slide
+	# should. velocity.dot(basis.x) is positive when sliding right.
+	var gun_lateral_factor: float = clampf(velocity.dot(global_transform.basis.x) / WALK_SPEED, -1.0, 1.0)
+	_gun_tilt_z = lerp(_gun_tilt_z, deg_to_rad(gun_lateral_factor * GUN_STRAFE_TILT_DEG), clampf(delta * 8.0, 0.0, 1.0))
 
 	muzzle.position = _muzzle_rest_pos + Vector3(bob_x, bob_y - _gun_jump_bump, muzzle_kick_z) + melee_offset + reload_offset + _gun_pull_back
 	# Don't fight the melee tween while it's running.
@@ -768,8 +771,12 @@ func _physics_process(delta: float) -> void:
 		if not ghost_mode: SFX.dash(global_position)
 
 	# --- Movement ---
-	var input_x := _move_axis_x() * -1.0
-	tilt_z = input_x * TILT_MAX_DEG
+	# Camera roll keys off lateral velocity so tilt fades when the player is
+	# blocked, slows naturally with momentum carryover, and amps up during a
+	# sideways dash. (Sign matches the old input-based version: +basis.x dot
+	# velocity > 0 when strafing right → positive tilt_z.)
+	var lateral_factor: float = clampf(velocity.dot(global_transform.basis.x) / WALK_SPEED, -1.0, 1.0)
+	tilt_z = lateral_factor * TILT_MAX_DEG
 
 	var wish_dir := _input_vector()
 	var current_walk_speed := WALK_SPEED * weapon.move_speed_mult * _slow_mult
@@ -1955,18 +1962,28 @@ func _apply_damage(
 	_show_hit_face.rpc(HIT_FACE_DURATION)
 	if from_id != player_id and not is_bot:
 		_notify_damage_source(from_id)
-		SFX.hit_received()
+		# Scale feedback by damage so a 1hp poison tick is a whisper and a
+		# 50hp shotgun hit slams the camera. 25 is "normal hit" — feels like
+		# the current pre-scaling response.
+		var hit_intensity: float = clampf(float(amount) / 25.0, 0.04, 2.0)
+		SFX.hit_received(hit_intensity)
 
-		# View punch: shift camera in the direction of the hit
+		# View punch: shift camera in the direction of the hit, scaled by
+		# the same intensity so poison ticks stop yanking the camera.
 		var attacker := get_parent().get_node_or_null(str(from_id))
 		if attacker and is_multiplayer_authority():
 			var attacker_hit_dir: Vector3 = (attacker.global_position - global_position).normalized()
 			# Transform world hit dir to local space
 			var local_dir: Vector3 = global_transform.basis.inverse() * attacker_hit_dir
 			# Punch camera away from hit
-			_view_punch_pos = -local_dir * 0.15
+			_view_punch_pos = -local_dir * 0.15 * hit_intensity
 			# Add some random rotational kick
-			_view_punch_rot = Vector3(randf_range(-0.1, 0.1), randf_range(-0.1, 0.1), randf_range(-0.1, 0.1))
+			var rot_kick: float = 0.1 * hit_intensity
+			_view_punch_rot = Vector3(
+				randf_range(-rot_kick, rot_kick),
+				randf_range(-rot_kick, rot_kick),
+				randf_range(-rot_kick, rot_kick),
+			)
 	if health <= 0 and _phoenix_charges_left > 0:
 		_phoenix_charges_left -= 1
 		health = max(1, int(float(MAX_HEALTH + weapon.max_hp_bonus) * 0.35))
@@ -2003,7 +2020,12 @@ func _apply_damage(
 			kb_scale_max = 4.0
 			upward_bias = 0.16
 			upward_scale = 0.06
+		# Killing-blow damage scales the launch: a 1hp poison tick lands like a
+		# nudge, a 50-damage shotgun blast hurls. 25 ≈ a "normal" rifle hit and
+		# preserves the previous knockback feel for that case.
+		var damage_factor: float = clampf(float(amount) / 25.0, 0.05, 2.5)
 		var kb_scale := clampf((ctx_force if ctx_force > 0.0 else push.length()) / Weapon.BASE_KNOCKBACK, 1.0, kb_scale_max)
+		kb_scale = clampf(kb_scale * damage_factor, 0.1, kb_scale_max)
 		push = push.normalized() * kb_scale + Vector3.UP * (upward_bias + upward_scale * kb_scale)
 		_ragdoll.rpc(push, force_origin, ctx_force, blast_radius, blast_severity, is_head)
 		died.emit(from_id)
@@ -2055,12 +2077,13 @@ func _report_death(killer_id: int) -> void:
 		game.report_kill(killer_id, player_id)
 
 @rpc("any_peer", "call_local", "reliable")
-func server_respawn(pos: Vector3) -> void:
+func server_respawn(pos: Vector3, yaw: float = 0.0) -> void:
 	if multiplayer.get_remote_sender_id() != 1 and multiplayer.get_remote_sender_id() != 0:
 		return
 	if not is_multiplayer_authority():
 		return
 	global_position = pos
+	rotation.y = yaw
 	velocity = Vector3.ZERO
 	ghost_mode = false
 	invisible_mode = false

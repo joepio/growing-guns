@@ -743,9 +743,14 @@ func death(at: Vector3 = NO_POS, is_self: bool = false) -> void:
 		_play_stream(_death_sounds.pick_random(), death_self_db, NO_POS, 1.0, "death_self", -1.0, false, 110.0)
 	else:
 		_play_stream(_death_sounds.pick_random(), death_world_db + randf_range(-1.5, 1.5), at, 1.0, "death", -1.0, false, 85.0)
-func hit_received() -> void:
+func hit_received(intensity: float = 1.0) -> void:
 	# Critical UI feedback — high SPL so it always plays through combat noise.
-	_play(_cached_samples("hit_received", Callable(self, "_synth_hit_received")), hit_received_db, NO_POS, "hit_received", -1.0, false, 130.0)
+	# Intensity scales perceived volume: a 1-damage poison tick should barely
+	# whisper while a 50-damage shotgun hit should hit hard. linear_to_db
+	# converts the linear scale (1.0 == base db, 0.1 == -20dB quieter, 2.0 ==
+	# +6dB louder).
+	var db: float = hit_received_db + linear_to_db(clampf(intensity, 0.05, 2.0))
+	_play(_cached_samples("hit_received", Callable(self, "_synth_hit_received")), db, NO_POS, "hit_received", -1.0, false, 130.0)
 func kill_confirm() -> void:
 	# Critical UI feedback — same priority tier as hit_received.
 	_play(_cached_samples("kill_confirm", Callable(self, "_synth_kill_confirm")), -6.0, NO_POS, "kill_confirm", -1.0, false, 130.0)

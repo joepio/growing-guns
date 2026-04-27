@@ -7,7 +7,8 @@ extends Node3D
 # Run: godot --scene res://scenes/action_lab.tscn  (or set as main scene).
 
 const PLAYER_SCENE := preload("res://scenes/player.tscn")
-const ARENA_SCENE := preload("res://scenes/arena.tscn")
+const ARENA_SCENE := preload("res://scenes/arena_procedural.tscn")
+const ARENA_SEED := 7
 const NUM_BOTS := 5
 const CARDS_PER_BOT := 4
 # Stand-in for game state — Player._bot_physics gates firing on
@@ -88,6 +89,8 @@ func _build_arena() -> void:
 	var arena: Node = ARENA_SCENE.instantiate()
 	arena.name = "Arena"
 	add_child(arena)
+	if arena.has_method("apply_seed"):
+		arena.apply_seed(ARENA_SEED)
 	# Players group container — bot AI looks up siblings via get_parent().get_children().
 	var players_root := Node3D.new()
 	players_root.name = "Players"

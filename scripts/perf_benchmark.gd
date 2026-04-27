@@ -13,7 +13,7 @@ extends Node3D
 # physics_ms / frame_ms / event rates remain accurate, which is what we
 # actually want for tracking gameplay-side regressions.
 
-const ARENA_SCENE := preload("res://scenes/arena.tscn")
+const ARENA_SCENE := preload("res://scenes/arena_procedural.tscn")
 const PLAYER_SCENE := preload("res://scenes/player.tscn")
 const PLAYING_STATE := 1   # Player._bot_physics gates firing on scene.state == 1.
 
@@ -115,6 +115,9 @@ func _build_arena() -> void:
 	var arena: Node = ARENA_SCENE.instantiate()
 	arena.name = "Arena"
 	add_child(arena)
+	# Reuse the bench's RNG_SEED so the layout is reproducible run-to-run.
+	if arena.has_method("apply_seed"):
+		arena.apply_seed(RNG_SEED)
 	# Bot AI walks siblings via get_parent().get_children() to find targets.
 	var players_root := Node3D.new()
 	players_root.name = "Players"

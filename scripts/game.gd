@@ -9,9 +9,7 @@ const SPLITSCREEN_MANAGER_SCRIPT := preload("res://scripts/splitscreen_manager.g
 # and broadcasts via _swap_arena.rpc(idx) so all peers agree. Add new maps
 # here — they need at least one node in the "spawnpoints" group.
 const MAP_POOL: Array[PackedScene] = [
-	preload("res://scenes/arena.tscn"),
-	preload("res://scenes/arena_platforms.tscn"),
-	preload("res://scenes/arena_factory.tscn"),
+	preload("res://scenes/arena_procedural.tscn"),
 ]
 # Position offset applied to whichever arena is loaded — matches the static
 # transform game.tscn used to apply to its embedded Arena instance, so spawn
@@ -605,8 +603,8 @@ func _request_spawn(pname: String) -> void:
 
 func _spawn_player(id: int, pname: String) -> void:
 	# Avoid dropping a new player on top of anyone already in the arena.
-	var pos := _random_spawn(_current_player_positions())
-	_do_spawn.rpc(id, pname, pos)
+	var pick := _pick_spawn(_current_player_positions())
+	_do_spawn.rpc(id, pname, pick["pos"], false, -1, false, pick["yaw"])
 
 func _current_player_positions() -> Array[Vector3]:
 	var out: Array[Vector3] = []
@@ -615,31 +613,94 @@ func _current_player_positions() -> Array[Vector3]:
 			out.append((child as Node3D).global_position)
 	return out
 
-func _random_spawn(avoid: Array[Vector3] = []) -> Vector3:
+func _pick_spawn(avoid: Array[Vector3] = []) -> Dictionary:
+	# Returns {"pos": Vector3, "yaw": float}. Picks the spawnpoint that maximizes
+	#   min_distance(other_spawns) - height_penalty
+	# so respawning players land far from each other and at roughly the same
+	# height as the first one already placed this round. Yaw faces the arena
+	# center unless that direction is blocked by a wall within 3m, in which
+	# case we try perpendicular and back-facing yaws.
 	var spawns := get_tree().get_nodes_in_group("spawnpoints")
 	if spawns.is_empty():
-		return Vector3(0, 3, 0)
+		return {"pos": Vector3(0, 3, 0), "yaw": 0.0}
+
+	# Anchor for the height-match bonus: the first spawn already placed this
+	# pass, if any. With nothing placed yet, target_y is unused.
+	var has_target_y: bool = not avoid.is_empty()
+	var target_y: float = avoid[0].y if has_target_y else 0.0
+
+	var arena: Node = get_node_or_null("Arena")
+	var arena_origin: Vector3 = (arena as Node3D).global_position if arena and arena is Node3D else Vector3.ZERO
+
+	# Shuffle so all-tied scores still rotate spawn picks across rounds.
 	spawns.shuffle()
-	# Prefer a spawn that's clear of geometry AND far from every used spawn.
+
+	var best_pos: Vector3 = Vector3.ZERO
+	var best_yaw: float = 0.0
+	var best_score: float = -INF
+	var found_clear: bool = false
 	for spawn in spawns:
 		var pos: Vector3 = spawn.global_position
 		if not _spawn_is_clear(pos):
 			continue
-		if _too_close_to_any(pos, avoid):
-			continue
-		return pos
-	# Fallback 1: relax spacing but still require physics clearance.
-	for spawn in spawns:
-		if _spawn_is_clear(spawn.global_position):
-			return spawn.global_position
-	return spawns[0].global_position
+		found_clear = true
+		var min_d: float = _min_distance(pos, avoid) if not avoid.is_empty() else 100.0
+		# Heavy penalty when below the SPAWN_MIN_SPACING bar — but candidate
+		# stays in contention so we have something to fall back to.
+		if min_d < SPAWN_MIN_SPACING:
+			min_d *= 0.1
+		var height_penalty: float = absf(pos.y - target_y) * 1.5 if has_target_y else 0.0
+		var score: float = min_d - height_penalty
+		if score > best_score:
+			best_score = score
+			best_pos = pos
+			best_yaw = _spawn_yaw_at(pos, arena_origin)
 
-func _too_close_to_any(pos: Vector3, others: Array[Vector3]) -> bool:
-	var min_sq := SPAWN_MIN_SPACING * SPAWN_MIN_SPACING
+	if found_clear:
+		return {"pos": best_pos, "yaw": best_yaw}
+	# Last-ditch fallback: physics-blocked everywhere. Return the first spawn
+	# anyway so the round still runs.
+	var fb: Vector3 = (spawns[0] as Node3D).global_position
+	return {"pos": fb, "yaw": _spawn_yaw_at(fb, arena_origin)}
+
+
+func _min_distance(pos: Vector3, others: Array[Vector3]) -> float:
+	var best: float = INF
 	for o in others:
-		if pos.distance_squared_to(o) < min_sq:
-			return true
-	return false
+		var d: float = pos.distance_to(o)
+		if d < best:
+			best = d
+	return best
+
+
+func _spawn_yaw_at(pos: Vector3, arena_origin: Vector3) -> float:
+	# Default: face the arena center. yaw is the body's rotation around Y;
+	# at yaw=0 the player looks toward -Z, so atan2(dx, dz) gives the yaw
+	# that turns -Z onto the (pos → center) → -Z direction.
+	var dx: float = pos.x - arena_origin.x
+	var dz: float = pos.z - arena_origin.z
+	var center_yaw: float = atan2(dx, dz) if (dx * dx + dz * dz) > 0.01 else 0.0
+	# If a wall blocks the center-facing direction within 3m, try perpendicular
+	# yaws and finally a 180° flip. First non-blocked direction wins.
+	var candidates: Array[float] = [
+		center_yaw,
+		center_yaw + PI * 0.5,
+		center_yaw - PI * 0.5,
+		center_yaw + PI,
+	]
+	for y in candidates:
+		if not _wall_within(pos, y, 3.0):
+			return y
+	return center_yaw
+
+
+func _wall_within(pos: Vector3, yaw: float, dist: float) -> bool:
+	var fwd: Vector3 = Vector3(-sin(yaw), 0, -cos(yaw))
+	var head: Vector3 = pos + Vector3(0, 1.6, 0)
+	var to: Vector3 = head + fwd * dist
+	var query := PhysicsRayQueryParameters3D.create(head, to, 1)
+	var hit: Dictionary = get_world_3d().direct_space_state.intersect_ray(query)
+	return not hit.is_empty()
 
 func _spawn_is_clear(pos: Vector3) -> bool:
 	var shape := CapsuleShape3D.new()
@@ -659,6 +720,7 @@ func _do_spawn(
 	bot: bool = false,
 	input_device: int = -1,
 	split_local: bool = false,
+	yaw: float = 0.0,
 ) -> void:
 	if players_root.has_node(str(id)):
 		return
@@ -671,8 +733,10 @@ func _do_spawn(
 	p.split_screen_local = split_local
 	p.set_multiplayer_authority(1 if (bot or split_local) else id)
 	players_root.add_child(p, true)
-	# global_position must be set after add_child — it requires being in-tree.
+	# global_position / rotation must be set after add_child — they require
+	# being in-tree.
 	p.global_position = pos
+	p.rotation.y = yaw
 	if id == multiplayer.get_unique_id():
 		local_player = p
 		# Attach the raytraced-audio listener under the local player's camera.
@@ -710,7 +774,8 @@ func _spawn_bots(count: int) -> void:
 		var bot_name: String = BOT_NAME if count == 1 else "%s_%d" % [BOT_NAME, i + 1]
 		NetworkManager.players[pid] = bot_name
 		round_wins[pid] = 0
-		_do_spawn.rpc(pid, bot_name, _random_spawn(_current_player_positions()), true)
+		var bot_pick := _pick_spawn(_current_player_positions())
+		_do_spawn.rpc(pid, bot_name, bot_pick["pos"], true, -1, false, bot_pick["yaw"])
 		spawned_any = true
 	if spawned_any:
 		NetworkManager.player_list_changed.emit()
@@ -757,27 +822,33 @@ func _maybe_start_match() -> void:
 func _start_round_now() -> void:
 	_reset_round_tracking()
 	# Pick a random map for this round and broadcast the swap to all peers
-	# before respawning, so _random_spawn() reads the new arena's spawn
+	# before respawning, so _pick_spawn() reads the new arena's spawn
 	# points (the call_local RPC runs the swap synchronously here too).
-	if multiplayer.is_server() and MAP_POOL.size() > 1:
-		_swap_arena.rpc(randi() % MAP_POOL.size())
+	if multiplayer.is_server() and MAP_POOL.size() >= 1:
+		# Always swap so the procedural arena gets a fresh seed each round
+		# (with a single-entry pool, the index is always 0).
+		_swap_arena.rpc(randi() % MAP_POOL.size(), randi())
 	# Respawn everyone, reset HP + cooldowns, unfreeze, announce.
 	# Track already-assigned spawn positions so nobody lands on top of another.
+	# The first pick anchors the height target so subsequent picks land near
+	# the same elevation.
 	var used: Array[Vector3] = []
 	for pid in NetworkManager.players:
 		var p := players_root.get_node_or_null(str(pid))
 		if not p:
 			continue
-		var pos := _random_spawn(used)
-		used.append(pos)
+		var pick := _pick_spawn(used)
+		used.append(pick["pos"])
 		p.set_ghost_mode.rpc(false)
-		p.server_respawn.rpc_id(p.get_multiplayer_authority(), pos)
-		p.set_frozen.rpc(false)
+		p.server_respawn.rpc_id(p.get_multiplayer_authority(), pick["pos"], pick["yaw"])
+		# Stay frozen during the ready phase; _round_countdown lifts the
+		# freeze on every player after the 500ms beep.
+		p.set_frozen.rpc(true)
 		p.clear_ragdoll.rpc()
 	_clear_projectiles.rpc()
 	_clear_craters.rpc()
 	_hide_rematch_overlay.rpc()
-	_announce.rpc("ROUND %d" % current_round, 1.4)
+	_round_countdown.rpc()
 
 @rpc("authority", "call_local", "reliable")
 func _clear_projectiles() -> void:
@@ -797,9 +868,9 @@ func _clear_craters() -> void:
 # Called from _start_round_now via RPC — server picks the index, every peer
 # (including the server thanks to call_local) swaps in lockstep.
 # remove_child happens synchronously so the OLD spawnpoints leave the tree
-# before _random_spawn() runs; the deferred queue_free does the actual delete.
+# before _pick_spawn() runs; the deferred queue_free does the actual delete.
 @rpc("authority", "call_local", "reliable")
-func _swap_arena(map_index: int) -> void:
+func _swap_arena(map_index: int, map_seed: int = 0) -> void:
 	if map_index < 0 or map_index >= MAP_POOL.size():
 		return
 	var existing := get_node_or_null("Arena")
@@ -811,6 +882,14 @@ func _swap_arena(map_index: int) -> void:
 	add_child(new_arena)
 	if new_arena is Node3D:
 		(new_arena as Node3D).position = ARENA_OFFSET
+	# Procedural maps need the seed plumbed in so every peer regenerates the
+	# same geometry. Synchronous: spawnpoints are in the tree before
+	# _pick_spawn() runs in _start_round_now().
+	if new_arena.has_method("apply_seed"):
+		new_arena.apply_seed(map_seed)
+	current_map_index = map_index
+	current_map_seed = map_seed
+	_refresh_pause_seed_label()
 	# Re-grab WorldEnvironment so explosion-tonemap-duck logic (_arena_env in
 	# _process) keeps working against the new arena's environment resource.
 	var we := new_arena.get_node_or_null("WorldEnvironment") as WorldEnvironment
@@ -1456,6 +1535,13 @@ func _set_gameplay_hud_visible(visible_: bool) -> void:
 
 @rpc("authority", "call_local", "reliable")
 func _announce(text: String, duration: float, font_size: int = -1) -> void:
+	_set_banner(text, duration, font_size)
+
+
+# Local-only banner setter — body of _announce, callable from inside other
+# RPCs that already run via call_local on every peer (so we don't need to
+# re-broadcast).
+func _set_banner(text: String, duration: float, font_size: int = -1) -> void:
 	if text == "" or duration <= 0:
 		round_banner.visible = false
 		banner_timer.stop()
@@ -1473,6 +1559,23 @@ func _announce(text: String, duration: float, font_size: int = -1) -> void:
 	if duration < 90.0:
 		banner_timer.wait_time = maxf(0.01, duration)
 		banner_timer.start()
+
+
+@rpc("authority", "call_local", "reliable")
+func _round_countdown() -> void:
+	# Brief "ready phase": players stay frozen, banner shows READY..., then a
+	# pong cue and START! while the server lifts the freeze. Runs locally on
+	# every peer (call_local); the freeze release is server-only since
+	# set_frozen is gated to sender id 1.
+	_set_banner("READY...", 0.6)
+	await get_tree().create_timer(0.5).timeout
+	SFX.pling(0.7)
+	_set_banner("START!", 0.9)
+	if multiplayer.is_server():
+		for pid in NetworkManager.players:
+			var p := players_root.get_node_or_null(str(pid))
+			if p:
+				p.set_frozen.rpc(false)
 
 @rpc("authority", "call_local", "reliable")
 func _match_over(winner_id: int) -> void:
@@ -2128,6 +2231,7 @@ func _toggle_pause_menu() -> void:
 		# _build_pause_menu ran (host_game_iroh in _ready races with the
 		# pause menu's lazy build).
 		_pause_refresh_game_id()
+		_refresh_pause_seed_label()
 		_sync_mouse_mode()
 		# Pause the world if this is a solo match (local player + bots only).
 		if _human_count() <= 1:
@@ -2267,6 +2371,25 @@ func _build_pause_menu() -> void:
 	exit_btn.pressed.connect(_quit_game)
 	vb.add_child(exit_btn)
 
+	# Subtle map+seed readout pinned to the bottom-right corner of the screen
+	# (sibling of the bg + panel so it's not constrained by the center column).
+	var seed_label := Label.new()
+	seed_label.name = "SeedLabel"
+	seed_label.add_theme_color_override("font_color", Color(0.72, 0.72, 0.85, 0.85))
+	seed_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
+	seed_label.add_theme_constant_override("outline_size", 3)
+	seed_label.add_theme_font_size_override("font_size", 13)
+	seed_label.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
+	seed_label.offset_left = -260
+	seed_label.offset_top = -28
+	seed_label.offset_right = -12
+	seed_label.offset_bottom = -8
+	seed_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	seed_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(seed_label)
+	_pause_seed_label = seed_label
+	_refresh_pause_seed_label()
+
 	_pause_menu = root
 	_pause_menu.visible = false
 
@@ -2276,6 +2399,21 @@ func _build_pause_menu() -> void:
 var _pause_id_field: LineEdit = null
 var _pause_copy_button: Button = null
 var _pause_join_input: LineEdit = null
+var _pause_seed_label: Label = null
+
+# Last map swap inputs — used by the pause menu's seed label (and any future
+# "rejoin same map" feature). Updated in _swap_arena.
+var current_map_index: int = 0
+var current_map_seed: int = 0
+
+
+func _refresh_pause_seed_label() -> void:
+	if _pause_seed_label == null:
+		return
+	var map_name: String = "?"
+	if current_map_index >= 0 and current_map_index < MAP_POOL.size():
+		map_name = MAP_POOL[current_map_index].resource_path.get_file().get_basename()
+	_pause_seed_label.text = "%s · seed %d" % [map_name, current_map_seed]
 
 
 func _pause_refresh_game_id() -> void:
