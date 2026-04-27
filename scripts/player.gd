@@ -229,6 +229,12 @@ func _ready() -> void:
 	if head_blob:
 		_head_blob_rest_pos = head_blob.position
 		_head_blob_rest_scale = head_blob.scale
+		# Bots get a cube head — visually distinguishes them from human players
+		# at a glance. Sized to match the sphere's footprint (0.42 radius).
+		if is_bot:
+			var box := BoxMesh.new()
+			box.size = Vector3(0.78, 0.78, 0.78)
+			head_blob.mesh = box
 	if hand_anchor:
 		_hand_anchor_rest_pos = hand_anchor.position
 	_visual_prev_pos = global_position
