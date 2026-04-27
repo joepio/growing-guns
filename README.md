@@ -1,4 +1,4 @@
-# Rounds FPS
+# Another Round
 
 - Fast paced Multiplayer FPS.
 - Last man standing, new map every round.
@@ -17,12 +17,13 @@
 To re-compile and export the project for macOS (e.g. for sharing with colleagues):
 
 ```bash
-/Applications/Godot.app/Contents/MacOS/Godot --headless --path . --export-release "macOS LAN Debug" ./JumpShoot.zip
+tools/build_release.sh         # builds mac + win → build/{macos,windows}/AnotherRound.zip
+tools/build_release.sh mac     # macOS only
 ```
 
 ### Remote Playtesting
 
-The build is exported to `JumpShoot.zip`. This archive contains the `.app` bundle which can be distributed to other players on the local network.
+The build is exported to `build/macos/AnotherRound.zip`. This archive contains the `.app` bundle which can be distributed to other players on the local network.
 
 - **Hosting:** Use the "HOST MATCH" button in the main menu.
 - **Joining:** Colleagues can use the auto-discovery list or join via IP using the "JOIN BY IP" field.
