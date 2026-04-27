@@ -3,8 +3,8 @@
 # push them to itch.io via butler.
 #
 # Outputs (relative to project root):
-#   build/macos/AnotherRound.zip      — macOS .app bundle, double-clickable
-#   build/windows/AnotherRound.zip    — Windows .exe + .pck, also runnable from a folder
+#   build/macos/MoreRounds.zip      — macOS .app bundle, double-clickable
+#   build/windows/MoreRounds.zip    — Windows .exe + .pck, also runnable from a folder
 #
 # Requires:
 #   - Godot 4.6 at GODOT_BIN (defaults to /Applications/Godot.app)
@@ -95,11 +95,12 @@ fi
 build_mac() {
 	echo "==> macOS"
 	mkdir -p build/macos
-	rm -f build/macos/AnotherRound.zip
-	"$GODOT_BIN" --headless --path . --export-release "macOS LAN Debug" build/macos/AnotherRound.zip
+	rm -rf build/macos/AnotherRound.zip build/macos/JumpShoot.zip build/macos/JumpShoot.app
+	rm -f build/macos/MoreRounds.zip
+	"$GODOT_BIN" --headless --path . --export-release "macOS LAN Debug" build/macos/MoreRounds.zip
 	# Re-zip the .app bundle so itch.io / browsers don't end up with a quarantine flag
 	# on a nested zip. (Godot exports macOS as .zip already; this is a no-op confirm.)
-	ls -lh build/macos/AnotherRound.zip
+	ls -lh build/macos/MoreRounds.zip
 }
 
 build_win() {
@@ -116,11 +117,13 @@ build_win() {
 	fi
 	mkdir -p build/windows
 	rm -f build/windows/AnotherRound.exe build/windows/AnotherRound.pck build/windows/AnotherRound.zip
-	"$GODOT_BIN" --headless --path . --export-release "Windows LAN" build/windows/AnotherRound.exe
+	rm -f build/windows/JumpShoot.exe build/windows/JumpShoot.pck build/windows/JumpShoot.zip
+	rm -f build/windows/MoreRounds.exe build/windows/MoreRounds.pck build/windows/MoreRounds.zip
+	"$GODOT_BIN" --headless --path . --export-release "Windows LAN" build/windows/MoreRounds.exe
 	# Zip exe + pck (and any DLLs Godot dropped) into one download.
-	(cd build/windows && zip -q -r AnotherRound.zip ./*.exe ./*.pck ./*.dll 2>/dev/null || \
-		zip -q -r AnotherRound.zip ./*.exe ./*.pck)
-	ls -lh build/windows/AnotherRound.zip
+	(cd build/windows && zip -q -r MoreRounds.zip MoreRounds.exe MoreRounds.pck ./*.dll 2>/dev/null || \
+		zip -q -r MoreRounds.zip MoreRounds.exe MoreRounds.pck)
+	ls -lh build/windows/MoreRounds.zip
 }
 
 for t in "${TARGETS[@]}"; do
@@ -132,8 +135,8 @@ done
 
 echo
 echo "Built artifacts:"
-[[ -f build/macos/AnotherRound.zip   ]] && echo "  build/macos/AnotherRound.zip"
-[[ -f build/windows/AnotherRound.zip ]] && echo "  build/windows/AnotherRound.zip"
+[[ -f build/macos/MoreRounds.zip   ]] && echo "  build/macos/MoreRounds.zip"
+[[ -f build/windows/MoreRounds.zip ]] && echo "  build/windows/MoreRounds.zip"
 
 # ── Itch.io upload ─────────────────────────────────────────────────────────
 if [[ -n "$ITCH_TARGET" ]]; then
@@ -146,8 +149,8 @@ if [[ -n "$ITCH_TARGET" ]]; then
 	echo "==> Uploading to itch.io: $ITCH_TARGET (v$VERSION)"
 	for t in "${TARGETS[@]}"; do
 		case "$t" in
-			mac) "$BUTLER_BIN" push --userversion "$VERSION" build/macos/AnotherRound.zip   "$ITCH_TARGET:mac" ;;
-			win) "$BUTLER_BIN" push --userversion "$VERSION" build/windows/AnotherRound.zip "$ITCH_TARGET:win" ;;
+			mac) "$BUTLER_BIN" push --userversion "$VERSION" build/macos/MoreRounds.zip   "$ITCH_TARGET:mac" ;;
+			win) "$BUTLER_BIN" push --userversion "$VERSION" build/windows/MoreRounds.zip "$ITCH_TARGET:win" ;;
 		esac
 	done
 fi

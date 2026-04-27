@@ -10,7 +10,7 @@ config_version=5
 
 [application]
 
-config/name="Another Round"
+config/name="More Rounds"
 config/description="High-paced multiplayer arena shooter"
 run/main_scene="res://scenes/game.tscn"
 config/features=PackedStringArray("4.6", "Forward Plus")
