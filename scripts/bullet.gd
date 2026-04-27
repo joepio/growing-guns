@@ -1,5 +1,7 @@
 extends Node3D
 
+const Violence = preload("res://scripts/violence.gd")
+
 var speed: float = 150.0
 var direction: Vector3 = Vector3.FORWARD
 # velocity carries the actual world-space motion so we can apply gravity
@@ -33,6 +35,8 @@ var _prev_listener_dist_sq: float = INF
 var _trail_inst: MeshInstance3D = null
 var _max_trail_length: float = 2.0
 
+const HITSCAN_THRESHOLD := 550.0
+
 func setup(origin: Vector3, dir: Vector3, shooter: int, w: Weapon, damage_mult: float = 1.0, speed_mult: float = 1.0) -> void:
 	global_position = origin
 	direction = dir.normalized()
@@ -45,8 +49,6 @@ func setup(origin: Vector3, dir: Vector3, shooter: int, w: Weapon, damage_mult: 
 	ricochet_left = w.ricochet_count
 	world_pierce_left = w.world_pierce_count
 
-	look_at(global_position + direction)
-
 	var players_root: Node = get_tree().current_scene.get_node_or_null("Players")
 	if players_root:
 		var shooter_node: Node3D = players_root.get_node_or_null(str(shooter_id))
@@ -57,6 +59,14 @@ func setup(origin: Vector3, dir: Vector3, shooter: int, w: Weapon, damage_mult: 
 	_ray_query.collision_mask = 1 | 2 | 4  # world + players + projectiles
 	_ray_query.exclude = excluded_rids
 	_ray_query.collide_with_areas = true
+
+	# Hitscan optimization: very fast bullets don't need a multi-frame node 
+	# lifecycle. We perform an immediate raycast and queue for deletion.
+	if speed >= HITSCAN_THRESHOLD:
+		call_deferred("_do_hitscan")
+		return
+
+	look_at(global_position + direction)
 
 	var mat: StandardMaterial3D = StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -146,6 +156,32 @@ func _physics_process(delta: float) -> void:
 
 	if distance_traveled > max_range:
 		queue_free()
+
+func _do_hitscan() -> void:
+	if not is_inside_tree():
+		return
+
+	var space := get_world_3d().direct_space_state
+	var start_pos := global_position
+	
+	_ray_query.from = start_pos
+	_ray_query.to = start_pos + direction * max_range
+	var result: Dictionary = space.intersect_ray(_ray_query)
+	
+	var hit_pos: Vector3 = _ray_query.to
+	if not result.is_empty():
+		hit_pos = result.position
+		# Update distance for correct damage falloff/growth in _handle_collision
+		distance_traveled = start_pos.distance_to(hit_pos)
+		_handle_collision(result)
+	
+	# Visual laser tracer
+	var players_root: Node = get_tree().current_scene.get_node_or_null("Players")
+	var shooter_node: Node3D = players_root.get_node_or_null(str(shooter_id)) if players_root else null
+	if shooter_node and shooter_node.has_method("_spawn_laser_tracer"):
+		shooter_node.call("_spawn_laser_tracer", start_pos, hit_pos)
+	
+	queue_free()
 
 func _current_damage() -> float:
 	var dmg := weapon_stats.get_damage() * shot_damage_mult

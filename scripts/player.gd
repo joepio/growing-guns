@@ -1,5 +1,7 @@
 extends CharacterBody3D
 
+const Violence = preload("res://scripts/violence.gd")
+
 # All ragdoll, death, impact, and gore logic lives in scripts/violence.gd.
 # The @rpc methods + a few thin wrappers stay here because they need to live
 # on this Node, but their bodies just delegate to Violence.
@@ -1345,6 +1347,9 @@ func _spawn_impact(pos: Vector3, color: Color = Color(1.0, 0.9, 0.3), scale_f: f
 
 func _spawn_blood(pos: Vector3, dir: Vector3, dmg_ratio: float) -> void:
 	Violence.spawn_blood(get_tree().current_scene, pos, dir, dmg_ratio, VFX_MAX_BLOOD_DROPS)
+
+func _spawn_laser_tracer(from: Vector3, to: Vector3) -> void:
+	Violence.spawn_laser_tracer(get_tree().current_scene, from, to)
 
 # -------------------- RAGDOLL / DEATH --------------------
 
