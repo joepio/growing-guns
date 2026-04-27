@@ -21,7 +21,8 @@ extends Node3D
 @export var barrel_radius: float = 0.022 : set = _set_barrel_radius
 @export var muzzle_flare: float = 1.55 : set = _set_muzzle_flare  # muzzle radius = barrel_radius × this
 @export var muzzle_length: float = 0.05 : set = _set_muzzle_length
-@export var wide_muzzle: bool = false : set = _set_wide_muzzle  # Havoc-style wide rectangular muzzle
+@export var wide_muzzle: bool = false : set = _set_wide_muzzle
+@export var is_minigun: bool = false : set = _set_is_minigun
 
 @export_group("Magazine")
 @export var mag_size: Vector3 = Vector3(0.08, 0.16, 0.06) : set = _set_mag_size
@@ -119,6 +120,7 @@ func _set_barrel_radius(v: float) -> void:          barrel_radius = v;        _r
 func _set_muzzle_flare(v: float) -> void:           muzzle_flare = v;         _rebuild()
 func _set_muzzle_length(v: float) -> void:          muzzle_length = v;        _rebuild()
 func _set_wide_muzzle(v: bool) -> void:             wide_muzzle = v;          _rebuild()
+func _set_is_minigun(v: bool) -> void:             is_minigun = v;           _rebuild()
 func _set_mag_size(v: Vector3) -> void:             mag_size = v;             _rebuild()
 func _set_mag_offset_z(v: float) -> void:           mag_offset_z = v;         _rebuild()
 func _set_mag_tilt_deg(v: float) -> void:           mag_tilt_deg = v;         _rebuild()
@@ -192,6 +194,8 @@ var _suppress_rebuild: bool = false
 # across rebuilds so swapping cards mid-spam doesn't cool the gun instantly.
 var heat: float = 0.0
 var _barrel_material: StandardMaterial3D = null
+var _barrel_group: Node3D = null
+var _barrel_spin: float = 0.0
 var _receiver_material: StandardMaterial3D = null
 var _heat_light: OmniLight3D = null
 
@@ -213,6 +217,10 @@ func _ready() -> void:
 	_request_preview()
 
 func _process(delta: float) -> void:
+	# Minigun barrel rotation
+	if _barrel_group and is_minigun:
+		_barrel_group.rotate_z(_barrel_spin * delta)
+		_barrel_spin *= exp(-2.5 * delta)
 	if Engine.is_editor_hint():
 		return
 	# Heat — exponential decay. Snappier than linear and matches how a hot
@@ -355,6 +363,8 @@ func eject_casing() -> void:
 # pass the weapon's current fire interval so it arrives just as the next
 # shot snaps it back again. <= 0 falls back to the bolt_cycle_time export.
 func cycle_bolt(cycle_seconds: float = -1.0) -> void:
+	if is_minigun:
+		_barrel_spin = minf(_barrel_spin + 12.0, 45.0)
 	if _bolts.size() == 0:
 		return
 	_bolt_back = _bolt_travel
@@ -458,6 +468,7 @@ func apply_weapon_stats(w: Weapon) -> void:
 	# SNIPER drops it to 0. Threshold 0.003 rad (~0.17°) fires for any sniper-
 	# class build but not casual accuracy buffs.
 	has_scope = w.spread < 0.003
+	is_minigun = w.fire_rate_mult >= 5.0
 	# Very heavy hitters get a Havoc-style wide rectangular muzzle.
 	wide_muzzle = w.damage_mult >= 3.0
 	# Explosive rounds (BAZOOKA-style) get a vented barrel shroud — that
@@ -498,15 +509,12 @@ func _rebuild() -> void:
 	var n_barrels: int = max(1, barrel_count)
 	var barrel_pitch: float = barrel_radius * 2.4    # centre-to-centre spacing
 	var barrel_span: float = barrel_pitch * float(n_barrels - 1)
-	var min_receiver_w: float = barrel_span + barrel_radius * 3.0
-	var effective_receiver_size := Vector3(maxf(receiver_size.x, min_receiver_w), receiver_size.y, receiver_size.z)
+	var min_receiver_w_init: float = barrel_span + barrel_radius * 3.0
+	var effective_receiver_size := Vector3(maxf(receiver_size.x, min_receiver_w_init), receiver_size.y, receiver_size.z)
 
 	# Receiver body
 	_add_box("Receiver", effective_receiver_size, Vector3.ZERO, metal)
 
-	# Sight rail (thin slab on top of receiver)
-	var rail_y: float = effective_receiver_size.y * 0.5 + sight_rail_height * 0.5
-	_add_box("SightRail", Vector3(effective_receiver_size.x * 0.8, sight_rail_height, effective_receiver_size.z * 0.85), Vector3(0, rail_y, 0), darker_metal)
 
 	# Charging handle (bolt) — a horizontal knob sticking out perpendicular
 	# to the barrel from a slot on each side of the receiver, mirrored.
@@ -549,16 +557,38 @@ func _rebuild() -> void:
 	var receiver_front_z: float = -effective_receiver_size.z * 0.5
 	var barrel_centre_z: float = receiver_front_z - barrel_length * 0.5
 	var muzzle_centre_z: float = receiver_front_z - barrel_length - muzzle_length * 0.5
+
 	var muzzle_r: float = barrel_radius * muzzle_flare
-	for i in n_barrels:
-		var bx: float = (float(i) - float(n_barrels - 1) * 0.5) * barrel_pitch
-		_add_cylinder("Barrel%d" % i, barrel_radius, barrel_radius, barrel_length, Vector3(bx, 0, barrel_centre_z), _barrel_material)
-		if wide_muzzle:
-			# Havoc-style: a wide horizontal slab in place of the cone muzzle.
-			var slab_size := Vector3(barrel_radius * 4.5, barrel_radius * 1.6, muzzle_length)
-			_add_box("Muzzle%d" % i, slab_size, Vector3(bx, 0, muzzle_centre_z), _barrel_material)
-		else:
-			_add_cylinder("Muzzle%d" % i, muzzle_r, muzzle_r * 0.85, muzzle_length, Vector3(bx, 0, muzzle_centre_z), _barrel_material)
+	var bundle_radius: float = barrel_radius * 1.8
+	var min_receiver_w: float = (bundle_radius + barrel_radius) * 2.2 if is_minigun else barrel_span + barrel_radius * 3.0
+	var min_receiver_h: float = (bundle_radius + barrel_radius) * 2.2 if is_minigun else receiver_size.y
+	effective_receiver_size = Vector3(maxf(receiver_size.x, min_receiver_w), maxf(receiver_size.y, min_receiver_h), receiver_size.z)
+
+	# Sight rail repositioned after effective_receiver_size is final
+	var rail_y: float = effective_receiver_size.y * 0.5 + sight_rail_height * 0.5
+	_add_picatinny_rail(Vector3(0, rail_y, 0), Vector3(effective_receiver_size.x * 0.8, sight_rail_height, effective_receiver_size.z * 0.85), darker_metal)
+
+	if is_minigun:
+		_barrel_group = Node3D.new()
+		_barrel_group.name = "BarrelGroup"
+		add_child(_barrel_group)
+		_finalize_owner(_barrel_group)
+		for i in 6:
+			var angle: float = float(i) * PI * 2.0 / 6.0
+			var bx: float = cos(angle) * bundle_radius
+			var by: float = sin(angle) * bundle_radius
+			_add_cylinder("Barrel%d" % i, barrel_radius, barrel_radius, barrel_length, Vector3(bx, by, barrel_centre_z), _barrel_material, _barrel_group)
+			_add_cylinder("Muzzle%d" % i, muzzle_r, muzzle_r * 0.85, muzzle_length, Vector3(bx, by, muzzle_centre_z), _barrel_material, _barrel_group)
+	else:
+		_barrel_group = null
+		for i in n_barrels:
+			var bx: float = (float(i) - float(n_barrels - 1) * 0.5) * barrel_pitch
+			_add_cylinder("Barrel%d" % i, barrel_radius, barrel_radius, barrel_length, Vector3(bx, 0, barrel_centre_z), _barrel_material)
+			if wide_muzzle:
+				var slab_size := Vector3(barrel_radius * 4.5, barrel_radius * 1.6, muzzle_length)
+				_add_box("Muzzle%d" % i, slab_size, Vector3(bx, 0, muzzle_centre_z), _barrel_material)
+			else:
+				_add_cylinder("Muzzle%d" % i, muzzle_r, muzzle_r * 0.85, muzzle_length, Vector3(bx, 0, muzzle_centre_z), _barrel_material)
 
 	# Vented barrel shroud (explosive rounds only — see apply_weapon_stats).
 	# Wraps the rear portion of the barrel for a launcher silhouette.
@@ -651,7 +681,15 @@ func _rebuild() -> void:
 		var bell_len: float = 0.04
 		var scope_y: float = rail_y + sight_rail_height * 0.5 + 0.025
 		var scope_z: float = 0.0
-		_add_cylinder("ScopeTube", tube_r, tube_r, scope_length, Vector3(0, scope_y, scope_z), darker_metal)
+		
+		# Scope rings (mounts)
+		var ring_w: float = 0.02
+		var ring_h: float = scope_y - (rail_y + sight_rail_height * 0.5)
+		var ring_y: float = rail_y + sight_rail_height * 0.5 + ring_h * 0.5
+		var ring_offset_z: float = scope_length * 0.3
+		for rz in [-ring_offset_z, ring_offset_z]:
+			_add_box("ScopeRing", Vector3(tube_r * 2.2, ring_h, ring_w), Vector3(0, ring_y, rz), darker_metal)
+
 		_add_cylinder("ScopeFrontBell", bell_r, bell_r, bell_len, Vector3(0, scope_y, scope_z - scope_length * 0.5 - bell_len * 0.5), darker_metal)
 		_add_cylinder("ScopeBackBell", bell_r, bell_r, bell_len, Vector3(0, scope_y, scope_z + scope_length * 0.5 + bell_len * 0.5), darker_metal)
 		# Front lens — emissive disc inside the objective bell.
@@ -704,6 +742,34 @@ func _rebuild() -> void:
 # rails along its X edges, and N-1 inner ribs creating N slots between
 # them. The 4 sides are siblings under per-side Node3D parents that we
 # rotate around Z so each plate ends up on its own face of the box.
+# Picatinny-style mounting rail -- an array of rectangular teeth on a base slab.
+# Standard Picatinny is very specific, but we use a stylized version that
+# scales with the receiver.
+func _add_picatinny_rail(pos: Vector3, size: Vector3, mat: Material) -> void:
+	var rail_parent := Node3D.new()
+	rail_parent.name = "SightRail"
+	rail_parent.position = pos
+	add_child(rail_parent)
+	_finalize_owner(rail_parent)
+
+	# Base rail (continuous lower part)
+	var base_h: float = size.y * 0.5
+	_add_box("Base", Vector3(size.x, base_h, size.z), Vector3(0, -size.y * 0.5 + base_h * 0.5, 0), mat, rail_parent)
+
+	# Mounting teeth
+	var tooth_z: float = 0.012  # approx 12mm thick teeth
+	var tooth_gap: float = 0.01 # approx 10mm gaps
+	var period: float = tooth_z + tooth_gap
+	var num_teeth: int = max(1, int(size.z / period))
+	
+	# Center the teeth along the length of the rail
+	var start_z: float = -((num_teeth - 1) * period) * 0.5
+	
+	for i in num_teeth:
+		var tz: float = start_z + i * period
+		# Teeth are slightly wider than the base for that Picatinny look
+		_add_box("Tooth%d" % i, Vector3(size.x * 1.2, base_h, tooth_z), Vector3(0, size.y * 0.5 - base_h * 0.5, tz), mat, rail_parent)
+
 func _add_barrel_shroud(centre_z: float, length: float, half_extent: float, slot_count: int, mat: Material) -> void:
 	if length <= 0.0 or half_extent <= 0.0 or slot_count <= 0:
 		return
@@ -765,7 +831,7 @@ func _add_box(part_name: String, size: Vector3, pos: Vector3, mat: Material, par
 	_finalize_owner(mi)
 	return mi
 
-func _add_cylinder(part_name: String, top_r: float, bottom_r: float, height: float, pos: Vector3, mat: Material) -> MeshInstance3D:
+func _add_cylinder(part_name: String, top_r: float, bottom_r: float, height: float, pos: Vector3, mat: Material, parent: Node3D = null) -> MeshInstance3D:
 	var mi := MeshInstance3D.new()
 	mi.name = part_name
 	var cm := CylinderMesh.new()
@@ -778,11 +844,12 @@ func _add_cylinder(part_name: String, top_r: float, bottom_r: float, height: flo
 	mi.position = pos
 	# Cylinder height is along local Y. Rotate 90° around X so it lies along Z.
 	mi.rotation = Vector3(PI * 0.5, 0, 0)
-	add_child(mi)
+	var p: Node3D = parent if parent != null else self
+	p.add_child(mi)
 	_finalize_owner(mi)
 	return mi
 
-func _add_torus(part_name: String, outer_r: float, ring_r: float, pos: Vector3, mat: Material) -> MeshInstance3D:
+func _add_torus(part_name: String, outer_r: float, ring_r: float, pos: Vector3, mat: Material, parent: Node3D = null) -> MeshInstance3D:
 	var mi := MeshInstance3D.new()
 	mi.name = part_name
 	var tm := TorusMesh.new()
@@ -796,7 +863,8 @@ func _add_torus(part_name: String, outer_r: float, ring_r: float, pos: Vector3, 
 	# Torus default sits in XZ plane (axis = Y). Rotate 90° around X so the
 	# hole faces forward along Z.
 	mi.rotation = Vector3(PI * 0.5, 0, 0)
-	add_child(mi)
+	var p: Node3D = parent if parent != null else self
+	p.add_child(mi)
 	_finalize_owner(mi)
 	return mi
 
