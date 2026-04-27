@@ -951,7 +951,7 @@ static func spawn_impact(scene: Node, pos: Vector3, color: Color = Color(1.0, 0.
 	# Heavier guns leave a bigger crater of dust + a brighter spark, and once
 	# damage is very high we add a second "heat flash" — as if the slug is
 	# hot enough to burn the ground it lands in.
-	var sz: float = scale_f * sqrt(dmg_ratio)
+	var sz: float = scale_f * dmg_ratio
 	var spark_boost: float = lerpf(1.0, 2.5, clampf((dmg_ratio - 1.0) / 4.0, 0.0, 1.0))
 
 	# Persistent dark crater on the surface — always spawned, size scales with
@@ -993,7 +993,7 @@ static func spawn_impact(scene: Node, pos: Vector3, color: Color = Color(1.0, 0.
 		htw.tween_callback(heat.queue_free)
 
 	# A handful of dust particles scattering outward and falling.
-	var dust_count: int = min(vfx_max_impact_dust, int(round(5.0 * sqrt(dmg_ratio))))
+	var dust_count: int = int(clampf(3.0 * dmg_ratio, 2.0, 15.0))
 	for i in dust_count:
 		var dust := MeshInstance3D.new()
 		var m := SphereMesh.new()
@@ -1128,9 +1128,9 @@ static func spawn_crater(scene: Node, pos: Vector3, normal: Vector3, dmg_ratio: 
 		return
 	_ensure_crater_textures()
 	var dmg: float = clampf(dmg_ratio, 0.5, 6.0)
-	# Crater size: 9 cm at base damage → ~38 cm at 5× damage. sqrt curve so
-	# small upgrades feel meaningful without big rounds becoming wall-sized.
-	var size: float = clampf(0.09 + sqrt(maxf(dmg - 0.5, 0.0)) * 0.15, 0.07, 0.55) * sqrt(maxf(scale_f, 0.5))
+	# Crater size: scales linearly from ~10cm to ~80cm based on damage ratio.
+	# This makes it much more obvious when a heavy round hits compared to a pistol.
+	var size: float = (0.08 + 0.14 * dmg) * scale_f
 
 	var splat := MeshInstance3D.new()
 	splat.add_to_group("craters")
@@ -1151,11 +1151,11 @@ static func spawn_crater(scene: Node, pos: Vector3, normal: Vector3, dmg_ratio: 
 	var bitan: Vector3 = n.cross(right).normalized()
 	# Columns are local X, Y, Z axes in world space. With Y = surface normal,
 	# the PlaneMesh's XZ plane sits flush on the wall. Right-handed basis.
+	# Uniform scale + pre-rotation avoids stretching even if the wall or
+	# root node is non-uniformly scaled.
 	var b := Basis(right, n, bitan)
+	b = b.rotated(n, randf_range(-PI, PI)).scaled(Vector3.ONE * size)
 	splat.global_transform = Transform3D(b, pos + n * 0.012)
-	# Spin around the surface normal so consecutive craters don't all share
-	# the same texture orientation.
-	splat.rotate_object_local(Vector3.UP, randf_range(-PI, PI))
 
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -1187,9 +1187,9 @@ static func spawn_crater(scene: Node, pos: Vector3, normal: Vector3, dmg_ratio: 
 
 		var warm_node := MeshInstance3D.new()
 		warm_node.mesh = _get_crater_mesh()
-		warm_node.scale = Vector3(size, 1, size)
-		warm_node.global_transform = Transform3D(b, pos + n * 0.016)
-		warm_node.rotate_object_local(Vector3.UP, randf_range(-PI, PI))
+		# Use a unique random rotation but same uniform scale for the hot layers
+		var warm_b := b.rotated(n, randf_range(-PI, PI))
+		warm_node.global_transform = Transform3D(warm_b, pos + n * 0.016)
 		var warm_mat := StandardMaterial3D.new()
 		warm_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		warm_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
@@ -1207,9 +1207,9 @@ static func spawn_crater(scene: Node, pos: Vector3, normal: Vector3, dmg_ratio: 
 
 		var glow_node := MeshInstance3D.new()
 		glow_node.mesh = _get_crater_mesh()
-		glow_node.scale = Vector3(size * 0.125, 1, size * 0.125)
-		glow_node.global_transform = Transform3D(b, pos + n * 0.020)
-		glow_node.rotate_object_local(Vector3.UP, randf_range(-PI, PI))
+		# Tiny center spot: 12.5% of the base crater size.
+		var glow_b := b.rotated(n, randf_range(-PI, PI)).scaled(Vector3.ONE * 0.125)
+		glow_node.global_transform = Transform3D(glow_b, pos + n * 0.020)
 		var glow_mat := StandardMaterial3D.new()
 		glow_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		glow_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
@@ -1278,16 +1278,15 @@ static func spawn_blast_crater(scene: Node, pos: Vector3, normal: Vector3, blast
 
 	# Re-use shared mesh.
 	splat.mesh = _get_crater_mesh()
-	splat.scale = Vector3(size, 1, size)
 
 	var n: Vector3 = normal.normalized() if normal.length_squared() > 0.001 else Vector3.UP
 	var helper: Vector3 = Vector3.UP if absf(n.dot(Vector3.UP)) < 0.99 else Vector3.RIGHT
 	var right: Vector3 = helper.cross(n).normalized()
 	var bitan: Vector3 = n.cross(right).normalized()
-	var b := Basis(right, n, bitan)
+	# Apply uniform scale + pre-rotation directly to basis.
+	var b := Basis(right, n, bitan).rotated(n, randf_range(-PI, PI)).scaled(Vector3.ONE * size)
 	# Sit slightly further off the surface than the central crater.
 	splat.global_transform = Transform3D(b, pos + n * 0.008)
-	splat.rotate_object_local(Vector3.UP, randf_range(-PI, PI))
 
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
