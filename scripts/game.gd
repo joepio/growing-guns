@@ -1455,12 +1455,23 @@ func _set_gameplay_hud_visible(visible_: bool) -> void:
 		_custom_crosshair.visible = visible_
 
 @rpc("authority", "call_local", "reliable")
-func _announce(text: String, duration: float) -> void:
+func _announce(text: String, duration: float, font_size: int = -1) -> void:
+	if text == "" or duration <= 0:
+		round_banner.visible = false
+		banner_timer.stop()
+		return
+
 	round_banner.text = text
 	round_banner.visible = true
+
+	if font_size > 0:
+		round_banner.add_theme_font_size_override("font_size", font_size)
+	else:
+		round_banner.remove_theme_font_size_override("font_size")
+
 	banner_timer.stop()
 	if duration < 90.0:
-		banner_timer.wait_time = duration
+		banner_timer.wait_time = maxf(0.01, duration)
 		banner_timer.start()
 
 @rpc("authority", "call_local", "reliable")
@@ -1519,7 +1530,6 @@ func _show_rematch_overlay(_winner_id: int) -> void:
 	if _rematch_overlay == null:
 		_build_rematch_overlay()
 	_rematch_requested = false
-	_rematch_subtitle.text = "another 5 rounds, or back to the menu"
 	_extend_button.disabled = false
 	_extend_button.text = "5 MORE ROUNDS"
 	_rematch_overlay.visible = true
