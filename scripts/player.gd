@@ -2243,9 +2243,9 @@ func _update_gun_visuals() -> void:
 	if _procedural_gun and _procedural_gun.has_method("apply_weapon_stats"):
 		_procedural_gun.apply_weapon_stats(weapon)
 		# Long barrels = pull the gun back against the shoulder (positive Z is
-		# behind the camera). 0.5 m barrel = no offset; 1.4 m = 0.45 m back.
+		# behind the camera). 0.5 m barrel = no offset; 1.4 m = 0.3 m back.
 		var bl: float = float(_procedural_gun.get("barrel_length"))
-		var pull: float = clampf((bl - 0.5) * 0.5, 0.0, 0.45)
+		var pull: float = clampf((bl - 0.5) * 0.3, 0.0, 0.3)
 		_gun_pull_back = Vector3(0.0, 0.0, pull)
 
 	# Blade — under the gun, grows with melee damage × reach. BIG SWORD makes

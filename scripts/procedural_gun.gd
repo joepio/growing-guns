@@ -440,7 +440,9 @@ func apply_weapon_stats(w: Weapon) -> void:
 	# beefier barrel; the muzzle flare scales with it automatically.
 	var dmg_factor: float = clampf((w.damage_mult - 1.0) / 4.0, 0.0, 1.0)
 	var dmg_barrel_scale: float = lerpf(1.0, 1.7, dmg_factor)
-	barrel_radius = clampf(0.022 * w.bullet_scale * dmg_barrel_scale, 0.012, 0.10)
+	# Use max(w.bullet_scale, 1.0) so high-precision rounds (which often reduce
+	# bullet_scale for gameplay balance) don't make the barrel look like a needle.
+	barrel_radius = clampf(0.022 * maxf(w.bullet_scale, 1.0) * dmg_barrel_scale, 0.012, 0.10)
 	barrel_count = w.get_shots_per_trigger()
 
 	# Receiver grows with damage — heavy rounds need a deeper, taller chamber.
@@ -513,11 +515,12 @@ func _rebuild() -> void:
 	var muzzle_r: float = barrel_radius * muzzle_flare
 	var bundle_radius: float = barrel_radius * 1.8
 	
-	# We calculate the final "effective" size once, ensuring it's large enough 
-	# to wrap all barrels (linear or minigun bundle) before spawning the mesh.
+	# We calculate the final "effective" size once. The receiver widens to wrap 
+	# multiple barrels (X-axis), but we keep the height (Y-axis) dependent 
+	# only on the receiver's base stats so the sights don't move up with 
+	# barrel thickness.
 	var min_receiver_w: float = (bundle_radius + barrel_radius) * 2.2 if is_minigun else barrel_span + barrel_radius * 3.0
-	var min_receiver_h: float = (bundle_radius + barrel_radius) * 2.2 if is_minigun else receiver_size.y
-	var effective_receiver_size := Vector3(maxf(receiver_size.x, min_receiver_w), maxf(receiver_size.y, min_receiver_h), receiver_size.z)
+	var effective_receiver_size := Vector3(maxf(receiver_size.x, min_receiver_w), receiver_size.y, receiver_size.z)
 
 	# Receiver body
 	_add_box("Receiver", effective_receiver_size, Vector3.ZERO, metal)
@@ -566,9 +569,9 @@ func _rebuild() -> void:
 	var muzzle_centre_z: float = receiver_front_z - barrel_length - muzzle_length * 0.5
 
 	# Sight rail repositioned after effective_receiver_size is final.
-	# We use the original receiver_size.y for rail height so bazooka barrels
-	# don't push the optics into the ceiling. Capped at 4cm wide.
-	var rail_y: float = receiver_size.y * 0.5 + sight_rail_height * 0.5
+	# It sits exactly on top of the receiver (half-height + half-rail-height).
+	# Capped at 4cm wide.
+	var rail_y: float = effective_receiver_size.y * 0.5 + sight_rail_height * 0.5
 	var rail_w: float = minf(effective_receiver_size.x * 0.8, 0.04)
 	_add_picatinny_rail(Vector3(0, rail_y, 0), Vector3(rail_w, sight_rail_height, effective_receiver_size.z * 0.85), darker_metal)
 
@@ -694,6 +697,7 @@ func _rebuild() -> void:
 		for rz in [-ring_offset_z, ring_offset_z]:
 			_add_box("ScopeRing", Vector3(tube_r * 2.2, ring_h, ring_w), Vector3(0, ring_y, rz), darker_metal)
 
+		_add_cylinder("ScopeTube", tube_r, tube_r, scope_length, Vector3(0, scope_y, scope_z), darker_metal)
 		_add_cylinder("ScopeFrontBell", bell_r, bell_r, bell_len, Vector3(0, scope_y, scope_z - scope_length * 0.5 - bell_len * 0.5), darker_metal)
 		_add_cylinder("ScopeBackBell", bell_r, bell_r, bell_len, Vector3(0, scope_y, scope_z + scope_length * 0.5 + bell_len * 0.5), darker_metal)
 		# Front lens — emissive disc inside the objective bell.
