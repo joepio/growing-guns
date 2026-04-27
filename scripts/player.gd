@@ -1340,8 +1340,8 @@ func confirm_kill() -> void:
 	if g and g.has_method("show_hitmarker"):
 		g.show_hitmarker("kill")
 
-func _spawn_impact(pos: Vector3, color: Color = Color(1.0, 0.9, 0.3), scale_f: float = 1.0, dmg_ratio: float = 1.0, normal: Vector3 = Vector3.UP) -> void:
-	Violence.spawn_impact(get_tree().current_scene, pos, color, scale_f, dmg_ratio, VFX_MAX_IMPACT_DUST, normal)
+func _spawn_impact(pos: Vector3, color: Color = Color(1.0, 0.9, 0.3), scale_f: float = 1.0, dmg_ratio: float = 1.0, normal: Vector3 = Vector3.UP, explosive_radius: float = 0.0) -> void:
+	Violence.spawn_impact(get_tree().current_scene, pos, color, scale_f, dmg_ratio, VFX_MAX_IMPACT_DUST, normal, explosive_radius)
 
 func _spawn_blood(pos: Vector3, dir: Vector3, dmg_ratio: float) -> void:
 	Violence.spawn_blood(get_tree().current_scene, pos, dir, dmg_ratio, VFX_MAX_BLOOD_DROPS)
@@ -2068,6 +2068,8 @@ func server_respawn(pos: Vector3) -> void:
 	_slow_mult = 1.0
 	_next_shot_damage_mult = 1.0
 	_next_shot_speed_mult = 1.0
+	if _procedural_gun and _procedural_gun.has_method("reset_heat"):
+		_procedural_gun.reset_heat()
 	rifle_cooldown = 0.0
 	grenade_cooldown = 0.0
 	melee_cooldown = 0.0
@@ -2206,6 +2208,8 @@ func reset_weapon() -> void:
 	_slow_mult = 1.0
 	_next_shot_damage_mult = 1.0
 	_next_shot_speed_mult = 1.0
+	if _procedural_gun and _procedural_gun.has_method("reset_heat"):
+		_procedural_gun.reset_heat()
 	_update_gun_visuals()
 	_update_body_scale()
 

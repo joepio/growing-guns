@@ -9,7 +9,7 @@ const SHAKE_RADIUS := 22.0
 const SHAKE_STRENGTH := 0.16     # max camera-shake amplitude (m) at the epicenter
 const VFX_TRANSIENT_LIGHTS := false
 const MINE_TRIGGER_RADIUS := 1.25
-const MINE_LIFETIME := 10.0        # mines self-detonate if nobody wanders in
+const MINE_LIFETIME := 10.0        # mines quietly expire if nobody wanders in
 const SPEED_OF_SOUND := 343.0      # m/s — same constant as audio + visuals use
 
 @export var shooter_id: int = 1
@@ -34,7 +34,7 @@ func _physics_process(delta: float) -> void:
 		return
 	if is_mine:
 		if _age >= MINE_LIFETIME:
-			_explode()
+			_disarm()
 		else:
 			_maybe_trigger_mine()
 	elif _age >= FUSE:
@@ -66,7 +66,20 @@ func _maybe_trigger_mine() -> void:
 func detonate() -> void:
 	if _exploded or not multiplayer.is_server():
 		return
+	if is_mine:
+		_disarm()
+		return
 	_explode()
+
+func _disarm() -> void:
+	if _exploded:
+		return
+	_exploded = true
+	_remove_quietly.rpc()
+
+@rpc("authority", "call_local", "reliable")
+func _remove_quietly() -> void:
+	queue_free()
 
 func _explode() -> void:
 	_exploded = true
@@ -155,6 +168,9 @@ func _do_vfx() -> void:
 		scene.trigger_explosion_sidechain(pos, RADIUS, 1.25)
 	_spawn_heat_distortion(scene, pos, RADIUS, 0.3, 0.055)
 	_spawn_shockwave_ring(scene, pos, RADIUS)
+	# Surface scorch rings — same helper as explosive bullets, raycasts in
+	# the 6 cardinal directions and drops a soot crater on each surface hit.
+	Violence.spawn_blast_scorches(scene, pos, RADIUS)
 
 	# --- Bright white-hot core flash (very short)
 	var core := MeshInstance3D.new()

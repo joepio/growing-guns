@@ -685,6 +685,9 @@ static func spawn_bullet_blast(scene: Node, pos: Vector3, radius: float, color: 
 	var expand_time: float = clampf(0.1 + radius * 0.012, 0.12, 0.24)
 	spawn_heat_distortion(scene, pos, radius, expand_time, clampf(radius * 0.012, 0.025, 0.06))
 	spawn_shockwave_ring(scene, pos, radius)
+	# Drop scorch rings on every nearby surface (floor under midair blasts,
+	# walls beside corner blasts, ceiling above ground-level pops).
+	spawn_blast_scorches(scene, pos, radius)
 
 	# 1) Fireball volume. Grow linearly to the effective radius while the
 	# emitted light drops fast; opacity ramps up as the blast front arrives.
@@ -942,7 +945,7 @@ static func spawn_shockwave_ring(scene: Node, pos: Vector3, radius: float) -> vo
 
 # `vfx_max_*`: caller passes the budget caps so the global VFX flag stays
 # in player.gd (along with all other dev toggles).
-static func spawn_impact(scene: Node, pos: Vector3, color: Color = Color(1.0, 0.9, 0.3), scale_f: float = 1.0, dmg_ratio: float = 1.0, vfx_max_impact_dust: int = 5, normal: Vector3 = Vector3.UP) -> void:
+static func spawn_impact(scene: Node, pos: Vector3, color: Color = Color(1.0, 0.9, 0.3), scale_f: float = 1.0, dmg_ratio: float = 1.0, vfx_max_impact_dust: int = 5, normal: Vector3 = Vector3.UP, explosive_radius: float = 0.0) -> void:
 	if scene == null:
 		return
 	# Heavier guns leave a bigger crater of dust + a brighter spark, and once
@@ -956,6 +959,11 @@ static func spawn_impact(scene: Node, pos: Vector3, color: Color = Color(1.0, 0.
 	# heavy rounds add a brief bright blink on top of the existing spark light
 	# below. Round-reset clears the "craters" group.
 	spawn_crater(scene, pos, normal, dmg_ratio, scale_f)
+	# Explosive rounds leave a larger soot ring AROUND the central crater —
+	# the wider blast scorch. Sized off the actual explosive_radius rather
+	# than damage so HEAVY-ROUNDS doesn't accidentally produce a giant ring.
+	if explosive_radius > 0.0:
+		spawn_blast_crater(scene, pos, normal, explosive_radius)
 
 	# Heavy hits flash a brief colored point light at the impact. Pistol-base
 	# shots stay dark so the GPU doesn't burn cycles on every plink.
@@ -1018,15 +1026,64 @@ static func spawn_impact(scene: Node, pos: Vector3, color: Color = Color(1.0, 0.
 # emission "red-hot" phase that fades to black over a few seconds. Lifetime
 # ~25 s — and round-reset clears the "craters" group anyway.
 const CRATER_LIFETIME := 25.0
-const CRATER_RED_HOT_DMG := 3.0
+# Lowered from 3.0 so common high-damage builds (HEAVY_ROUNDS at 2.0, or
+# DAMAGE×2 at 2.25) actually trigger the molten glow — not just SNIPER alone.
+const CRATER_RED_HOT_DMG := 2.0
 const CRATER_BLINK_DMG := 2.0
 const CRATER_TEXTURE_VARIANTS := 5
+
+# Perf caps for full-auto spam — UZIs / shotguns can produce hundreds of
+# impacts per second. Without these, transparent quads + tween updates
+# accumulate into a noticeable cost.
+const MAX_CRATERS := 80                 # FIFO across the whole scene
+const MAX_HOT_EXTRAS := 12              # concurrent warm + glow + OmniLight sets
+const MAX_BLAST_CRATERS := 40           # outer rings from explosive impacts
+const MAX_CRATERS_PER_FRAME := 6        # cap allocations per tick
 
 # Cached procedural cloud-noise alpha textures. Built lazily on the first
 # crater spawn so we don't pay the cost when no shots are fired. Each
 # crater's QuadMesh tints the texture's white pixels with the dark scorch
 # colour (and emission for red-hot craters).
 static var _crater_textures: Array[Texture2D] = []
+# Single shared PlaneMesh — every crater scales its instance via the basis
+# instead of allocating a new mesh resource per shot.
+static var _shared_crater_mesh: PlaneMesh = null
+# FIFO of live crater nodes — when full, the oldest is freed to make room.
+static var _crater_fifo: Array[Node] = []
+# Live counts updated via tree_exiting signals so we never over-spawn the
+# expensive extras (warm-glow, hot-spot, OmniLight) or blast scorches.
+static var _hot_extras_active: int = 0
+static var _blast_craters_active: int = 0
+# Per-frame allocation budget — caps spawn rate from a UZI burst.
+static var _crater_frame_id: int = -1
+static var _craters_this_frame: int = 0
+
+static func _get_crater_mesh() -> PlaneMesh:
+	if _shared_crater_mesh == null:
+		_shared_crater_mesh = PlaneMesh.new()
+		_shared_crater_mesh.size = Vector2.ONE
+	return _shared_crater_mesh
+
+static func _can_spawn_crater_this_frame() -> bool:
+	var f := Engine.get_process_frames()
+	if f != _crater_frame_id:
+		_crater_frame_id = f
+		_craters_this_frame = 0
+	if _craters_this_frame >= MAX_CRATERS_PER_FRAME:
+		return false
+	_craters_this_frame += 1
+	return true
+
+# Push a crater into the FIFO. If the queue is over MAX_CRATERS, drop the
+# oldest entry. Cheap — single linear pop from the front + O(1) append.
+static func _enroll_crater(node: Node) -> void:
+	while _crater_fifo.size() > 0 and not is_instance_valid(_crater_fifo[0]):
+		_crater_fifo.pop_front()
+	_crater_fifo.append(node)
+	while _crater_fifo.size() > MAX_CRATERS:
+		var old: Node = _crater_fifo.pop_front()
+		if is_instance_valid(old):
+			old.queue_free()
 
 static func _ensure_crater_textures() -> void:
 	if not _crater_textures.is_empty():
@@ -1067,7 +1124,7 @@ static func _generate_crater_texture(rng: RandomNumberGenerator) -> Texture2D:
 	return ImageTexture.create_from_image(img)
 
 static func spawn_crater(scene: Node, pos: Vector3, normal: Vector3, dmg_ratio: float, scale_f: float = 1.0) -> void:
-	if scene == null:
+	if scene == null or not _can_spawn_crater_this_frame():
 		return
 	_ensure_crater_textures()
 	var dmg: float = clampf(dmg_ratio, 0.5, 6.0)
@@ -1077,12 +1134,14 @@ static func spawn_crater(scene: Node, pos: Vector3, normal: Vector3, dmg_ratio: 
 
 	var splat := MeshInstance3D.new()
 	splat.add_to_group("craters")
+	_enroll_crater(splat)
+
 	# PlaneMesh lies on the local XZ plane with its normal facing +Y, which
-	# matches our world surface normal naturally — the quad simply orients
-	# its +Y to the wall normal and we don't depend on look_at's behaviour.
-	var mesh := PlaneMesh.new()
-	mesh.size = Vector2(size, size)
-	splat.mesh = mesh
+	# matches our world surface normal naturally. Every crater scales its
+	# instance via the basis instead of allocating a new mesh resource.
+	splat.mesh = _get_crater_mesh()
+	splat.scale = Vector3(size, 1, size)
+
 	# Build the basis manually so the orientation is identical across every
 	# wall (look_at picks different up-vectors for axis-aligned normals,
 	# producing visibly inconsistent rotations — that's what was wrong).
@@ -1111,22 +1170,79 @@ static func spawn_crater(scene: Node, pos: Vector3, normal: Vector3, dmg_ratio: 
 	scene.add_child(splat)
 
 	var hot: bool = dmg >= CRATER_RED_HOT_DMG
-	if hot:
-		# Glowing red-hot pit cooling to black over ~2.4 s. Damage above the
-		# threshold scales the initial emission energy.
+	if hot and _hot_extras_active < MAX_HOT_EXTRAS:
+		_hot_extras_active += 1
+		# Container for the glow layers + light so we can track the count
+		# with a single signal and free them all together.
+		var extras := Node3D.new()
+		extras.tree_exiting.connect(func(): _hot_extras_active -= 1)
+		scene.add_child(extras)
+
 		var hot_amount: float = clampf((dmg - CRATER_RED_HOT_DMG) / 3.0, 0.0, 1.0)
-		mat.emission_enabled = true
-		mat.emission = Color(1.0, 0.45, 0.10)
-		mat.emission_energy_multiplier = lerpf(3.0, 9.0, hot_amount)
-		var hot_tw := splat.create_tween().set_parallel(true)
-		hot_tw.tween_property(mat, "emission_energy_multiplier", 0.0, 2.4)\
-			.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
-		hot_tw.tween_property(mat, "emission", Color(0.6, 0.06, 0.0), 1.2)\
-			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+
+		# Two glow layers stacked on the dark scorch:
+		#  • a soft FULL-SIZE additive quad that tints the whole crater area warm;
+		#  • a tiny BRIGHT additive quad in the centre as the molten spot.
+		# Both fade together over ~6 s like cooling metal.
+
+		var warm_node := MeshInstance3D.new()
+		warm_node.mesh = _get_crater_mesh()
+		warm_node.scale = Vector3(size, 1, size)
+		warm_node.global_transform = Transform3D(b, pos + n * 0.016)
+		warm_node.rotate_object_local(Vector3.UP, randf_range(-PI, PI))
+		var warm_mat := StandardMaterial3D.new()
+		warm_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		warm_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		warm_mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+		warm_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		warm_mat.albedo_texture = _crater_textures[randi() % _crater_textures.size()]
+		# Soft red — dimmer than the bright spot below; alpha tied to dmg.
+		warm_mat.albedo_color = Color(0.85, 0.18, 0.04, lerpf(0.35, 0.65, hot_amount))
+		warm_node.material_override = warm_mat
+		extras.add_child(warm_node)
+
+		var warm_tw := warm_node.create_tween()
+		warm_tw.tween_property(warm_mat, "albedo_color", Color(0.4, 0.04, 0.0, 0.0), 6.0)\
+			.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+
+		var glow_node := MeshInstance3D.new()
+		glow_node.mesh = _get_crater_mesh()
+		glow_node.scale = Vector3(size * 0.125, 1, size * 0.125)
+		glow_node.global_transform = Transform3D(b, pos + n * 0.020)
+		glow_node.rotate_object_local(Vector3.UP, randf_range(-PI, PI))
+		var glow_mat := StandardMaterial3D.new()
+		glow_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		glow_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		glow_mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+		glow_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		glow_mat.albedo_texture = _crater_textures[randi() % _crater_textures.size()]
+		glow_mat.albedo_color = Color(1.0, 0.45, 0.10, lerpf(0.6, 1.0, hot_amount))
+		glow_node.material_override = glow_mat
+		extras.add_child(glow_node)
+
+		var hot_tw := glow_node.create_tween()
+		hot_tw.tween_property(glow_mat, "albedo_color", Color(0.55, 0.05, 0.0, 0.0), 6.0)\
+			.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+
+		# Real point light so the molten spot actually illuminates surrounding geometry.
+		var glow := OmniLight3D.new()
+		glow.light_color = Color(1.0, 0.5, 0.18)
+		glow.light_energy = lerpf(0.8, 2.0, hot_amount)
+		glow.omni_range = lerpf(0.7, 1.4, hot_amount) * sqrt(maxf(scale_f, 0.5))
+		glow.position = pos + n * 0.05
+		extras.add_child(glow)
+
+		var glow_tw := glow.create_tween()
+		glow_tw.tween_property(glow, "light_energy", 0.0, 5.5)\
+			.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+
+		# Kill the whole "hot" set after the longest fade (6 s) finishes.
+		var master_tw := extras.create_tween()
+		master_tw.tween_interval(6.1)
+		master_tw.tween_callback(extras.queue_free)
 
 	# Bright camera-flash blink for high-damage rounds — shorter and brighter
-	# than the existing spark light below, reads as the kinetic flash of a
-	# heavy round impacting hard. Stacks with the heat light at dmg > 2.2.
+	# than the heat light, reads as the kinetic flash of impact.
 	if dmg >= CRATER_BLINK_DMG:
 		var blink := OmniLight3D.new()
 		blink.light_color = Color(1.0, 0.95, 0.85)
@@ -1146,15 +1262,78 @@ static func spawn_crater(scene: Node, pos: Vector3, normal: Vector3, dmg_ratio: 
 	fade_tw.tween_property(mat, "albedo_color", Color(darkness, darkness, darkness, 0.0), CRATER_LIFETIME * 0.4)
 	fade_tw.tween_callback(splat.queue_free)
 
-# Wipe all persistent craters — call from round-start cleanup so the new
-# arena starts clean (or before swapping arenas, since craters are still
-# parented to the old scene by then).
+# Outer scorch ring left by an explosive bullet — diameter scales with the
+# blast radius, opacity is lower.
+static func spawn_blast_crater(scene: Node, pos: Vector3, normal: Vector3, blast_radius: float) -> void:
+	if scene == null or blast_radius <= 0.0 or _blast_craters_active >= MAX_BLAST_CRATERS:
+		return
+	_blast_craters_active += 1
+	_ensure_crater_textures()
+	# Surface scorch is much narrower than the air blast.
+	var size: float = clampf(blast_radius * 0.45, 0.6, 3.5)
+
+	var splat := MeshInstance3D.new()
+	splat.add_to_group("craters")
+	splat.tree_exiting.connect(func(): _blast_craters_active -= 1)
+
+	# Re-use shared mesh.
+	splat.mesh = _get_crater_mesh()
+	splat.scale = Vector3(size, 1, size)
+
+	var n: Vector3 = normal.normalized() if normal.length_squared() > 0.001 else Vector3.UP
+	var helper: Vector3 = Vector3.UP if absf(n.dot(Vector3.UP)) < 0.99 else Vector3.RIGHT
+	var right: Vector3 = helper.cross(n).normalized()
+	var bitan: Vector3 = n.cross(right).normalized()
+	var b := Basis(right, n, bitan)
+	# Sit slightly further off the surface than the central crater.
+	splat.global_transform = Transform3D(b, pos + n * 0.008)
+	splat.rotate_object_local(Vector3.UP, randf_range(-PI, PI))
+
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mat.albedo_texture = _crater_textures[randi() % _crater_textures.size()]
+	# Lighter / greyer than the central crater — surface soot, not a hole.
+	var darkness: float = randf_range(0.10, 0.16)
+	mat.albedo_color = Color(darkness, darkness, darkness, 0.55)
+	splat.material_override = mat
+	scene.add_child(splat)
+
+	var fade_tw := splat.create_tween()
+	fade_tw.tween_interval(CRATER_LIFETIME * 0.6)
+	fade_tw.tween_property(mat, "albedo_color", Color(darkness, darkness, darkness, 0.0), CRATER_LIFETIME * 0.4)
+	fade_tw.tween_callback(splat.queue_free)
+
+# Cast cardinal-direction rays from an explosion center and drop a blast
+# scorch on every surface within `radius`.
+static func spawn_blast_scorches(scene: Node, pos: Vector3, radius: float) -> void:
+	if scene == null or radius <= 0.0:
+		return
+	var space: PhysicsDirectSpaceState3D = scene.get_world_3d().direct_space_state
+	if space == null:
+		return
+	const DIRS: Array[Vector3] = [
+		Vector3.DOWN, Vector3.UP,
+		Vector3.RIGHT, Vector3.LEFT,
+		Vector3.FORWARD, Vector3.BACK,
+	]
+	for dir in DIRS:
+		var q := PhysicsRayQueryParameters3D.create(pos, pos + dir * radius)
+		q.collision_mask = 1  # world only
+		var hit := space.intersect_ray(q)
+		if hit.is_empty():
+			continue
+		spawn_blast_crater(scene, hit.position, hit.normal, radius)
+
+# Wipe all persistent craters — call from round-start cleanup.
 static func clear_craters(scene_root: Node) -> void:
 	if scene_root == null:
 		return
 	for n in scene_root.get_tree().get_nodes_in_group("craters"):
 		if is_instance_valid(n):
 			n.queue_free()
+	_crater_fifo.clear()
 
 static func spawn_blood(scene: Node, pos: Vector3, dir: Vector3, dmg_ratio: float, vfx_max_blood_drops: int = 8) -> void:
 	if scene == null:
