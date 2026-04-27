@@ -140,6 +140,65 @@ const PALETTES: Array = [
 ]
 const COLOR_SPAWN := Color(1.00, 0.40, 0.18)
 
+const LAVA_SHADER_CODE := """
+shader_type spatial;
+render_mode unshaded, cull_disabled;
+
+varying vec3 v_world_pos;
+
+float hash(vec2 p) {
+	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+float vnoise(vec2 p) {
+	vec2 i = floor(p);
+	vec2 f = fract(p);
+	f = f * f * (3.0 - 2.0 * f);
+	return mix(
+		mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x),
+		mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x),
+		f.y
+	);
+}
+
+float fbm(vec2 p) {
+	float v = 0.0;
+	float a = 0.5;
+	for (int i = 0; i < 5; i++) {
+		v += a * vnoise(p);
+		p *= 2.05;
+		a *= 0.5;
+	}
+	return v;
+}
+
+void vertex() {
+	// Hand the world position to fragment so noise can be sampled in world
+	// space — features stay the same physical size regardless of how big
+	// the plane is.
+	v_world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+}
+
+void fragment() {
+	// 1 noise unit ≈ 25m on the ground, no matter how big the plane.
+	vec2 uv = v_world_pos.xz * 0.04;
+	float t = TIME * 0.18;
+	float n1 = fbm(uv + vec2(t, t * 0.55));
+	float n2 = fbm(uv * 1.7 + vec2(-t * 0.7, t * 0.85));
+	float heat = (n1 + n2) * 0.5;
+
+	vec3 crust = vec3(0.32, 0.04, 0.02);
+	vec3 hot = vec3(1.55, 0.45, 0.08);
+	vec3 white_hot = vec3(2.80, 1.45, 0.30);
+
+	vec3 col = mix(crust, hot, smoothstep(0.30, 0.68, heat));
+	col = mix(col, white_hot, smoothstep(0.78, 0.95, heat));
+
+	ALBEDO = col * 0.5;
+	EMISSION = col * 1.8;
+}
+"""
+
 var _mat_floor: StandardMaterial3D
 var _mat_wall: StandardMaterial3D
 var _mat_building: StandardMaterial3D
@@ -195,6 +254,7 @@ func regenerate() -> void:
 
 	_build_floor()
 	_build_walls()
+	_build_lava_pool()
 
 	# Reserve the perimeter band so nothing tries to clip into a wall.
 	var perim_radius: float = arena_size * 0.5 - 1.5
@@ -550,6 +610,76 @@ func _add_static_box(pos: Vector3, size: Vector3, mat: StandardMaterial3D, rotat
 
 func _build_floor() -> void:
 	_add_static_box(Vector3(0, -0.5, 0), Vector3(arena_size, 1, arena_size), _mat_floor)
+
+
+func _build_lava_pool() -> void:
+	# Huge animated lava plane stretching to the horizon, plus an Area3D that
+	# instakills any player whose hitboxes drop into it. Sits 2m below the
+	# arena floor so it never shows through inside; a player who escapes the
+	# perimeter wall (wall-jump out, knockback over the edge, etc.) falls
+	# past where the floor would be and lands in the lava.
+	#
+	# 6km plane — the geometry is still just a subdivided quad, the shader
+	# samples noise in world space so features don't stretch with the size,
+	# and fog hides everything past ~120m anyway.
+	var pool_size: float = 6000.0
+	var pool_y: float = -2.0
+
+	var mi := MeshInstance3D.new()
+	mi.name = "LavaSurface"
+	var plane := PlaneMesh.new()
+	plane.size = Vector2(pool_size, pool_size)
+	# Subdivide so global glow / future vertex shader animation has data.
+	plane.subdivide_width = 8
+	plane.subdivide_depth = 8
+	mi.mesh = plane
+	mi.position = Vector3(0, pool_y, 0)
+	mi.material_override = _make_lava_material()
+	add_child(mi)
+
+	var area := Area3D.new()
+	area.name = "LavaKillArea"
+	area.collision_layer = 0
+	# Mask 2 → matches the player's hitbox Area3Ds (HeadHitbox / TorsoHitbox /
+	# LegsHitbox in player.tscn, all on layer 2). The CharacterBody3D itself
+	# is on layer 0, so we can't use body_entered.
+	area.collision_mask = 2
+	area.position = Vector3(0, pool_y, 0)
+	area.area_entered.connect(_on_lava_area_entered)
+
+	var col := CollisionShape3D.new()
+	var shape := BoxShape3D.new()
+	shape.size = Vector3(pool_size, 4.0, pool_size)
+	col.shape = shape
+	# Push the box down 2m so its top face lines up with the lava surface.
+	col.position = Vector3(0, -2.0, 0)
+	area.add_child(col)
+	add_child(area)
+
+	if Engine.is_editor_hint():
+		var root: Node = get_tree().edited_scene_root
+		mi.owner = root
+		area.owner = root
+		col.owner = root
+
+
+func _make_lava_material() -> ShaderMaterial:
+	var sh := Shader.new()
+	sh.code = LAVA_SHADER_CODE
+	var mat := ShaderMaterial.new()
+	mat.shader = sh
+	return mat
+
+
+func _on_lava_area_entered(other_area: Area3D) -> void:
+	# Hitboxes are children of the player CharacterBody3D — climb to the
+	# parent to reach handle_environmental_death(). Filter to player_hitboxes
+	# so other Area3Ds in the scene (none today, but future-proof) don't kill.
+	if other_area == null or not other_area.is_in_group("player_hitboxes"):
+		return
+	var player_node: Node = other_area.get_parent()
+	if player_node and player_node.has_method("handle_environmental_death"):
+		player_node.handle_environmental_death("lava")
 
 
 func _build_walls() -> void:

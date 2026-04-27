@@ -66,6 +66,11 @@ var hurt_world_db: float = -20.5
 var death_self_db: float = -24.0
 var death_world_db: float = -18.5
 var hit_received_db: float = -12.0
+# Round-start rocket spawn — heavy rumble that ramps in over the descent.
+# 2D (UI-style) so each player hears their own "rocket cabin" without
+# spatial attenuation. Impact thump reuses SFX.landing() so it shares the
+# rest of the game's foot-impact tuning.
+var rocket_descent_db: float = -4.0
 # Bullet-on-surface tick. Heavier rounds add a low thump on top, so this
 # baseline level governs the lightest "plink" — the synth scales the body
 # upward with damage internally.
@@ -743,6 +748,13 @@ func death(at: Vector3 = NO_POS, is_self: bool = false) -> void:
 		_play_stream(_death_sounds.pick_random(), death_self_db, NO_POS, 1.0, "death_self", -1.0, false, 110.0)
 	else:
 		_play_stream(_death_sounds.pick_random(), death_world_db + randf_range(-1.5, 1.5), at, 1.0, "death", -1.0, false, 85.0)
+func rocket_descent() -> void:
+	# Heavy, soft-distorted rumble for the round-start rocket spawn. 2D so
+	# the local player hears their own "cabin" loud regardless of where the
+	# fall is happening in world space.
+	_play(_cached_samples("rocket_descent", Callable(self, "_synth_rocket_descent")), rocket_descent_db, NO_POS, "rocket_descent", -1.0, false, 130.0)
+
+
 func hit_received(intensity: float = 1.0) -> void:
 	# Critical UI feedback — high SPL so it always plays through combat noise.
 	# Intensity scales perceived volume: a 1-damage poison tick should barely
@@ -1481,6 +1493,39 @@ func _synth_card_flip(variant: int) -> PackedVector2Array:
 			s += (n_t - tick_lp) * exp(-dt * tick_decay) * 0.5
 		out[i] = Vector2(s, s)
 	return out
+
+func _synth_rocket_descent() -> PackedVector2Array:
+	# ~0.85s heavy rumble that swells as the rocket nears impact. Brown-ish
+	# noise (white noise + one-pole low-pass) waveshaped through tanh for
+	# soft saturation that stays well below clipping. Cutoff opens slightly
+	# over time so the late phase has more "presence." Length tuned to the
+	# 0.75s spawn-to-impact descent + a tiny tail.
+	var dur: float = 0.85
+	var n: int = int(dur * MIX_RATE)
+	var out := PackedVector2Array()
+	out.resize(n)
+	var sample_dt: float = 1.0 / float(MIX_RATE)
+	var lp: float = 0.0
+	var lp2: float = 0.0
+	for i in range(n):
+		var t: float = float(i) / float(MIX_RATE)
+		var u: float = t / dur
+		# Volume ramp: starts audible, swells to full near landing.
+		var env: float = lerpf(0.45, 1.0, u * u)
+		# Cutoff opens 70Hz -> 280Hz so the late phase is brighter.
+		var cutoff: float = lerpf(70.0, 280.0, u)
+		var rc: float = 1.0 / (TAU * cutoff)
+		var alpha: float = sample_dt / (rc + sample_dt)
+		var noise: float = randf_range(-1.0, 1.0)
+		# Two stacked one-pole LPs = a 12 dB/oct slope (smoother low end).
+		lp = lp + alpha * (noise - lp)
+		lp2 = lp2 + alpha * (lp - lp2)
+		# Pre-gain into tanh saturator. Pushes the rumble into "heavy" without
+		# ever exceeding ±0.6 — guaranteed no digital clipping.
+		var s: float = tanh(lp2 * 5.5) * 0.55 * env
+		out[i] = Vector2(s, s)
+	return out
+
 
 func _synth_pling(pitch_ratio: float = 1.0) -> PackedVector2Array:
 	# Simple high-pitched sine pling with exponential decay.
