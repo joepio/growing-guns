@@ -90,7 +90,8 @@ What's known about the budget (4-bot stress test):
 ## Build / export
 
 ```bash
-/Applications/Godot.app/Contents/MacOS/Godot --headless --path . --export-release "macOS LAN Debug" ./JumpShoot.zip
+tools/build_release.sh                       # mac + win → build/{macos,windows}/AnotherRound.zip
+tools/build_release.sh all --itch user/game  # build both AND push to itch.io via tools/bin/butler
 ```
 
 See `README.md` for distribution to LAN playtesters.
