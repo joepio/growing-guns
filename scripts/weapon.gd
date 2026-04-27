@@ -50,6 +50,16 @@ const BASE_KNOCKBACK := 3.0            # every shot gives a light nudge
 @export var melee_damage_mult: float = 1.0     # scales melee damage
 @export var melee_scale: float = 1.0           # scales melee animation and range
 @export var homing: float = 0.0                # degrees-per-second steering toward closest forward target
+@export var damage_over_time: float = 0.0      # extra bullet damage dealt over time
+@export var dot_duration: float = 3.0
+@export var slow_on_hit: float = 1.0           # <1 = target movement multiplier
+@export var slow_duration: float = 0.0
+@export var grow_damage_per_meter: float = 0.0 # bullet damage gained per meter flown
+@export var ricochet_damage_mult: float = 1.0  # extra damage per completed bounce
+@export var reload_on_hit: int = 0             # bullets restored when dealing damage
+@export var phoenix_revives: int = 0           # revives available each spawn/round
+@export var world_pierce_count: int = 0        # world surfaces a bullet can drill through
+@export var impact_mines: int = 0              # mines planted on bullet impact
 
 # --- Visuals ---
 @export var bullet_color: Color = BASE_BULLET_COLOR
@@ -67,6 +77,14 @@ const BASE_BULLET_DROP := 30.0                  # matches Player.GRAVITY so bull
 
 # --- Special / RMB slot ---
 @export var special: String = SPECIAL_GRENADE
+@export var special_echo_count: int = 0        # extra delayed special activations
+@export var special_reload_amount: int = 0     # ammo restored when special is used
+@export var special_cooldown_refund_on_hit: float = 0.0
+@export var special_empower_damage: float = 1.0
+@export var special_empower_speed: float = 1.0
+@export var shield_pulse_damage: float = 0.0
+@export var teleport_blast_radius: float = 0.0
+@export var invisible_first_shot_mult: float = 1.0
 
 # --- Tracking ---
 @export var applied_cards: Array[String] = []
@@ -118,6 +136,16 @@ func reset() -> void:
 		melee_damage_mult = 1.0
 		melee_scale = 1.0
 		homing = 0.0
+		damage_over_time = 0.0
+		dot_duration = 3.0
+		slow_on_hit = 1.0
+		slow_duration = 0.0
+		grow_damage_per_meter = 0.0
+		ricochet_damage_mult = 1.0
+		reload_on_hit = 0
+		phoenix_revives = 0
+		world_pierce_count = 0
+		impact_mines = 0
 		bullet_color = BASE_BULLET_COLOR
 		bullet_scale = 1.0
 		head_scale = 1.0
@@ -126,4 +154,12 @@ func reset() -> void:
 		max_hp_bonus = 0
 		extra_jumps = 0
 		special = SPECIAL_GRENADE
+		special_echo_count = 0
+		special_reload_amount = 0
+		special_cooldown_refund_on_hit = 0.0
+		special_empower_damage = 1.0
+		special_empower_speed = 1.0
+		shield_pulse_damage = 0.0
+		teleport_blast_radius = 0.0
+		invisible_first_shot_mult = 1.0
 		applied_cards.clear()

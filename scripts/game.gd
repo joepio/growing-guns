@@ -127,6 +127,7 @@ var _last_input_was_controller := false
 # Owned by scripts/splitscreen_manager.gd, instantiated in _ready as a child
 # Node. Reads NetworkManager metadata to decide whether to build its layer.
 var _splitscreen: Node = null
+var _audio_panel: AudioSettingsPanel = null
 
 func _ready() -> void:
 	_install_controller_input_map()
@@ -137,7 +138,8 @@ func _ready() -> void:
 	add_child(_splitscreen)
 	_splitscreen.setup(self)
 	# F2 brings up the live audio-tuning panel — same sliders as action_lab.
-	add_child(AudioSettingsPanel.new())
+	_audio_panel = AudioSettingsPanel.new()
+	add_child(_audio_panel)
 
 	# --- Ability Bar Redesign ---
 	# Hide legacy components
@@ -374,6 +376,7 @@ func _client_request_spawn_when_ready() -> void:
 
 func _process(delta: float) -> void:
 	_update_explosion_sidechain(delta)
+	_sync_mouse_mode()
 	_update_custom_cursor()
 	if local_player and is_instance_valid(local_player):
 		health_label.text = "GHOST" if local_player.get("ghost_mode") == true else "HP  %d" % local_player.health
@@ -426,6 +429,7 @@ func _input(event: InputEvent) -> void:
 		return
 	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_F1:
 		_dev_panel.toggle()
+		_sync_mouse_mode()
 		return
 
 	# Pause menu: ui_cancel (Esc), Enter, and numpad Enter.
@@ -437,6 +441,7 @@ func _input(event: InputEvent) -> void:
 	if pause_pressed:
 		if _dev_panel.is_open():
 			_dev_panel.toggle()
+			_sync_mouse_mode()
 			return
 		_toggle_pause_menu()
 		return
@@ -975,7 +980,7 @@ func _show_spectating(text: String = "SPECTATING…") -> void:
 	round_banner.text = text
 	round_banner.visible = true
 	banner_timer.stop()
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	_sync_mouse_mode()
 
 @rpc("authority", "call_local", "reliable")
 func _show_round_winner_wait(winner_id: int) -> void:
@@ -1016,7 +1021,7 @@ func _show_card_pick(loser_id: int, card_ids: Array) -> void:
 		_pick_timeout_active = true
 		_last_pling_sec = -1
 
-	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	_sync_mouse_mode()
 	_populate_cards(card_ids, true)
 
 	# 1-second grace period before the loser can actually click — avoids
@@ -1075,12 +1080,12 @@ func _populate_cards(card_ids: Array, clickable: bool) -> void:
 		body.add_theme_stylebox_override("panel", back_style)
 
 		# 2. Entry + Flip Reveal Sequence
-		var reveal_delay := index * 0.3
+		var reveal_delay := index * 0.15
 		var tw := body.create_tween()
 
 		# Pop up from below (still face down)
 		tw.tween_property(body, "position:y", 0.0, 0.4)\
-			.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT).set_delay(index * 0.08)
+			.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT).set_delay(index * 0.04)
 
 		# Flip animation
 		tw.tween_interval(reveal_delay)
@@ -1427,7 +1432,7 @@ func _hide_card_pick() -> void:
 	for c in pick_row.get_children():
 		c.queue_free()
 	_set_gameplay_hud_visible(true)
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	_sync_mouse_mode()
 	# Card picked → no longer "freshly dead". Drop the blood overlay so
 	# the spectator/ghost view is clear.
 	show_death_effect(false)
@@ -1460,7 +1465,7 @@ func _match_over(winner_id: int) -> void:
 	round_banner.visible = true
 	banner_timer.stop()
 	_show_rematch_overlay(winner_id)
-	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	_sync_mouse_mode()
 
 func _build_rematch_overlay() -> void:
 	_rematch_overlay = Control.new()
@@ -2073,7 +2078,27 @@ func is_any_modal_open() -> bool:
 		return true
 	if _rematch_overlay and _rematch_overlay.visible:
 		return true
+	if _audio_panel and _audio_panel.visible:
+		return true
 	return false
+
+func _is_cursor_modal_open() -> bool:
+	if pick_overlay and pick_overlay.visible:
+		return true
+	if _dev_panel and _dev_panel.is_open():
+		return true
+	if _pause_menu and _pause_menu.visible:
+		return true
+	if _rematch_overlay and _rematch_overlay.visible:
+		return true
+	if _audio_panel and _audio_panel.visible:
+		return true
+	return false
+
+func _sync_mouse_mode() -> void:
+	var desired := Input.MOUSE_MODE_HIDDEN if _is_cursor_modal_open() else Input.MOUSE_MODE_CAPTURED
+	if Input.mouse_mode != desired:
+		Input.mouse_mode = desired
 
 # -------------------- PAUSE MENU (ESC) --------------------
 
@@ -2086,16 +2111,14 @@ func _toggle_pause_menu() -> void:
 		# _build_pause_menu ran (host_game_iroh in _ready races with the
 		# pause menu's lazy build).
 		_pause_refresh_game_id()
-		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+		_sync_mouse_mode()
 		# Pause the world if this is a solo match (local player + bots only).
 		if _human_count() <= 1:
 			get_tree().paused = true
 	else:
 		# Unpause if we were paused.
 		get_tree().paused = false
-		# Don't recapture if another modal (card pick, match over) is up.
-		if not (pick_overlay and pick_overlay.visible) and state != State.MATCH_OVER:
-			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+		_sync_mouse_mode()
 
 func _build_pause_menu() -> void:
 	var root := Control.new()
