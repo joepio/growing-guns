@@ -240,6 +240,11 @@ func eject_casing() -> void:
 	var tree := get_tree()
 	if tree == null or tree.current_scene == null:
 		return
+	# Bench A/B: skip casing spawning to attribute physics cost. One static
+	# bool branch outside the bench (BenchFlags.active = false).
+	if BenchFlags.active and BenchFlags.no_casings:
+		return
+	BenchFlags.inc("casings_spawned")
 
 	var c_radius: float = barrel_radius * casing_radius_frac
 	var c_length: float = receiver_size.z * casing_length_frac
