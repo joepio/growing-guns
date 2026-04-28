@@ -105,6 +105,9 @@ var weapon: Weapon = Weapon.new()
 var mag: int = Weapon.BASE_MAG_SIZE
 var reloading: bool = false
 var frozen: bool = false
+# Multiplier on top of the base MOUSE_SENS — game.gd writes this from the
+# settings panel slider so each peer can tune their own look speed.
+var mouse_sens_mult: float = 1.0
 # Round-start "rocket spawn": physics drives the descent but input is gated
 # until the server flips this back off. Distinct from `frozen` because we DO
 # want gravity + move_and_slide to run while it's on.
@@ -613,7 +616,7 @@ func _unhandled_input(event: InputEvent) -> void:
 	if local_input_device >= 0:
 		return
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-		var sens := MOUSE_SENS
+		var sens := MOUSE_SENS * mouse_sens_mult
 		if is_zooming:
 			sens *= 0.4 # Slower aim when zoomed
 		rotate_y(-event.relative.x * sens)
