@@ -446,8 +446,9 @@ func _process(delta: float) -> void:
 		_refresh_authority_view()
 
 	if is_multiplayer_authority():
-		var target_fov := 30.0 if is_zooming else 75.0
-		camera.fov = lerp(camera.fov, target_fov, delta * 12.0)
+		# Sniper zoom snaps the FOV instantly so RMB feels like an ADS toggle,
+		# not a lens animation.
+		camera.fov = 30.0 if is_zooming else 75.0
 		camera.rotation.z = lerp_angle(camera.rotation.z, deg_to_rad(tilt_z), delta * TILT_SPEED)
 
 func _interpolate_remote_state(delta: float) -> void:
