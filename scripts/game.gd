@@ -414,6 +414,19 @@ func _process(delta: float) -> void:
 	if multiplayer.is_server() and state == State.PLAYING:
 		_update_round_music_phase()
 	_update_custom_cursor()
+	# Polling-based pause toggle. On macOS, pressing Esc while the mouse is
+	# captured auto-uncaptures it at the engine level and the resulting
+	# InputEventKey doesn't reliably propagate to Game._input — but the
+	# Input singleton's action state still flips for one frame, which polls
+	# fine from here. Gating on `paused` avoids double-toggling alongside
+	# the pause menu's Resume-button Shortcut.
+	if Input.is_action_just_pressed("ui_cancel") and not get_tree().paused:
+		if _dev_panel != null and _dev_panel.is_open():
+			_dev_panel.toggle()
+			_sync_mouse_mode()
+		else:
+			_toggle_pause_menu()
+		return
 	if local_player and is_instance_valid(local_player):
 		health_label.text = "GHOST" if local_player.get("ghost_mode") == true else "HP  %d" % local_player.health
 		_refresh_cooldowns()
