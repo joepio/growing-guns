@@ -108,6 +108,10 @@ var frozen: bool = false
 # Multiplier on top of the base MOUSE_SENS — game.gd writes this from the
 # settings panel slider so each peer can tune their own look speed.
 var mouse_sens_mult: float = 1.0
+# Toggle for the strafe-driven camera + gun roll. game.gd writes this from
+# the settings panel; off zeroes out both the view roll (TILT_MAX_DEG) and
+# the gun roll (GUN_STRAFE_TILT_DEG) without touching anything else.
+var tilt_enabled: bool = true
 # Round-start "rocket spawn": physics drives the descent but input is gated
 # until the server flips this back off. Distinct from `frozen` because we DO
 # want gravity + move_and_slide to run while it's on.
@@ -729,6 +733,8 @@ func _physics_process(delta: float) -> void:
 	# blocked-against-a-wall strafe shouldn't tilt, momentum-only sideways slide
 	# should. velocity.dot(basis.x) is positive when sliding right.
 	var gun_lateral_factor: float = clampf(velocity.dot(global_transform.basis.x) / WALK_SPEED, -1.0, 1.0)
+	if not tilt_enabled:
+		gun_lateral_factor = 0.0
 	_gun_tilt_z = lerp(_gun_tilt_z, deg_to_rad(gun_lateral_factor * GUN_STRAFE_TILT_DEG), clampf(delta * 8.0, 0.0, 1.0))
 
 	muzzle.position = _muzzle_rest_pos + Vector3(bob_x, bob_y - _gun_jump_bump, muzzle_kick_z) + melee_offset + reload_offset + _gun_pull_back
@@ -808,6 +814,8 @@ func _physics_process(delta: float) -> void:
 	# sideways dash. (Sign matches the old input-based version: +basis.x dot
 	# velocity > 0 when strafing right → positive tilt_z.)
 	var lateral_factor: float = clampf(velocity.dot(global_transform.basis.x) / WALK_SPEED, -1.0, 1.0)
+	if not tilt_enabled:
+		lateral_factor = 0.0
 	tilt_z = lateral_factor * TILT_MAX_DEG
 
 	var wish_dir := _input_vector()
