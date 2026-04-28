@@ -1,0 +1,108 @@
+name: Release
+
+# Builds macOS + Windows zips and publishes them to itch.io + GitHub Releases
+# whenever a v* tag is pushed. Mirror of what tools/build_release.sh does
+# locally, but without bumping the version (the tag *is* the version).
+#
+# One-time setup needed in the GitHub repo:
+#   Settings → Secrets and variables → Actions → New repository secret
+#     BUTLER_API_KEY = <your butler key>
+#   Get it via:
+#     cat ~/.config/itch/butler_creds      # mac
+#     %USERPROFILE%\.config\itch\butler_creds   # windows
+#
+# Trigger:
+#   git tag v0.2.3 && git push origin v0.2.3
+# (or manually via the workflow_dispatch button on the Actions tab.)
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write    # for softprops/action-gh-release
+
+    env:
+      # Bump these together when upgrading the engine. The download URL pattern
+      # is github.com/godotengine/godot/releases/download/<tag>/Godot_v<tag>_…
+      GODOT_VERSION: 4.6.2-stable
+      GODOT_TEMPLATES_DIR: /home/runner/.local/share/godot/export_templates/4.6.2.stable
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Install Godot headless binary.
+      - name: Install Godot
+        run: |
+          set -euxo pipefail
+          curl -L -o godot.zip \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}/Godot_v${GODOT_VERSION}_linux.x86_64.zip"
+          unzip -q godot.zip
+          sudo mv Godot_v${GODOT_VERSION}_linux.x86_64 /usr/local/bin/godot
+          sudo chmod +x /usr/local/bin/godot
+          godot --version
+
+      # Install export templates so headless export-release works for mac+win.
+      - name: Install Godot export templates
+        run: |
+          set -euxo pipefail
+          curl -L -o templates.tpz \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}/Godot_v${GODOT_VERSION}_export_templates.tpz"
+          mkdir -p "${GODOT_TEMPLATES_DIR}"
+          unzip -q templates.tpz -d /tmp/godot-tpl
+          mv /tmp/godot-tpl/templates/* "${GODOT_TEMPLATES_DIR}/"
+
+      # First import populates .godot/imported/* and resolves UIDs — required
+      # before --export-release works on a fresh checkout.
+      - name: Import project
+        run: |
+          set -euxo pipefail
+          godot --headless --path . --import || true
+
+      - name: Build macOS
+        run: |
+          set -euxo pipefail
+          mkdir -p build/macos
+          godot --headless --path . --export-release "macOS LAN Debug" build/macos/MoreRounds.zip
+          ls -lh build/macos/MoreRounds.zip
+
+      - name: Build Windows
+        run: |
+          set -euxo pipefail
+          mkdir -p build/windows
+          godot --headless --path . --export-release "Windows LAN" build/windows/MoreRounds.exe
+          # Re-zip exe + pck (matches tools/build_release.sh).
+          (cd build/windows && zip -q MoreRounds.zip MoreRounds.exe MoreRounds.pck)
+          ls -lh build/windows/MoreRounds.zip
+
+      - name: Install butler
+        run: |
+          set -euxo pipefail
+          curl -sL -o butler.zip "https://broth.itch.zone/butler/linux-amd64/LATEST/archive/default"
+          unzip -oq butler.zip
+          chmod +x butler
+          ./butler --version
+
+      - name: Push to itch.io
+        env:
+          BUTLER_API_KEY: ${{ secrets.BUTLER_API_KEY }}
+        run: |
+          set -euxo pipefail
+          # Tag looks like "v0.2.3" — strip the leading v for itch's userversion.
+          VERSION="${GITHUB_REF_NAME#v}"
+          ./butler push --userversion "$VERSION" build/macos/MoreRounds.zip   joepio/more-rounds:mac
+          ./butler push --userversion "$VERSION" build/windows/MoreRounds.zip joepio/more-rounds:win
+
+      - name: Create GitHub Release
+        # Skips on workflow_dispatch (no tag context); only fires on tag push.
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/macos/MoreRounds.zip
+            build/windows/MoreRounds.zip
+          generate_release_notes: true
