@@ -926,6 +926,15 @@ func _start_round_now() -> void:
 	_clear_craters.rpc()
 	_clear_blood_splats.rpc()
 	_hide_rematch_overlay.rpc()
+	# Warm shot + explosion synths for whichever weapons are in play this
+	# round (and a few common explosion radii) during the rocket-spawn window
+	# so the first bullet / first grenade doesn't pay 30-50ms of audio synth
+	# mid-fight. Yields one cache fill per frame; cache hits are instant.
+	_warmup_round_audio()
+	# Force the heat-distortion + shockwave shader pipelines to compile now
+	# while the camera is settling in, not on the first explosion.
+	if has_node("Arena"):
+		preload("res://scripts/grenade.gd").warmup_shaders($Arena)
 	# Clear any leftover round-end banner ("PICKING A CARD…", "WAITING FOR …",
 	# etc.) so it doesn't bleed into the new round.
 	_announce.rpc("", 0)
@@ -1198,6 +1207,21 @@ func _finalize_card_pick(player_id_to_apply: int, card_id: String) -> void:
 			elif state == State.PICKING_CARD:
 				_show_spectating.rpc_id(peer, _waiting_for_pickers_spectator_label())
 	_maybe_finish_card_picks()
+
+func _warmup_round_audio() -> void:
+	# Collect every live player's current Weapon (mutated by whatever cards
+	# they've picked so far) so SFX.warmup_async caches the shot variants
+	# they're actually about to fire. Always include a default Weapon so
+	# fresh joiners / bots without applied cards aren't a cache miss.
+	var weapons: Array = [Weapon.new()]
+	for child in players_root.get_children():
+		var w: Variant = child.get("weapon")
+		if w != null:
+			weapons.append(w)
+	# Common explosion radii — covers BLAST cards (4–8m) and bazooka/grenade
+	# blasts (6–10m). Bucketed integer-rounded inside warmup_async.
+	SFX.warmup_async(weapons, [4.0, 6.0, 8.0, 10.0])
+
 
 func _maybe_finish_card_picks() -> void:
 	if state != State.PICKING_CARD:
