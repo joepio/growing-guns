@@ -71,6 +71,9 @@ var hit_received_db: float = -12.0
 # spatial attenuation. Impact thump reuses SFX.landing() so it shares the
 # rest of the game's foot-impact tuning.
 var rocket_descent_db: float = -4.0
+# Mine plant — short low-thud + electronic arm-beep cue when a player drops
+# a proximity mine. 3D so listeners can locate it.
+var mine_plant_db: float = -10.0
 # Bullet-on-surface tick. Heavier rounds add a low thump on top, so this
 # baseline level governs the lightest "plink" — the synth scales the body
 # upward with damage internally.
@@ -532,6 +535,7 @@ func shot(w: Weapon = null, at: Vector3 = NO_POS, is_self: bool = false) -> void
 	# baseline at 105 dB lets footsteps (78 SPL) survive a base rifle but
 	# upgraded weapons (2× dmg → 119, 4× → 133) still duck them.
 	var spl: float = 105.0 + dmg_log * 7.0
+	ProceduralMusic.duck(0.18 + clampf(dmg_log * 0.08, 0.0, 0.32))
 	# Wet companion uses "_<label>" — silent in the log, still solo-gated.
 	var wet_label := "_" + label
 	if not _gun_sounds.is_empty():
@@ -668,6 +672,7 @@ func explosion(at: Vector3 = NO_POS, radius: float = 6.0) -> void:
 	# bigger blasts push the HDR window highest, ducking everything else
 	# hardest.
 	var ex_spl: float = 165.0 + log(maxf(1.0, radius / 6.0)) / log(2.0) * 5.0
+	ProceduralMusic.duck(clampf(0.55 + radius * 0.025, 0.55, 0.95))
 	# Bang plays dry primary (crisp transient) PLUS a wet companion through
 	# RaytracedReverb — same pattern as gun shots. The wet companion is what
 	# gives a sharp transient an audible reverb tail; without it the dry
@@ -753,6 +758,12 @@ func rocket_descent() -> void:
 	# the local player hears their own "cabin" loud regardless of where the
 	# fall is happening in world space.
 	_play(_cached_samples("rocket_descent", Callable(self, "_synth_rocket_descent")), rocket_descent_db, NO_POS, "rocket_descent", -1.0, false, 130.0)
+
+
+func mine_plant(at: Vector3 = NO_POS) -> void:
+	# Subtle "click + arm beep" as a player drops a proximity mine. 3D so
+	# nearby players hear it positioned and can hunt the planter down.
+	_play(_cached_samples("mine_plant", Callable(self, "_synth_mine_plant")), mine_plant_db, at, "mine_plant", -1.0, false, 90.0)
 
 
 func hit_received(intensity: float = 1.0) -> void:
@@ -1523,6 +1534,28 @@ func _synth_rocket_descent() -> PackedVector2Array:
 		# Pre-gain into tanh saturator. Pushes the rumble into "heavy" without
 		# ever exceeding ±0.6 — guaranteed no digital clipping.
 		var s: float = tanh(lp2 * 5.5) * 0.55 * env
+		out[i] = Vector2(s, s)
+	return out
+
+
+func _synth_mine_plant() -> PackedVector2Array:
+	# Two-part cue: ~80Hz "thud" as the mine touches ground (first 100ms),
+	# then a 1200Hz "arm beep" fading in/out over the next 200ms. Tanh
+	# saturates the mix so it stays warm and never clips.
+	var dur: float = 0.35
+	var n: int = int(dur * MIX_RATE)
+	var out := PackedVector2Array()
+	out.resize(n)
+	for i in range(n):
+		var t: float = float(i) / float(MIX_RATE)
+		var thud_env: float = exp(-t * 35.0)
+		var thud: float = sin(2.0 * PI * 80.0 * t) * thud_env * 0.6
+		var beep_env: float = 0.0
+		if t > 0.10:
+			var bt: float = t - 0.10
+			beep_env = exp(-bt * 16.0) * (1.0 - exp(-bt * 50.0))
+		var beep: float = sin(2.0 * PI * 1200.0 * t) * beep_env * 0.35
+		var s: float = tanh((thud + beep) * 1.2) * 0.55
 		out[i] = Vector2(s, s)
 	return out
 

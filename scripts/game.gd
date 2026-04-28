@@ -74,6 +74,8 @@ var pending_pick_cards_by_player: Dictionary = {}
 var completed_picks: Dictionary = {}
 var eliminated_players: Dictionary = {}
 var round_winner_id: int = 0
+var _round_music_level: int = 1
+var _round_damage_seen: bool = false
 var local_player: Node3D
 var _custom_crosshair: Control = null
 var _stats_panel: Control = null
@@ -137,6 +139,7 @@ var _splitscreen: Node = null
 var _audio_panel: AudioSettingsPanel = null
 
 func _ready() -> void:
+	ProceduralMusic.set_energy(1, true)
 	_install_controller_input_map()
 	# Splitscreen manager: builds a CanvasLayer + per-device viewports if the
 	# NetworkManager flag is set. Inert otherwise (still a Node, but no UI).
@@ -395,6 +398,8 @@ func _client_request_spawn_when_ready() -> void:
 func _process(delta: float) -> void:
 	_update_explosion_sidechain(delta)
 	_sync_mouse_mode()
+	if multiplayer.is_server() and state == State.PLAYING:
+		_update_round_music_phase()
 	_update_custom_cursor()
 	if local_player and is_instance_valid(local_player):
 		health_label.text = "GHOST" if local_player.get("ghost_mode") == true else "HP  %d" % local_player.health
@@ -649,7 +654,14 @@ func _pick_spawn(avoid: Array[Vector3] = []) -> Dictionary:
 	# case we try perpendicular and back-facing yaws.
 	var spawns := get_tree().get_nodes_in_group("spawnpoints")
 	if spawns.is_empty():
-		return {"pos": Vector3(0, 3, 0), "yaw": 0.0}
+		# Belt-and-suspenders: if we somehow get here while no arena spawn
+		# nodes exist, plant the player at the arena's center at safe
+		# height instead of world (0, 3, 0). The arena lives at
+		# ARENA_OFFSET; world (0, 3, 0) sits in lava and outside the
+		# floor — players spawning there fall straight to their death.
+		var fb_arena: Node = get_node_or_null("Arena")
+		var fb_origin: Vector3 = (fb_arena as Node3D).global_position if fb_arena and fb_arena is Node3D else Vector3.ZERO
+		return {"pos": fb_origin + Vector3(0, 5, 0), "yaw": 0.0}
 
 	# Anchor for the height-match bonus: the first spawn already placed this
 	# pass, if any. With nothing placed yet, target_y is unused.
@@ -836,6 +848,7 @@ func _maybe_start_match() -> void:
 		return
 	if NetworkManager.players.size() < 2:
 		_announce.rpc("WAITING FOR PLAYERS…", 99.0)
+		_set_music_energy.rpc(1)
 		return
 	state = State.PLAYING
 	current_round = 1
@@ -848,6 +861,11 @@ func _maybe_start_match() -> void:
 
 func _start_round_now() -> void:
 	_reset_round_tracking()
+	_round_damage_seen = false
+	_round_music_level = 2
+	var music_seed := randi()
+	_set_music_track.rpc(music_seed, current_round)
+	_set_music_energy.rpc(2, true)
 	# Pick a random map for this round and broadcast the swap to all peers
 	# before respawning, so _pick_spawn() reads the new arena's spawn
 	# points (the call_local RPC runs the swap synchronously here too).
@@ -882,6 +900,62 @@ func _start_round_now() -> void:
 	_clear_projectiles.rpc()
 	_clear_craters.rpc()
 	_hide_rematch_overlay.rpc()
+
+@rpc("authority", "call_local", "reliable")
+func _set_music_energy(level: int, immediate: bool = false, next_bar: bool = false) -> void:
+	if level > 0:
+		_round_music_level = level
+	if not _music_enabled:
+		ProceduralMusic.set_energy(0, true)
+		return
+	ProceduralMusic.set_energy(level, immediate, next_bar)
+
+@rpc("authority", "call_local", "reliable")
+func _set_music_track(seed: int, round_index: int) -> void:
+	ProceduralMusic.generate_track(seed, round_index)
+
+@rpc("any_peer", "call_local", "reliable")
+func _report_player_damage(victim_id: int, attacker_id: int, amount: int, victim_health: int) -> void:
+	if not multiplayer.is_server():
+		return
+	if state != State.PLAYING:
+		return
+	if amount <= 0 or attacker_id == victim_id:
+		return
+	_round_damage_seen = true
+	if _round_music_level < 3:
+		_set_round_music_level(3)
+	_update_round_music_phase()
+
+func _update_round_music_phase() -> void:
+	if _round_music_level >= 4:
+		return
+	if not _late_round_music_condition():
+		return
+	_set_round_music_level(4)
+
+func _late_round_music_condition() -> bool:
+	var alive := _alive_player_ids()
+	if alive.size() != 2:
+		return false
+	for pid in alive:
+		var p := players_root.get_node_or_null(str(pid))
+		if not p:
+			continue
+		var hp := int(p.get("health"))
+		var max_hp := 100
+		var w = p.get("weapon")
+		if w != null:
+			max_hp += int(w.max_hp_bonus)
+		if hp > 0 and hp <= int(ceil(float(max_hp) * 0.5)):
+			return true
+	return false
+
+func _set_round_music_level(level: int) -> void:
+	if level <= _round_music_level:
+		return
+	_round_music_level = level
+	_set_music_energy.rpc(level, false, true)
 
 @rpc("authority", "call_local", "reliable")
 func _clear_projectiles() -> void:
@@ -985,6 +1059,9 @@ func _fallback_round_winner(victim_id: int) -> int:
 
 func _end_round(winner_id: int) -> void:
 	round_winner_id = winner_id
+	_round_music_level = 1
+	_round_damage_seen = false
+	_set_music_energy.rpc(1, false, true)
 	if winner_id != 0:
 		round_wins[winner_id] = int(round_wins.get(winner_id, 0)) + 1
 		_broadcast_scores.rpc(round_wins)
@@ -1705,34 +1782,42 @@ func _build_ghost_overlay() -> void:
 	# Move to the background of the HUD so it doesn't affect other UI elements
 	$HUD.move_child(_ghost_overlay, 0)
 
+var _retro_layer: CanvasLayer = null
 var _retro_material: ShaderMaterial = null
 
 # -------------------- VIDEO SETTINGS --------------------
 const SETTINGS_PATH := "user://settings.cfg"
-var _dither_enabled: bool = true
-var _fisheye_enabled: bool = true
+var _retro_enabled: bool = true
+var _music_enabled: bool = true
 
 
 func _load_settings() -> void:
 	var cfg := ConfigFile.new()
 	if cfg.load(SETTINGS_PATH) != OK:
 		return
-	_dither_enabled = cfg.get_value("video", "dither", true)
-	_fisheye_enabled = cfg.get_value("video", "fisheye", true)
+	_retro_enabled = cfg.get_value("video", "retro", cfg.get_value("video", "dither", true))
+	_music_enabled = cfg.get_value("audio", "music", true)
 
 
 func _save_settings() -> void:
 	var cfg := ConfigFile.new()
-	cfg.set_value("video", "dither", _dither_enabled)
-	cfg.set_value("video", "fisheye", _fisheye_enabled)
+	cfg.set_value("video", "retro", _retro_enabled)
+	cfg.set_value("audio", "music", _music_enabled)
 	cfg.save(SETTINGS_PATH)
 
 
 func _apply_settings() -> void:
-	if _retro_material == null:
-		return
-	_retro_material.set_shader_parameter("dither_strength", 1.0 if _dither_enabled else 0.0)
-	_retro_material.set_shader_parameter("fisheye_strength", 1.0 if _fisheye_enabled else 0.0)
+	if _retro_layer:
+		_retro_layer.visible = _retro_enabled
+	if _retro_material:
+		_retro_material.set_shader_parameter("dither_strength", 1.0)
+		_retro_material.set_shader_parameter("fisheye_strength", 1.0)
+	ProceduralMusic.enabled = _music_enabled
+	if _music_enabled:
+		ProceduralMusic.set_energy(_round_music_level, true)
+	else:
+		ProceduralMusic.set_energy(0, true)
+	_sync_mouse_mode()
 
 func _apply_retro_shader(node: Control) -> void:
 	var shader := Shader.new()
@@ -1859,8 +1944,10 @@ func _update_custom_cursor() -> void:
 
 func _build_retro_filter() -> void:
 	var cl := CanvasLayer.new()
+	cl.name = "RetroFilterLayer"
 	cl.layer = 100 # Put it above everything else
 	add_child(cl)
+	_retro_layer = cl
 
 	var retro_overlay := ColorRect.new()
 	retro_overlay.name = "RetroFilter"
@@ -2270,7 +2357,10 @@ func _is_cursor_modal_open() -> bool:
 	return false
 
 func _sync_mouse_mode() -> void:
-	var desired := Input.MOUSE_MODE_HIDDEN if _is_cursor_modal_open() else Input.MOUSE_MODE_CAPTURED
+	var modal_open := _is_cursor_modal_open()
+	var desired := Input.MOUSE_MODE_CAPTURED
+	if modal_open:
+		desired = Input.MOUSE_MODE_HIDDEN if _retro_enabled else Input.MOUSE_MODE_VISIBLE
 	if Input.mouse_mode != desired:
 		Input.mouse_mode = desired
 
@@ -2461,8 +2551,8 @@ var _pause_copy_button: Button = null
 var _pause_join_input: LineEdit = null
 var _pause_seed_label: Label = null
 var _settings_panel: Control = null
-var _settings_dither_toggle: CheckButton = null
-var _settings_fisheye_toggle: CheckButton = null
+var _settings_retro_toggle: CheckButton = null
+var _settings_music_toggle: CheckButton = null
 
 
 func _open_settings() -> void:
@@ -2472,10 +2562,10 @@ func _open_settings() -> void:
 		_pause_menu.visible = false
 	# Sync toggles to the live state in case the user changed them via some
 	# other path (CLI flag, save edit, etc.) since the panel was last opened.
-	if _settings_dither_toggle:
-		_settings_dither_toggle.set_pressed_no_signal(_dither_enabled)
-	if _settings_fisheye_toggle:
-		_settings_fisheye_toggle.set_pressed_no_signal(_fisheye_enabled)
+	if _settings_retro_toggle:
+		_settings_retro_toggle.set_pressed_no_signal(_retro_enabled)
+	if _settings_music_toggle:
+		_settings_music_toggle.set_pressed_no_signal(_music_enabled)
 	_settings_panel.visible = true
 
 
@@ -2539,25 +2629,25 @@ func _build_settings_panel() -> void:
 	spacer1.custom_minimum_size = Vector2(0, 6)
 	vb.add_child(spacer1)
 
-	var dither_toggle := CheckButton.new()
-	dither_toggle.text = "Dithering"
-	dither_toggle.button_pressed = _dither_enabled
-	dither_toggle.toggled.connect(func(on: bool) -> void:
-		_dither_enabled = on
+	var retro_toggle := CheckButton.new()
+	retro_toggle.text = "Retro shader look"
+	retro_toggle.button_pressed = _retro_enabled
+	retro_toggle.toggled.connect(func(on: bool) -> void:
+		_retro_enabled = on
 		_apply_settings()
 		_save_settings())
-	vb.add_child(dither_toggle)
-	_settings_dither_toggle = dither_toggle
+	vb.add_child(retro_toggle)
+	_settings_retro_toggle = retro_toggle
 
-	var fisheye_toggle := CheckButton.new()
-	fisheye_toggle.text = "Fish-eye distortion"
-	fisheye_toggle.button_pressed = _fisheye_enabled
-	fisheye_toggle.toggled.connect(func(on: bool) -> void:
-		_fisheye_enabled = on
+	var music_toggle := CheckButton.new()
+	music_toggle.text = "Procedural music"
+	music_toggle.button_pressed = _music_enabled
+	music_toggle.toggled.connect(func(on: bool) -> void:
+		_music_enabled = on
 		_apply_settings()
 		_save_settings())
-	vb.add_child(fisheye_toggle)
-	_settings_fisheye_toggle = fisheye_toggle
+	vb.add_child(music_toggle)
+	_settings_music_toggle = music_toggle
 
 	var spacer2 := Control.new()
 	spacer2.custom_minimum_size = Vector2(0, 8)
