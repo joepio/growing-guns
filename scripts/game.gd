@@ -778,6 +778,9 @@ func _do_spawn(
 	p.rotation.y = yaw
 	if id == multiplayer.get_unique_id():
 		local_player = p
+		# Push the saved mouse-sens slider value onto the freshly spawned
+		# local player so first mouse-look frame already uses it.
+		_apply_mouse_sens_to_local()
 		# Attach the raytraced-audio listener under the local player's camera.
 		# Only one listener should be in the scene at a time. Owner needs a
 		# valid transform — the plugin reads owner.transform.basis.x for
@@ -905,7 +908,9 @@ func _start_round_now() -> void:
 func _set_music_energy(level: int, immediate: bool = false, next_bar: bool = false) -> void:
 	if level > 0:
 		_round_music_level = level
-	if not _music_enabled:
+	# Slider at the bottom of its range = muted; skip pumping energy so the
+	# bus stays quiet between rounds.
+	if _music_db <= MUSIC_DB_MIN + 0.5:
 		ProceduralMusic.set_energy(0, true)
 		return
 	ProceduralMusic.set_energy(level, immediate, next_bar)
@@ -1785,8 +1790,12 @@ var _retro_material: ShaderMaterial = null
 
 # -------------------- VIDEO SETTINGS --------------------
 const SETTINGS_PATH := "user://settings.cfg"
+const MUSIC_DB_MIN := -40.0  # below this is treated as muted
+const MUSIC_DB_MAX := 0.0
+const MUSIC_DB_DEFAULT := -16.0
 var _retro_enabled: bool = true
-var _music_enabled: bool = true
+var _music_db: float = MUSIC_DB_DEFAULT
+var _mouse_sens_mult: float = 1.0
 
 
 func _load_settings() -> void:
@@ -1794,13 +1803,20 @@ func _load_settings() -> void:
 	if cfg.load(SETTINGS_PATH) != OK:
 		return
 	_retro_enabled = cfg.get_value("video", "retro", cfg.get_value("video", "dither", true))
-	_music_enabled = cfg.get_value("audio", "music", true)
+	# Migrate the old bool setting: if music=false was saved, start the slider
+	# at the muted floor so behaviour matches the previous toggle. Otherwise
+	# read the new music_db key (with default volume).
+	var music_legacy: bool = cfg.get_value("audio", "music", true)
+	var music_legacy_default: float = MUSIC_DB_DEFAULT if music_legacy else MUSIC_DB_MIN
+	_music_db = float(cfg.get_value("audio", "music_db", music_legacy_default))
+	_mouse_sens_mult = float(cfg.get_value("input", "mouse_sens_mult", 1.0))
 
 
 func _save_settings() -> void:
 	var cfg := ConfigFile.new()
 	cfg.set_value("video", "retro", _retro_enabled)
-	cfg.set_value("audio", "music", _music_enabled)
+	cfg.set_value("audio", "music_db", _music_db)
+	cfg.set_value("input", "mouse_sens_mult", _mouse_sens_mult)
 	cfg.save(SETTINGS_PATH)
 
 
@@ -1810,12 +1826,22 @@ func _apply_settings() -> void:
 	if _retro_material:
 		_retro_material.set_shader_parameter("dither_strength", 1.0)
 		_retro_material.set_shader_parameter("fisheye_strength", 1.0)
-	ProceduralMusic.enabled = _music_enabled
-	if _music_enabled:
+	# Music: drive the procedural music's volume directly. Treat the bottom
+	# of the slider as "off" — saves the audio bus when the user wants silence.
+	var muted: bool = _music_db <= MUSIC_DB_MIN + 0.5
+	ProceduralMusic.enabled = not muted
+	ProceduralMusic.music_db = _music_db
+	if not muted:
 		ProceduralMusic.set_energy(_round_music_level, true)
 	else:
 		ProceduralMusic.set_energy(0, true)
+	_apply_mouse_sens_to_local()
 	_sync_mouse_mode()
+
+
+func _apply_mouse_sens_to_local() -> void:
+	if local_player and is_instance_valid(local_player):
+		local_player.set("mouse_sens_mult", _mouse_sens_mult)
 
 func _apply_retro_shader(node: Control) -> void:
 	var shader := Shader.new()
@@ -2550,7 +2576,10 @@ var _pause_join_input: LineEdit = null
 var _pause_seed_label: Label = null
 var _settings_panel: Control = null
 var _settings_retro_toggle: CheckButton = null
-var _settings_music_toggle: CheckButton = null
+var _settings_music_slider: HSlider = null
+var _settings_music_value_label: Label = null
+var _settings_mouse_slider: HSlider = null
+var _settings_mouse_value_label: Label = null
 
 
 func _open_settings() -> void:
@@ -2558,13 +2587,25 @@ func _open_settings() -> void:
 		_build_settings_panel()
 	if _pause_menu:
 		_pause_menu.visible = false
-	# Sync toggles to the live state in case the user changed them via some
+	# Sync controls to the live state in case the values changed via some
 	# other path (CLI flag, save edit, etc.) since the panel was last opened.
 	if _settings_retro_toggle:
 		_settings_retro_toggle.set_pressed_no_signal(_retro_enabled)
-	if _settings_music_toggle:
-		_settings_music_toggle.set_pressed_no_signal(_music_enabled)
+	if _settings_music_slider:
+		_settings_music_slider.set_value_no_signal(_music_db)
+		if _settings_music_value_label:
+			_settings_music_value_label.text = _music_label_for(_music_db)
+	if _settings_mouse_slider:
+		_settings_mouse_slider.set_value_no_signal(_mouse_sens_mult)
+		if _settings_mouse_value_label:
+			_settings_mouse_value_label.text = "%.2fx" % _mouse_sens_mult
 	_settings_panel.visible = true
+
+
+func _music_label_for(db: float) -> String:
+	if db <= MUSIC_DB_MIN + 0.5:
+		return "Off"
+	return "%.0f dB" % db
 
 
 func _close_settings() -> void:
@@ -2637,15 +2678,29 @@ func _build_settings_panel() -> void:
 	vb.add_child(retro_toggle)
 	_settings_retro_toggle = retro_toggle
 
-	var music_toggle := CheckButton.new()
-	music_toggle.text = "Procedural music"
-	music_toggle.button_pressed = _music_enabled
-	music_toggle.toggled.connect(func(on: bool) -> void:
-		_music_enabled = on
+	# Music volume slider — bottom of range = "Off".
+	var music_row := _build_slider_row("Music", _music_db, MUSIC_DB_MIN, MUSIC_DB_MAX, 1.0, _music_label_for(_music_db))
+	vb.add_child(music_row["row"])
+	_settings_music_slider = music_row["slider"]
+	_settings_music_value_label = music_row["value_label"]
+	_settings_music_slider.value_changed.connect(func(v: float) -> void:
+		_music_db = v
+		if _settings_music_value_label:
+			_settings_music_value_label.text = _music_label_for(v)
 		_apply_settings()
 		_save_settings())
-	vb.add_child(music_toggle)
-	_settings_music_toggle = music_toggle
+
+	# Mouse sensitivity multiplier — 1.0 = base MOUSE_SENS in player.gd.
+	var mouse_row := _build_slider_row("Mouse sensitivity", _mouse_sens_mult, 0.3, 3.0, 0.05, "%.2fx" % _mouse_sens_mult)
+	vb.add_child(mouse_row["row"])
+	_settings_mouse_slider = mouse_row["slider"]
+	_settings_mouse_value_label = mouse_row["value_label"]
+	_settings_mouse_slider.value_changed.connect(func(v: float) -> void:
+		_mouse_sens_mult = v
+		if _settings_mouse_value_label:
+			_settings_mouse_value_label.text = "%.2fx" % v
+		_apply_settings()
+		_save_settings())
 
 	var spacer2 := Control.new()
 	spacer2.custom_minimum_size = Vector2(0, 8)
@@ -2659,6 +2714,36 @@ func _build_settings_panel() -> void:
 
 	_settings_panel = root
 	_settings_panel.visible = false
+
+
+func _build_slider_row(label_text: String, value: float, min_val: float, max_val: float, step: float, value_text: String) -> Dictionary:
+	# Returns {row: HBoxContainer, slider: HSlider, value_label: Label} so the
+	# caller can wire signals and update the live value display.
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 12)
+	var label := Label.new()
+	label.text = label_text
+	label.custom_minimum_size = Vector2(170, 0)
+	label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	label.add_theme_color_override("font_color", Color(0.85, 0.85, 0.95))
+	row.add_child(label)
+	var slider := HSlider.new()
+	slider.min_value = min_val
+	slider.max_value = max_val
+	slider.step = step
+	slider.value = clampf(value, min_val, max_val)
+	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	slider.custom_minimum_size = Vector2(180, 28)
+	row.add_child(slider)
+	var value_label := Label.new()
+	value_label.text = value_text
+	value_label.custom_minimum_size = Vector2(70, 0)
+	value_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	value_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	value_label.add_theme_color_override("font_color", Color(0.7, 0.7, 0.85))
+	row.add_child(value_label)
+	return {"row": row, "slider": slider, "value_label": value_label}
+
 
 # Last map swap inputs — used by the pause menu's seed label (and any future
 # "rejoin same map" feature). Updated in _swap_arena.
