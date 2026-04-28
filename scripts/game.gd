@@ -1078,12 +1078,10 @@ func _end_round(winner_id: int) -> void:
 		return
 	# Freeze the losers and wait for them to finish their picks.
 	state = State.PICKING_CARD
-	for pid in NetworkManager.players:
-		var p := players_root.get_node_or_null(str(pid))
-		if p:
-			# Only freeze the non-winners
-			if int(pid) != winner_id:
-				p.set_frozen.rpc(true)
+	# Don't freeze losers during card pick — let everyone keep moving while
+	# the round-pick UI is up. The picker's UI overlay captures their mouse
+	# / clicks; movement keys still work in the background, which is fine
+	# (it just means they can stretch their legs while picking).
 	for raw_loser_id in eliminated_players.keys():
 		var loser_id := int(raw_loser_id)
 		if not completed_picks.has(loser_id) and not pending_pick_cards_by_player.has(loser_id):
