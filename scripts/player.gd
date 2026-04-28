@@ -776,6 +776,9 @@ func _physics_process(delta: float) -> void:
 	var shoot_just_pressed := _action_just_pressed_local("shoot")
 	var reload_pressed := _action_just_pressed_local("reload")
 	var special_pressed := _action_just_pressed_local("shoot_grenade")
+	# Zoom is hold-to-aim (sniper scope), not a toggle — track held state so
+	# is_zooming follows the button instead of flipping each press.
+	var special_held := _action_pressed_local("shoot_grenade")
 
 	if jump_pressed:
 		if is_on_floor():
@@ -886,10 +889,11 @@ func _physics_process(delta: float) -> void:
 			SFX.empty_chamber(muzzle.global_position)
 	if reload_pressed and not ghost_mode and can_fire:
 		_start_reload()
-	if special_pressed and not ghost_mode and can_fire:
+	if not ghost_mode and can_fire:
 		if weapon.special == Weapon.SPECIAL_ZOOM:
-			is_zooming = !is_zooming
-		elif grenade_cooldown <= 0.0:
+			# Hold-to-zoom: scope follows the button, releases when let go.
+			is_zooming = special_held
+		elif special_pressed and grenade_cooldown <= 0.0:
 			_use_special()
 
 	if weapon.special != Weapon.SPECIAL_ZOOM:
