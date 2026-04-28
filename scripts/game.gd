@@ -919,6 +919,7 @@ func _start_round_now() -> void:
 		p.clear_ragdoll.rpc()
 	_clear_projectiles.rpc()
 	_clear_craters.rpc()
+	_clear_blood_splats.rpc()
 	_hide_rematch_overlay.rpc()
 	# Clear any leftover round-end banner ("PICKING A CARD…", "WAITING FOR …",
 	# etc.) so it doesn't bleed into the new round.
@@ -995,6 +996,12 @@ func _clear_craters() -> void:
 	# Persistent bullet-impact scorch marks reset between rounds — old craters
 	# from last round shouldn't litter the new arena.
 	Violence.clear_craters(self)
+
+@rpc("authority", "call_local", "reliable")
+func _clear_blood_splats() -> void:
+	# Same logic as craters: blood decals from last round shouldn't bleed
+	# into the new map.
+	Violence.clear_blood_splats(self)
 
 # Replace the current "Arena" child with the map at MAP_POOL[map_index].
 # Called from _start_round_now via RPC — server picks the index, every peer
