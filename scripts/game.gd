@@ -2810,6 +2810,13 @@ func _build_settings_panel() -> void:
 	back_btn.text = "BACK"
 	back_btn.custom_minimum_size = Vector2(0, 44)
 	back_btn.pressed.connect(_close_settings)
+	# Esc returns to the pause menu — without this you'd be stuck in
+	# settings since Game._input early-returns while the tree is paused.
+	var back_shortcut := Shortcut.new()
+	var back_ev := InputEventAction.new()
+	back_ev.action = "ui_cancel"
+	back_shortcut.events.append(back_ev)
+	back_btn.shortcut = back_shortcut
 	vb.add_child(back_btn)
 
 	_settings_panel = root
