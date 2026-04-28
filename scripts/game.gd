@@ -625,6 +625,15 @@ func _request_spawn(pname: String) -> void:
 	NetworkManager.players[sender] = pname
 	if not round_wins.has(sender):
 		round_wins[sender] = 0
+	# Ship the current map to the joiner before spawning them. The embedded
+	# arena_procedural in game.tscn has regenerate_on_ready=false, so a
+	# fresh client's local Arena has no floor / walls / spawnpoints until a
+	# _swap_arena RPC arrives. That RPC normally only fires at round start,
+	# so a mid-round join would otherwise teleport the player onto a server-
+	# valid position that doesn't exist on their client → fall into lava.
+	# Targeting just the joiner via rpc_id keeps existing peers untouched.
+	if state != State.WAITING and current_map_index >= 0 and current_map_index < MAP_POOL.size():
+		_swap_arena.rpc_id(sender, current_map_index, current_map_seed)
 	_spawn_player(sender, pname)
 	for pid in NetworkManager.players:
 		if players_root.has_node(str(pid)) and pid != sender:
