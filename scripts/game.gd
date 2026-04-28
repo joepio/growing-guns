@@ -282,6 +282,15 @@ func _ready() -> void:
 		_arena_env = we.environment
 		_base_tonemap_exposure = _arena_env.tonemap_exposure
 
+	# First-launch name prompt. We persist the chosen callsign in
+	# settings.cfg [player] name; if we never asked, block the boot until
+	# the player gives us one. The HUD is already built (see _build_*
+	# calls above), so the modal can attach to $HUD now.
+	if _player_name.is_empty():
+		_show_name_prompt()
+		await self._player_name_set
+	NetworkManager.local_player_name = _player_name
+
 	# Auto-host an iroh server unless we're already wired to a real peer
 	# (e.g. the user just clicked Join in the pause menu, which set up an
 	# IrohClient before reloading the scene). This is what makes the boot
@@ -290,8 +299,7 @@ func _ready() -> void:
 	# so a plain `== null` check never fires — must also reject that.
 	if multiplayer.multiplayer_peer == null \
 			or multiplayer.multiplayer_peer is OfflineMultiplayerPeer:
-		var name_default := "Player_%d" % (randi() % 1000)
-		NetworkManager.host_game_iroh(name_default)
+		NetworkManager.host_game_iroh(_player_name)
 
 	if multiplayer.is_server():
 		multiplayer.peer_disconnected.connect(_on_peer_disconnected)
@@ -1859,6 +1867,9 @@ var _retro_enabled: bool = true
 var _music_db: float = MUSIC_DB_DEFAULT
 var _mouse_sens_mult: float = 1.0
 var _movement_tilt_enabled: bool = true
+var _player_name: String = ""
+
+signal _player_name_set
 
 
 func _load_settings() -> void:
@@ -1874,6 +1885,7 @@ func _load_settings() -> void:
 	_music_db = float(cfg.get_value("audio", "music_db", music_legacy_default))
 	_mouse_sens_mult = float(cfg.get_value("input", "mouse_sens_mult", 1.0))
 	_movement_tilt_enabled = cfg.get_value("input", "movement_tilt", true)
+	_player_name = String(cfg.get_value("player", "name", ""))
 
 
 func _save_settings() -> void:
@@ -1882,6 +1894,7 @@ func _save_settings() -> void:
 	cfg.set_value("audio", "music_db", _music_db)
 	cfg.set_value("input", "mouse_sens_mult", _mouse_sens_mult)
 	cfg.set_value("input", "movement_tilt", _movement_tilt_enabled)
+	cfg.set_value("player", "name", _player_name)
 	cfg.save(SETTINGS_PATH)
 
 
@@ -2794,6 +2807,84 @@ func _build_settings_panel() -> void:
 
 	_settings_panel = root
 	_settings_panel.visible = false
+
+
+func _show_name_prompt() -> void:
+	# Blocking modal shown on first launch (no name in settings.cfg). _ready
+	# awaits _player_name_set before continuing to host_game_iroh, so the
+	# server is created with the player's chosen name on the very first try.
+	var modal := Control.new()
+	modal.name = "NamePrompt"
+	modal.process_mode = Node.PROCESS_MODE_ALWAYS
+	modal.anchor_right = 1.0
+	modal.anchor_bottom = 1.0
+	modal.mouse_filter = Control.MOUSE_FILTER_STOP
+	$HUD.add_child(modal)
+
+	var bg := ColorRect.new()
+	bg.color = Color(0, 0, 0, 0.65)
+	bg.anchor_right = 1.0
+	bg.anchor_bottom = 1.0
+	modal.add_child(bg)
+
+	var center := CenterContainer.new()
+	center.anchor_right = 1.0
+	center.anchor_bottom = 1.0
+	modal.add_child(center)
+
+	var panel := PanelContainer.new()
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.08, 0.08, 0.1, 0.95)
+	sb.border_color = Color(0.35, 0.7, 1.0)
+	sb.set_border_width_all(2)
+	sb.set_corner_radius_all(8)
+	sb.content_margin_left = 28
+	sb.content_margin_right = 28
+	sb.content_margin_top = 22
+	sb.content_margin_bottom = 22
+	panel.add_theme_stylebox_override("panel", sb)
+	center.add_child(panel)
+
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 14)
+	vb.custom_minimum_size = Vector2(380, 0)
+	panel.add_child(vb)
+
+	var title := Label.new()
+	title.text = "WHAT'S YOUR NAME?"
+	title.add_theme_font_size_override("font_size", 28)
+	title.add_theme_color_override("font_color", Color(1, 0.9, 0.45))
+	title.add_theme_color_override("font_outline_color", Color(0.4, 0.0, 0.1))
+	title.add_theme_constant_override("outline_size", 5)
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vb.add_child(title)
+
+	var input := LineEdit.new()
+	input.placeholder_text = "Your callsign…"
+	input.max_length = 20
+	input.custom_minimum_size = Vector2(360, 36)
+	vb.add_child(input)
+
+	var submit_btn := Button.new()
+	submit_btn.text = "READY"
+	submit_btn.custom_minimum_size = Vector2(0, 44)
+	vb.add_child(submit_btn)
+
+	var on_submit := func() -> void:
+		var entered: String = input.text.strip_edges()
+		if entered.is_empty():
+			# Empty submit falls back to a Player_NNN handle so we never
+			# end up with a blank string in NetworkManager.
+			entered = "Player_%d" % (randi() % 1000)
+		_player_name = entered
+		_save_settings()
+		modal.queue_free()
+		_player_name_set.emit()
+
+	submit_btn.pressed.connect(on_submit)
+	input.text_submitted.connect(func(_t: String) -> void: on_submit.call())
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	input.call_deferred("grab_focus")
 
 
 func _build_slider_row(label_text: String, value: float, min_val: float, max_val: float, step: float, value_text: String) -> Dictionary:
