@@ -252,9 +252,27 @@ func regenerate() -> void:
 	var hi: float = maxf(arena_size_min, arena_size_max)
 	arena_size = roundf(rng.randf_range(lo, hi))
 
-	_build_floor()
-	_build_walls()
+	# One roll picks the structural variant. 30% open arena (no perimeter
+	# walls — players can run off into the lava), 20% walled with a hole in
+	# the floor, 50% normal walled-and-solid. Mutually exclusive.
+	var variant_roll: float = rng.randf()
+	var no_walls: bool = variant_roll < 0.30
+	var has_hole: bool = (not no_walls) and variant_roll < 0.50
+	var hole_pos: Vector2 = Vector2.ZERO
+	var hole_size: float = 0.0
+	if has_hole:
+		hole_size = rng.randf_range(10.0, 16.0)
+		var max_off: float = arena_size * 0.25
+		hole_pos = Vector2(rng.randf_range(-max_off, max_off), rng.randf_range(-max_off, max_off))
+
+	_build_floor(has_hole, hole_pos, hole_size)
+	if not no_walls:
+		_build_walls()
 	_build_lava_pool()
+	# Reserve the hole as an unplaceable circle so buildings / pillars / etc.
+	# don't land in it. Spawnpoints are corners + rooftops, both safe.
+	if has_hole:
+		_placed.append([hole_pos, hole_size * 0.5 + 1.5])
 
 	# Reserve the perimeter band so nothing tries to clip into a wall.
 	var perim_radius: float = arena_size * 0.5 - 1.5
@@ -506,6 +524,8 @@ func regenerate() -> void:
 		"diagonal_walls": diag_built,
 		"spawnpoints": _spawn_positions.size(),
 		"has_center_tower": has_center,
+		"no_walls": no_walls,
+		"has_hole": has_hole,
 		"palette": palette["name"],
 		"sky_top": palette["sky_top"],
 		"sky_horizon": palette["sky_horizon"],
@@ -608,8 +628,37 @@ func _add_static_box(pos: Vector3, size: Vector3, mat: StandardMaterial3D, rotat
 	return body
 
 
-func _build_floor() -> void:
-	_add_static_box(Vector3(0, -0.5, 0), Vector3(arena_size, 1, arena_size), _mat_floor)
+func _build_floor(has_hole: bool = false, hole_pos: Vector2 = Vector2.ZERO, hole_size: float = 0.0) -> void:
+	if not has_hole or hole_size <= 0.0:
+		_add_static_box(Vector3(0, -0.5, 0), Vector3(arena_size, 1, arena_size), _mat_floor)
+		return
+	# Floor with a square cutout — built as 4 strips (N / S / W / E) around
+	# the hole. Lava under the floor (y = -2) shows through the hole, and
+	# the kill area instakills any player who falls in.
+	var half: float = arena_size * 0.5
+	var hx: float = hole_pos.x
+	var hz: float = hole_pos.y
+	var hh: float = hole_size * 0.5
+	# North strip — full width, runs from -half (Z) up to the hole's near edge.
+	var n_d: float = (hz - hh) - (-half)
+	if n_d > 0.1:
+		var n_z: float = (-half + (hz - hh)) * 0.5
+		_add_static_box(Vector3(0, -0.5, n_z), Vector3(arena_size, 1, n_d), _mat_floor)
+	# South strip — from hole's far edge to +half.
+	var s_d: float = half - (hz + hh)
+	if s_d > 0.1:
+		var s_z: float = ((hz + hh) + half) * 0.5
+		_add_static_box(Vector3(0, -0.5, s_z), Vector3(arena_size, 1, s_d), _mat_floor)
+	# West strip — only spans the hole's Z range, fills X up to the hole.
+	var w_w: float = (hx - hh) - (-half)
+	if w_w > 0.1:
+		var w_x: float = (-half + (hx - hh)) * 0.5
+		_add_static_box(Vector3(w_x, -0.5, hz), Vector3(w_w, 1, hole_size), _mat_floor)
+	# East strip — from hole's far edge to +half.
+	var e_w: float = half - (hx + hh)
+	if e_w > 0.1:
+		var e_x: float = ((hx + hh) + half) * 0.5
+		_add_static_box(Vector3(e_x, -0.5, hz), Vector3(e_w, 1, hole_size), _mat_floor)
 
 
 func _build_lava_pool() -> void:
