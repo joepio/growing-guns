@@ -1082,6 +1082,15 @@ func _end_round(winner_id: int) -> void:
 	if winner_id != 0:
 		round_wins[winner_id] = int(round_wins.get(winner_id, 0)) + 1
 		_broadcast_scores.rpc(round_wins)
+		# Show "<winner> WINS THE ROUND" on every peer before the card-pick UI
+		# starts overwriting the banner. The await below gives the message
+		# enough screen time to read; the match-over branch below uses its
+		# own _match_over banner so we skip the announce when this is also
+		# the final round.
+		var winner_name: String = NetworkManager.players.get(winner_id, "Player")
+		var is_final: bool = int(round_wins[winner_id]) >= rounds_to_win
+		if not is_final:
+			_announce.rpc("%s WINS THE ROUND" % winner_name, 1.6)
 	# Match over?
 	if winner_id != 0 and int(round_wins[winner_id]) >= rounds_to_win:
 		state = State.MATCH_OVER
@@ -1093,6 +1102,10 @@ func _end_round(winner_id: int) -> void:
 					pn.set_frozen.rpc(true)
 		_match_over.rpc(winner_id)
 		return
+	# Hold on the "X WINS THE ROUND" banner for a beat before the card-pick
+	# UI cascade overwrites it.
+	if winner_id != 0:
+		await get_tree().create_timer(1.4).timeout
 	# Freeze the losers and wait for them to finish their picks.
 	state = State.PICKING_CARD
 	# Don't freeze losers during card pick — let everyone keep moving while
