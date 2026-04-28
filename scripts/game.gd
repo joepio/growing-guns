@@ -1796,6 +1796,7 @@ const MUSIC_DB_DEFAULT := -16.0
 var _retro_enabled: bool = true
 var _music_db: float = MUSIC_DB_DEFAULT
 var _mouse_sens_mult: float = 1.0
+var _movement_tilt_enabled: bool = true
 
 
 func _load_settings() -> void:
@@ -1810,6 +1811,7 @@ func _load_settings() -> void:
 	var music_legacy_default: float = MUSIC_DB_DEFAULT if music_legacy else MUSIC_DB_MIN
 	_music_db = float(cfg.get_value("audio", "music_db", music_legacy_default))
 	_mouse_sens_mult = float(cfg.get_value("input", "mouse_sens_mult", 1.0))
+	_movement_tilt_enabled = cfg.get_value("input", "movement_tilt", true)
 
 
 func _save_settings() -> void:
@@ -1817,6 +1819,7 @@ func _save_settings() -> void:
 	cfg.set_value("video", "retro", _retro_enabled)
 	cfg.set_value("audio", "music_db", _music_db)
 	cfg.set_value("input", "mouse_sens_mult", _mouse_sens_mult)
+	cfg.set_value("input", "movement_tilt", _movement_tilt_enabled)
 	cfg.save(SETTINGS_PATH)
 
 
@@ -1842,6 +1845,7 @@ func _apply_settings() -> void:
 func _apply_mouse_sens_to_local() -> void:
 	if local_player and is_instance_valid(local_player):
 		local_player.set("mouse_sens_mult", _mouse_sens_mult)
+		local_player.set("tilt_enabled", _movement_tilt_enabled)
 
 func _apply_retro_shader(node: Control) -> void:
 	var shader := Shader.new()
@@ -2580,6 +2584,7 @@ var _settings_music_slider: HSlider = null
 var _settings_music_value_label: Label = null
 var _settings_mouse_slider: HSlider = null
 var _settings_mouse_value_label: Label = null
+var _settings_tilt_toggle: CheckButton = null
 
 
 func _open_settings() -> void:
@@ -2599,6 +2604,8 @@ func _open_settings() -> void:
 		_settings_mouse_slider.set_value_no_signal(_mouse_sens_mult)
 		if _settings_mouse_value_label:
 			_settings_mouse_value_label.text = "%.2fx" % _mouse_sens_mult
+	if _settings_tilt_toggle:
+		_settings_tilt_toggle.set_pressed_no_signal(_movement_tilt_enabled)
 	_settings_panel.visible = true
 
 
@@ -2701,6 +2708,17 @@ func _build_settings_panel() -> void:
 			_settings_mouse_value_label.text = "%.2fx" % v
 		_apply_settings()
 		_save_settings())
+
+	# Movement tilt — strafe-driven camera + gun roll. Some players hate it.
+	var tilt_toggle := CheckButton.new()
+	tilt_toggle.text = "Movement tilt"
+	tilt_toggle.button_pressed = _movement_tilt_enabled
+	tilt_toggle.toggled.connect(func(on: bool) -> void:
+		_movement_tilt_enabled = on
+		_apply_settings()
+		_save_settings())
+	vb.add_child(tilt_toggle)
+	_settings_tilt_toggle = tilt_toggle
 
 	var spacer2 := Control.new()
 	spacer2.custom_minimum_size = Vector2(0, 8)
