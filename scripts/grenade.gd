@@ -2,6 +2,10 @@ extends RigidBody3D
 
 const FUSE := 4.0                # fallback if the grenade somehow never touches anything
 const ARM_DELAY := 0.04          # ignore contacts for this long after spawn (just enough to clear the muzzle)
+# Mines stay dormant a bit longer than thrown grenades — long enough for the
+# plant SFX (thud + arm-beep) to finish so the player hears the cue and the
+# planter can step away before it'll trigger.
+const MINE_ARM_DELAY := 0.7
 const RADIUS := 6.0
 const MAX_DAMAGE := 100
 const MIN_DAMAGE := 10
@@ -51,7 +55,7 @@ func _on_body_entered(_body: Node) -> void:
 	_explode()
 
 func _maybe_trigger_mine() -> void:
-	if _age < ARM_DELAY:
+	if _age < MINE_ARM_DELAY:
 		return
 	for p in get_tree().get_nodes_in_group("players"):
 		if not is_instance_valid(p):
