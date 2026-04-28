@@ -16,6 +16,97 @@ const MINE_TRIGGER_RADIUS := 1.25
 const MINE_LIFETIME := 10.0        # mines quietly expire if nobody wanders in
 const SPEED_OF_SOUND := 343.0      # m/s — same constant as audio + visuals use
 
+# Static-cached shaders for the heat-distortion shell + shockwave ring. Each
+# explosion used to call Shader.new() with identical source, paying a fresh
+# bytecode parse + PSO compile on first detonation of every match. Caching at
+# class scope means the bytecode parse happens once total; the PSO can be
+# pre-warmed via warmup_shaders().
+static var _heat_shader_cached: Shader = null
+static var _shock_shader_cached: Shader = null
+
+const _HEAT_SHADER_CODE := "
+	shader_type spatial;
+	render_mode unshaded, cull_disabled, depth_draw_never;
+
+	uniform sampler2D screen_tex : hint_screen_texture, filter_linear_mipmap;
+	uniform float distortion_strength = 0.05;
+	uniform float zoom_strength = 0.018;
+	uniform float opacity = 0.2;
+
+	void fragment() {
+		vec3 n = normalize((VIEW_MATRIX * vec4(NORMAL, 0.0)).xyz);
+		float fresnel = pow(1.0 - abs(dot(normalize(VIEW), NORMAL)), 2.4);
+		vec2 offset = n.xy * distortion_strength * fresnel;
+		vec2 zoom = (SCREEN_UV - vec2(0.5)) * zoom_strength * fresnel;
+		vec2 uv = SCREEN_UV - zoom + offset;
+		vec3 col = texture(screen_tex, uv).rgb;
+		ALBEDO = col;
+		ALPHA = opacity * fresnel;
+	}
+"
+
+const _SHOCK_SHADER_CODE := "
+	shader_type spatial;
+	render_mode unshaded, cull_disabled, depth_draw_never, blend_mix;
+
+	uniform sampler2D screen_tex : hint_screen_texture, filter_linear_mipmap;
+	uniform float distortion_strength = 0.04;
+	uniform float ring_thickness = 7.0;
+	uniform float opacity = 0.85;
+
+	void fragment() {
+		float fresnel = pow(1.0 - abs(dot(normalize(VIEW), NORMAL)), ring_thickness);
+		vec3 n = normalize((VIEW_MATRIX * vec4(NORMAL, 0.0)).xyz);
+		vec2 offset = n.xy * distortion_strength * fresnel;
+		vec3 col = texture(screen_tex, SCREEN_UV + offset).rgb;
+		ALBEDO = col;
+		ALPHA = fresnel * opacity;
+	}
+"
+
+
+static func _get_heat_shader() -> Shader:
+	if _heat_shader_cached == null:
+		_heat_shader_cached = Shader.new()
+		_heat_shader_cached.code = _HEAT_SHADER_CODE
+	return _heat_shader_cached
+
+
+static func _get_shock_shader() -> Shader:
+	if _shock_shader_cached == null:
+		_shock_shader_cached = Shader.new()
+		_shock_shader_cached.code = _SHOCK_SHADER_CODE
+	return _shock_shader_cached
+
+
+# Force the GPU to compile the heat + shock shader pipelines now (during a
+# quiet warmup window) instead of on the first explosion mid-fight. Attaches
+# tiny invisible meshes to the scene; they self-free after a couple frames.
+static func warmup_shaders(scene: Node) -> void:
+	if scene == null:
+		return
+	for shader: Shader in [_get_heat_shader(), _get_shock_shader()]:
+		var mat := ShaderMaterial.new()
+		mat.shader = shader
+		var mi := MeshInstance3D.new()
+		var sphere := SphereMesh.new()
+		sphere.radius = 0.001
+		sphere.height = 0.002
+		mi.mesh = sphere
+		mi.material_override = mat
+		# Park at scene origin so it's actually rendered (compiles the PSO),
+		# but at sub-pixel scale so it's invisible.
+		scene.add_child(mi)
+		mi.global_position = Vector3.ZERO
+		var t := Timer.new()
+		t.wait_time = 0.3
+		t.one_shot = true
+		t.process_mode = Node.PROCESS_MODE_ALWAYS
+		mi.add_child(t)
+		t.start()
+		t.timeout.connect(mi.queue_free)
+
+
 @export var shooter_id: int = 1
 @export var is_mine: bool = false
 
@@ -303,29 +394,8 @@ func _spawn_heat_distortion(scene: Node, pos: Vector3, radius: float, duration: 
 	mesh.radial_segments = 24
 	mesh.rings = 12
 	shell.mesh = mesh
-	var shader := Shader.new()
-	shader.code = """
-		shader_type spatial;
-		render_mode unshaded, cull_disabled, depth_draw_never;
-
-		uniform sampler2D screen_tex : hint_screen_texture, filter_linear_mipmap;
-		uniform float distortion_strength = 0.05;
-		uniform float zoom_strength = 0.018;
-		uniform float opacity = 0.2;
-
-		void fragment() {
-			vec3 n = normalize((VIEW_MATRIX * vec4(NORMAL, 0.0)).xyz);
-			float fresnel = pow(1.0 - abs(dot(normalize(VIEW), NORMAL)), 2.4);
-			vec2 offset = n.xy * distortion_strength * fresnel;
-			vec2 zoom = (SCREEN_UV - vec2(0.5)) * zoom_strength * fresnel;
-			vec2 uv = SCREEN_UV - zoom + offset;
-			vec3 col = texture(screen_tex, uv).rgb;
-			ALBEDO = col;
-			ALPHA = opacity * fresnel;
-		}
-	"""
 	var mat := ShaderMaterial.new()
-	mat.shader = shader
+	mat.shader = _get_heat_shader()
 	mat.set_shader_parameter("distortion_strength", strength * 2.4)
 	mat.set_shader_parameter("zoom_strength", strength * 0.9)
 	mat.set_shader_parameter("opacity", 0.38)
@@ -370,28 +440,8 @@ func _spawn_shockwave_ring(scene: Node, pos: Vector3, radius: float) -> void:
 	mesh.radial_segments = 32
 	mesh.rings = 16
 	shell.mesh = mesh
-	var shader := Shader.new()
-	shader.code = """
-		shader_type spatial;
-		render_mode unshaded, cull_disabled, depth_draw_never, blend_mix;
-
-		uniform sampler2D screen_tex : hint_screen_texture, filter_linear_mipmap;
-		uniform float distortion_strength = 0.04;
-		uniform float ring_thickness = 7.0;
-		uniform float opacity = 0.85;
-
-		void fragment() {
-			// High exponent -> energy concentrated on silhouette ring only.
-			float fresnel = pow(1.0 - abs(dot(normalize(VIEW), NORMAL)), ring_thickness);
-			vec3 n = normalize((VIEW_MATRIX * vec4(NORMAL, 0.0)).xyz);
-			vec2 offset = n.xy * distortion_strength * fresnel;
-			vec3 col = texture(screen_tex, SCREEN_UV + offset).rgb;
-			ALBEDO = col;
-			ALPHA = fresnel * opacity;
-		}
-	"""
 	var mat := ShaderMaterial.new()
-	mat.shader = shader
+	mat.shader = _get_shock_shader()
 	mat.set_shader_parameter("distortion_strength", 0.05)
 	mat.set_shader_parameter("ring_thickness", 7.0)
 	mat.set_shader_parameter("opacity", 0.9)

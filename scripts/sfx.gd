@@ -479,6 +479,31 @@ func _cached_wav(key: String, generator: Callable) -> AudioStreamWAV:
 		_wav_cache[key] = _samples_to_wav(samples)
 	return _wav_cache[key]
 
+# Pre-cache shot + explosion samples for the given weapons / radii so first-
+# fire stutters (30-50ms of synth on the audio thread) are paid during a
+# quiet warmup window — round start or post-card-pick — instead of mid-fight.
+# Spreads the work across frames via `await get_tree().process_frame` between
+# tasks so a long warmup pass never freezes the simulation. Cache hits are
+# instant no-ops so re-calling with overlapping inputs is cheap.
+func warmup_async(weapons: Array, radii: Array) -> void:
+	for w in weapons:
+		if w == null:
+			continue
+		for v in SHOT_VARIANTS:
+			var key := _shot_cache_key(w, v)
+			_cached_wav(key, Callable(self, "_synth_shot").bind(w, v))
+			await get_tree().process_frame
+	for radius in radii:
+		var r_bucket: int = int(round(clampf(float(radius), 2.0, 24.0)))
+		for v in EXPLOSION_VARIANTS:
+			var bang_key := "explosion_bang:%d:%d" % [r_bucket, v]
+			_cached_wav(bang_key, Callable(self, "_synth_explosion").bind(float(r_bucket), v))
+			await get_tree().process_frame
+			var rumble_key := "explosion_rumble:%d:%d" % [r_bucket, v]
+			_cached_wav(rumble_key, Callable(self, "_synth_explosion_rumble").bind(float(r_bucket), v))
+			await get_tree().process_frame
+
+
 func _shot_cache_key(w: Weapon, variant: int) -> String:
 	if w == null:
 		return "shot:default:%d" % variant
