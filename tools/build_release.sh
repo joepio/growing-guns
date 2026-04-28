@@ -78,6 +78,10 @@ if [[ -n "$BUMP" ]]; then
 	esac
 	VERSION="$MAJ.$MIN.$PAT"
 	echo "$VERSION" > "$VERSION_FILE"
+	# Mirror into project.godot's config/version so the running game can
+	# read its own version via ProjectSettings.get_setting at boot.
+	# No-op if the line isn't present (older trees pre-version-check).
+	sed -i '' 's|^config/version="[^"]*"|config/version="'"$VERSION"'"|' "$ROOT/project.godot" 2>/dev/null || true
 	echo "==> Bumped version to $VERSION"
 	# Tag the commit if the working tree is clean. Skip silently if not in a
 	# git repo or if there are uncommitted changes (don't get in the user's way).

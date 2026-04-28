@@ -268,6 +268,11 @@ func _ready() -> void:
 	_build_retro_filter()
 	_load_settings()
 	_apply_settings()
+	# Web-zip distribution doesn't auto-update like the itch.io app does —
+	# this fires a one-shot HTTPRequest against the repo's VERSION file and
+	# pops a tiny "click to download" button if the released version is
+	# newer than the build the user is running.
+	add_child(preload("res://scripts/version_check.gd").new())
 	_build_tab_overlay()
 	_build_stats_panel()
 	# Dev panel (F1) — cheats. Only built in debug runs (editor + debug
