@@ -912,6 +912,9 @@ func _start_round_now() -> void:
 	_clear_projectiles.rpc()
 	_clear_craters.rpc()
 	_hide_rematch_overlay.rpc()
+	# Clear any leftover round-end banner ("PICKING A CARD…", "WAITING FOR …",
+	# etc.) so it doesn't bleed into the new round.
+	_announce.rpc("", 0)
 
 @rpc("authority", "call_local", "reliable")
 func _set_music_energy(level: int, immediate: bool = false, next_bar: bool = false) -> void:
@@ -1101,8 +1104,8 @@ func _end_round(winner_id: int) -> void:
 		if not completed_picks.has(loser_id) and not pending_pick_cards_by_player.has(loser_id):
 			_begin_card_pick_for_loser(loser_id)
 		elif completed_picks.has(loser_id) and not _is_bot_id(loser_id):
-			_show_spectating.rpc_id(_peer_for_player(loser_id), "WAITING FOR OTHER PICKS…")
-	_show_round_winner_wait.rpc(winner_id)
+			_show_spectating.rpc_id(_peer_for_player(loser_id), _waiting_for_pickers_spectator_label())
+	_show_round_winner_wait.rpc(winner_id, _active_picker_names())
 	_maybe_finish_card_picks()
 
 func _begin_card_pick_for_loser(loser_id: int) -> void:
@@ -1160,7 +1163,7 @@ func _finalize_card_pick(player_id_to_apply: int, card_id: String) -> void:
 			if state == State.PLAYING:
 				_show_spectating.rpc_id(peer, "SPECTATING…")
 			elif state == State.PICKING_CARD:
-				_show_spectating.rpc_id(peer, "WAITING FOR OTHER PICKS…")
+				_show_spectating.rpc_id(peer, _waiting_for_pickers_spectator_label())
 	_maybe_finish_card_picks()
 
 func _maybe_finish_card_picks() -> void:
@@ -1191,12 +1194,49 @@ func _show_spectating(text: String = "SPECTATING…") -> void:
 	_sync_mouse_mode()
 
 @rpc("authority", "call_local", "reliable")
-func _show_round_winner_wait(winner_id: int) -> void:
+func _show_round_winner_wait(winner_id: int, picker_names: PackedStringArray = PackedStringArray()) -> void:
 	if multiplayer.get_unique_id() != winner_id:
 		return
-	round_banner.text = "ROUND WON — WAITING FOR PICKS…"
+	round_banner.text = _waiting_for_pickers_label(picker_names)
 	round_banner.visible = true
 	banner_timer.stop()
+
+
+func _waiting_for_pickers_label(picker_names: PackedStringArray) -> String:
+	if picker_names.is_empty():
+		return "ROUND WON — WAITING FOR PICKS…"
+	if picker_names.size() == 1:
+		return "ROUND WON — WAITING FOR %s…" % picker_names[0]
+	return "ROUND WON — WAITING FOR %s…" % ", ".join(picker_names)
+
+
+# Server-only: build the spectator-side wait label (shown to losers who
+# already picked, while other losers are still picking).
+func _waiting_for_pickers_spectator_label() -> String:
+	var names := _active_picker_names()
+	if names.is_empty():
+		return "WAITING FOR OTHER PICKS…"
+	if names.size() == 1:
+		return "WAITING FOR %s…" % names[0]
+	return "WAITING FOR %s…" % ", ".join(names)
+
+
+# Server-only: collect display names of every player who still owes a card
+# pick this round. Used by the winner-banner text (and the spectator banner
+# for losers who finished their pick early).
+func _active_picker_names() -> PackedStringArray:
+	var out := PackedStringArray()
+	for raw_id in eliminated_players.keys():
+		var pid := int(raw_id)
+		if completed_picks.has(pid):
+			continue
+		# Skip bots — they auto-pick instantly and the human shouldn't see
+		# the wait label list them.
+		if _is_bot_id(pid):
+			continue
+		var pname: String = NetworkManager.players.get(pid, "Player")
+		out.append(pname)
+	return out
 
 # -------------------- CARD PICK UI --------------------
 
