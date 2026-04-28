@@ -46,8 +46,7 @@ const GRENADE_RELOAD := 3.0
 const GRENADE_LAUNCH_SPEED := 22.0
 const GRENADE_LAUNCH_LIFT := 4.0
 const MELEE_RELOAD := 0.5
-const MELEE_RANGE := 3.2
-const MELEE_DAMAGE := 50
+const MELEE_RANGE := 5.0
 const MELEE_BACKSTAB := 9999  # guaranteed kill
 const VFX_TRANSIENT_LIGHTS := false  # gameplay-wide override; the impact/blood
 									 # paths now spawn lights based on damage instead.
@@ -565,7 +564,12 @@ func _apply_ghost_visuals() -> void:
 		return
 	body_model.visible = (is_bot or split_screen_local or not is_multiplayer_authority())
 	name_label.visible = not ghost_mode and not invisible_mode and (is_bot or (not split_screen_local and not is_multiplayer_authority()))
-	muzzle.visible = true # Gun always visible now, but shading changes
+	# Hide both first-person muzzle gun and third-person gun while ghosting —
+	# spectators shouldn't see their weapon, and other players shouldn't see
+	# a gun floating in a translucent ghost.
+	muzzle.visible = not ghost_mode
+	if _third_person_gun:
+		_third_person_gun.visible = not ghost_mode
 
 	var gun_meshes: Array[MeshInstance3D] = []
 	if gun_body: gun_meshes.append(gun_body)
@@ -1823,7 +1827,7 @@ func _spawn_mine(pos: Vector3, shooter: int, uname: String) -> void:
 
 	var shooter_node: Node3D = get_parent().get_node_or_null(str(shooter))
 	if shooter_node == null or shooter_node.get("ghost_mode") != true:
-		SFX.grenade_launch(pos)
+		SFX.mine_plant(pos)
 
 func _spawn_impact_mine(pos: Vector3, shooter: int) -> void:
 	if not multiplayer.is_server():
@@ -1998,6 +2002,12 @@ func _apply_damage(
 	if shielded:
 		return  # SHIELD special absorbs the hit
 	health = max(0, health - amount)
+	var game_scene := get_tree().current_scene
+	if game_scene and game_scene.has_method("_report_player_damage"):
+		if multiplayer.is_server():
+			game_scene._report_player_damage(player_id, from_id, amount, health)
+		else:
+			game_scene._report_player_damage.rpc_id(1, player_id, from_id, amount, health)
 	_show_hit_face.rpc(HIT_FACE_DURATION)
 	if from_id != player_id and not is_bot:
 		_notify_damage_source(from_id)

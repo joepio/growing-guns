@@ -18,6 +18,13 @@ func _ready() -> void:
 	# updates the atmosphere. game.gd's apply_seed path also goes through here.
 	if not generator.regenerated.is_connected(_on_regenerated):
 		generator.regenerated.connect(_on_regenerated)
+	# Pre-populate with a default-seed arena so spawnpoints exist before
+	# game.gd's first _swap_arena fires. Without this, players who join
+	# during the WAITING state (or between rounds, where there's a brief
+	# window mid-swap) fall through _pick_spawn's "no spawnpoints" fallback
+	# and end up outside the arena bounds. The first real round start will
+	# overwrite this with the proper seed via apply_seed().
+	apply_seed(0)
 
 
 func apply_seed(s: int) -> void:

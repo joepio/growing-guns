@@ -112,7 +112,7 @@ func get_bullet_speed() -> float:
 		return 165.0 * bullet_speed_mult
 
 func get_melee_damage() -> int:
-	return int(50.0 * melee_damage_mult)
+	return int(100.0 * melee_damage_mult)
 
 func reset() -> void:
 		damage_mult = 1.0
