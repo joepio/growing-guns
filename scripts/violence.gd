@@ -402,6 +402,8 @@ static func _gib_spawn_blood_splat(
 	mesh.size = Vector2(size, size * randf_range(0.6, 1.15))
 	splat.mesh = mesh
 	splat.material_override = _gib_get_blood_splat_material()
+	# Tag for bulk-clear at round-reset (game.gd's _clear_blood_splats RPC).
+	splat.add_to_group("blood_splats")
 	scene.add_child(splat)
 
 	var up := normal.normalized() if normal.length_squared() > 0.001 else Vector3.UP
@@ -1392,6 +1394,14 @@ static func clear_craters(scene_root: Node) -> void:
 		if is_instance_valid(n):
 			n.queue_free()
 	_crater_fifo.clear()
+
+
+static func clear_blood_splats(scene_root: Node) -> void:
+	if scene_root == null:
+		return
+	for n in scene_root.get_tree().get_nodes_in_group("blood_splats"):
+		if is_instance_valid(n):
+			n.queue_free()
 
 static func spawn_blood(scene: Node, pos: Vector3, dir: Vector3, dmg_ratio: float, vfx_max_blood_drops: int = 8) -> void:
 	if scene == null:
