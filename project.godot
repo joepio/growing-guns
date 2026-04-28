@@ -25,6 +25,7 @@ general/3d_panning_strength=1.0
 
 NetworkManager="*res://scripts/network_manager.gd"
 SFX="*res://scripts/sfx.gd"
+ProceduralMusic="*res://scripts/procedural_music.gd"
 
 [display]
 

@@ -1874,45 +1874,85 @@ func _melee_swung(origin: Vector3, dir: Vector3, attacker_id: int) -> void:
 	if not multiplayer.is_server():
 		return
 	var space := get_world_3d().direct_space_state
-	var q := PhysicsRayQueryParameters3D.create(origin, origin + dir * MELEE_RANGE * w.melee_scale)
-	q.collision_mask = 1 | 2
+	var dir_n: Vector3 = dir.normalized()
+	var swing_range: float = MELEE_RANGE * w.melee_scale
+	var swing_radius: float = 1.2 * w.melee_scale
+
+	# Forward-pointing capsule (width = swing_radius, length = swing_range).
+	# Capsule is wider than a ray so close-range hugs land, and long enough
+	# to keep the same reach as the old raycast. Bottom rounded cap sits at
+	# the attacker's chest — no rearward coverage.
+	var cap := CapsuleShape3D.new()
+	cap.radius = swing_radius
+	cap.height = maxf(swing_range, swing_radius * 2.5)
+
+	# Build a basis whose +Y aligns with dir (Godot capsules extend along Y).
+	var ref: Vector3 = Vector3.RIGHT if absf(dir_n.dot(Vector3.UP)) > 0.95 else Vector3.UP
+	var right: Vector3 = ref.cross(dir_n).normalized()
+	var fwd_axis: Vector3 = dir_n.cross(right).normalized()
+	var sw_basis: Basis = Basis(right, dir_n, fwd_axis)
+	var center: Vector3 = origin + dir_n * (cap.height * 0.5)
+
+	var q := PhysicsShapeQueryParameters3D.new()
+	q.shape = cap
+	q.transform = Transform3D(sw_basis, center)
+	q.collision_mask = 2  # player_hitboxes layer
 	q.collide_with_areas = true
+	q.collide_with_bodies = false
 	if shooter_node:
 		if shooter_node.has_method("get_hitbox_rids"):
 			q.exclude = shooter_node.get_hitbox_rids()
 		else:
 			q.exclude = [shooter_node.get_rid()]
-	var result := space.intersect_ray(q)
-	if result.is_empty():
+
+	var hits: Array = space.intersect_shape(q, 16)
+	# Dedupe by player — head/torso/legs hitboxes for the same player would
+	# otherwise show up as 3 separate hits.
+	var hit_targets: Dictionary = {}
+	for hit in hits:
+		var collider: Node = hit.get("collider")
+		var target := _player_from_hit_collider(collider)
+		if target == null or hit_targets.has(target.player_id):
+			continue
+		if target.get("ghost_mode") == true:
+			continue
+		if target.player_id == attacker_id:
+			continue
+		# Line-of-sight gate: don't slash through walls.
+		var los_q := PhysicsRayQueryParameters3D.create(origin, target.global_position + Vector3.UP * 0.6)
+		los_q.collision_mask = 1
+		if shooter_node:
+			los_q.exclude = [shooter_node.get_rid()]
+		if not space.intersect_ray(los_q).is_empty():
+			continue
+		hit_targets[target.player_id] = target
+
+	if hit_targets.is_empty():
 		return
-	var target := _player_from_hit_collider(result.collider)
-	if target == null:
-		return
-	if target.get("ghost_mode") == true:
-		return
-	if target.player_id == attacker_id:
-		return
-	var v_fwd: Vector3 = -target.global_transform.basis.z
-	var attacker_fwd: Vector3 = dir
-	var backstab: bool = v_fwd.dot(attacker_fwd) > 0.4
-	var dmg: int = MELEE_BACKSTAB if backstab else w.get_melee_damage()
-	var melee_force := w.knockback if w.knockback > 0.0 else w.get_melee_damage() * 0.06
-	target.take_damage.rpc_id(
-		target.get_multiplayer_authority(),
-		dmg,
-		attacker_id,
-		result.position,
-		dir.normalized(),
-		melee_force,
-		0.0
-	)
-	if w.knockback > 0.0:
-		var melee_impulse: Vector3 = dir.normalized() * w.knockback + Vector3.UP * w.knockback * 0.25
-		target.apply_knockback.rpc_id(target.get_multiplayer_authority(), melee_impulse)
-	if shooter_node:
-		_hit_confirm.rpc_id(shooter_node.get_multiplayer_authority(), backstab, dmg, result.position)
-		if shooter_node.has_method("_on_dealt_damage"):
-			shooter_node._on_dealt_damage.rpc_id(shooter_node.get_multiplayer_authority(), dmg)
+
+	for raw_pid in hit_targets:
+		var target: Node3D = hit_targets[raw_pid]
+		var hit_pos: Vector3 = target.global_position + Vector3.UP * 0.6
+		var v_fwd: Vector3 = -target.global_transform.basis.z
+		var backstab: bool = v_fwd.dot(dir_n) > 0.4
+		var dmg: int = MELEE_BACKSTAB if backstab else w.get_melee_damage()
+		var melee_force: float = w.knockback if w.knockback > 0.0 else w.get_melee_damage() * 0.06
+		target.take_damage.rpc_id(
+			target.get_multiplayer_authority(),
+			dmg,
+			attacker_id,
+			hit_pos,
+			dir_n,
+			melee_force,
+			0.0
+		)
+		if w.knockback > 0.0:
+			var melee_impulse: Vector3 = dir_n * w.knockback + Vector3.UP * w.knockback * 0.25
+			target.apply_knockback.rpc_id(target.get_multiplayer_authority(), melee_impulse)
+		if shooter_node:
+			_hit_confirm.rpc_id(shooter_node.get_multiplayer_authority(), backstab, dmg, hit_pos)
+			if shooter_node.has_method("_on_dealt_damage"):
+				shooter_node._on_dealt_damage.rpc_id(shooter_node.get_multiplayer_authority(), dmg)
 
 func _animate_gun_slash(m_scale: float = 1.0) -> void:
 	if muzzle == null:
