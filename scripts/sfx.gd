@@ -289,6 +289,13 @@ func _listener_position() -> Vector3:
 	var vp := get_viewport()
 	if vp == null:
 		return NO_POS
+	# In splitscreen the cameras live inside SubViewports, so the main
+	# viewport has no current Camera3D. We park an AudioListener3D at the
+	# midpoint of all local players (see splitscreen_manager.gd) — prefer
+	# that over the camera so distance-based effects use the midpoint.
+	var listener := vp.get_audio_listener_3d()
+	if listener:
+		return listener.global_position
 	var cam := vp.get_camera_3d()
 	return cam.global_position if cam else NO_POS
 
@@ -400,12 +407,34 @@ func _play_stream(stream: AudioStream, volume_db: float = -6.0, at: Vector3 = NO
 		var p2 := _spawn_3d_player(stream, volume_db, at, pitch_scale, attenuation_dist, dry)
 		if big_tail:
 			_spawn_big_tail_send(stream, volume_db + big_tail_send_db, at, pitch_scale, debug_label)
+		for ghost_pos in _splitscreen_ghost_positions(at):
+			_spawn_3d_player(stream, volume_db, ghost_pos, pitch_scale, attenuation_dist, dry)
+			if big_tail:
+				_spawn_big_tail_send(stream, volume_db + big_tail_send_db, ghost_pos, pitch_scale, debug_label)
 		return p2
 	get_tree().create_timer(delay).timeout.connect(func() -> void:
 		_spawn_3d_player(stream, volume_db, at, pitch_scale, attenuation_dist, dry)
 		if big_tail:
-			_spawn_big_tail_send(stream, volume_db + big_tail_send_db, at, pitch_scale, debug_label))
+			_spawn_big_tail_send(stream, volume_db + big_tail_send_db, at, pitch_scale, debug_label)
+		for ghost_pos in _splitscreen_ghost_positions(at):
+			_spawn_3d_player(stream, volume_db, ghost_pos, pitch_scale, attenuation_dist, dry)
+			if big_tail:
+				_spawn_big_tail_send(stream, volume_db + big_tail_send_db, ghost_pos, pitch_scale, debug_label))
 	return null
+
+
+# In splitscreen, fan a 3D source out across each non-primary local player so
+# every player's perspective gets mixed into the single audio output. The
+# ghost positions are computed so the host-anchored listener perceives them
+# the way each secondary player would have perceived the original source.
+func _splitscreen_ghost_positions(at: Vector3) -> Array:
+	var scene := get_tree().current_scene
+	if scene == null:
+		return []
+	var ss := scene.get_node_or_null("Splitscreen")
+	if ss == null or not ss.has_method("ghost_positions_for"):
+		return []
+	return ss.ghost_positions_for(at)
 
 # Spawns a quieter copy of a stream that plays into the BigTailReverb bus,
 # producing the long-tail hall sound for loud events. The player auto-frees
@@ -802,6 +831,13 @@ func hit_received(intensity: float = 1.0) -> void:
 func kill_confirm() -> void:
 	# Critical UI feedback — same priority tier as hit_received.
 	_play(_cached_samples("kill_confirm", Callable(self, "_synth_kill_confirm")), -6.0, NO_POS, "kill_confirm", -1.0, false, 130.0)
+
+func pick_countdown_beep(seconds_left: int) -> void:
+	# Short rising-pitch warning that the card pick is about to time out.
+	# seconds_left = 3 → base pitch; 2 → +1 semitone; 1 → +2 semitones.
+	var step: int = clampi(3 - seconds_left, 0, 2)
+	var key := "pick_beep_%d" % step
+	_play(_cached_samples(key, Callable(self, "_synth_pick_beep").bind(step)), -8.0, NO_POS, "pick_beep", -1.0, false, 140.0)
 func pling(pitch_ratio: float = 1.0) -> void:
 	var key := "pling_%d" % int(round(pitch_ratio * 100.0))
 	_play(_cached_samples(key, Callable(self, "_synth_pling").bind(pitch_ratio)), -10.0, NO_POS, "pling", -1.0, false, 70.0)
@@ -1230,6 +1266,22 @@ func _synth_hit_received() -> PackedVector2Array:
 		var s := (tone * 0.8 + noise * 0.4) * env * 0.75
 		out[i] = Vector2(s, s)
 	return out
+
+func _synth_pick_beep(semitones_up: int) -> PackedVector2Array:
+	# ~160ms sine blip with a snappy attack + exponential tail. Pitch climbs
+	# one semitone per step so the picker hears the "1 second closer" cue.
+	var dur := 0.16
+	var n := int(dur * MIX_RATE)
+	var out := PackedVector2Array()
+	out.resize(n)
+	var freq := 440.0 * pow(2.0, float(semitones_up) / 12.0)
+	for i in range(n):
+		var t := float(i) / MIX_RATE
+		var env := exp(-t * 14.0) * (1.0 - exp(-t * 200.0))
+		var s := sin(2.0 * PI * freq * t) * env * 0.4
+		out[i] = Vector2(s, s)
+	return out
+
 
 func _synth_kill_confirm() -> PackedVector2Array:
 	# G4 + D5 perfect fifth, bell-like exponential decay.

@@ -78,6 +78,10 @@ var current_round: int = 1
 var pending_pick_cards: Array = []
 var pending_picker_id: int = 0
 var pending_pick_cards_by_player: Dictionary = {}
+# Server-only countdown until each pending pick auto-resolves (player_id ->
+# seconds remaining). Beeps fire at the integer crossings of the last 3s.
+const CARD_PICK_TIMEOUT := 7.0
+var pending_pick_deadlines: Dictionary = {}
 var completed_picks: Dictionary = {}
 var eliminated_players: Dictionary = {}
 var round_winner_id: int = 0
@@ -436,6 +440,8 @@ func _process(delta: float) -> void:
 	if multiplayer.is_server() and state == State.PLAYING:
 		_update_lava_leak(delta)
 		_update_round_music_phase()
+	if multiplayer.is_server():
+		_tick_card_pick_deadlines(delta)
 	_update_custom_cursor()
 	# Polling-based pause toggle. On macOS, pressing Esc while the mouse is
 	# captured auto-uncaptures it at the engine level and the resulting
@@ -458,7 +464,13 @@ func _process(delta: float) -> void:
 func _input(event: InputEvent) -> void:
 	_track_input_device(event)
 	var cancel_pressed := event.is_action_pressed("ui_cancel")
-	if cancel_pressed:
+	# Controller B (alongside Esc / Start) backs out of the pause + settings
+	# menus. B isn't bound to ui_cancel globally because that would also pop
+	# the menu open from gameplay, where B fires a grenade.
+	var menu_back_pressed: bool = cancel_pressed or (
+		event is InputEventJoypadButton and event.pressed and event.button_index == JOY_BUTTON_B
+	)
+	if menu_back_pressed:
 		if _settings_panel != null and _settings_panel.visible:
 			_close_settings()
 			get_viewport().set_input_as_handled()
@@ -594,6 +606,7 @@ func _on_peer_disconnected(id: int) -> void:
 		_hide_card_pick.rpc()
 		state = State.PLAYING
 	pending_pick_cards_by_player.erase(id)
+	pending_pick_deadlines.erase(id)
 	completed_picks.erase(id)
 	eliminated_players.erase(id)
 	_ping_ms_by_player.erase(id)
@@ -865,6 +878,7 @@ func _despawn_bot(pid: int) -> void:
 	_ping_ms_by_player.erase(pid)
 	_bot_appearance_seeds.erase(pid)
 	pending_pick_cards_by_player.erase(pid)
+	pending_pick_deadlines.erase(pid)
 	completed_picks.erase(pid)
 	eliminated_players.erase(pid)
 
@@ -1196,6 +1210,7 @@ func _reset_round_tracking() -> void:
 	pending_picker_id = 0
 	pending_pick_cards.clear()
 	pending_pick_cards_by_player.clear()
+	pending_pick_deadlines.clear()
 	completed_picks.clear()
 	eliminated_players.clear()
 	round_winner_id = 0
@@ -1310,6 +1325,8 @@ func _begin_card_pick_for_loser(loser_id: int) -> void:
 	var peer := _peer_for_player(loser_id)
 	if peer != 0 and not _is_bot_id(loser_id):
 		_show_card_pick.rpc_id(peer, loser_id, cards)
+		# Bots resolve via _bot_auto_pick; humans get a 7s countdown.
+		pending_pick_deadlines[loser_id] = CARD_PICK_TIMEOUT
 	if _is_bot_id(loser_id):
 		_bot_auto_pick.call_deferred(loser_id)
 
@@ -1338,12 +1355,57 @@ func _bot_auto_pick(loser_id: int) -> void:
 	var pick: String = str(cards[randi() % cards.size()])
 	_finalize_card_pick(loser_id, pick)
 
+
+# Server-only countdown driver. Decrements each pending human pick and fires
+# the warning beep on integer crossings of the last 3 seconds; if the timer
+# runs out the server force-finalises with a random card from that pick's
+# pool, so a wandering player can't stall the round forever.
+func _tick_card_pick_deadlines(delta: float) -> void:
+	if pending_pick_deadlines.is_empty():
+		return
+	var expired: Array[int] = []
+	for raw_pid in pending_pick_deadlines.keys():
+		var pid := int(raw_pid)
+		if not pending_pick_cards_by_player.has(pid):
+			expired.append(pid)
+			continue
+		var prev: float = float(pending_pick_deadlines[pid])
+		var next: float = prev - delta
+		pending_pick_deadlines[pid] = next
+		# Fire one beep as the remaining time crosses each of 3.0 / 2.0 / 1.0.
+		# Pitch rises one semitone per beep so the picker hears the urgency.
+		for threshold in [3.0, 2.0, 1.0]:
+			if prev > threshold and next <= threshold:
+				var peer := _peer_for_player(pid)
+				if peer != 0 and not _is_bot_id(pid):
+					_play_pick_countdown_beep.rpc_id(peer, int(threshold))
+		if next <= 0.0:
+			expired.append(pid)
+	for pid in expired:
+		if not pending_pick_cards_by_player.has(pid):
+			pending_pick_deadlines.erase(pid)
+			continue
+		var cards: Array = pending_pick_cards_by_player[pid]
+		if cards.is_empty():
+			pending_pick_deadlines.erase(pid)
+			continue
+		var pick: String = str(cards[randi() % cards.size()])
+		_finalize_card_pick(pid, pick)
+
+
+# Plays a short rising-pitch warning blip on the picker's machine. Kept as an
+# rpc so a network client picker hears the same cadence the server is timing.
+@rpc("authority", "call_local", "reliable")
+func _play_pick_countdown_beep(seconds_left: int) -> void:
+	SFX.pick_countdown_beep(seconds_left)
+
 func _finalize_card_pick(player_id_to_apply: int, card_id: String) -> void:
 	var p := players_root.get_node_or_null(str(player_id_to_apply))
 	if p:
 		p.apply_card.rpc(card_id)
 	completed_picks[player_id_to_apply] = true
 	pending_pick_cards_by_player.erase(player_id_to_apply)
+	pending_pick_deadlines.erase(player_id_to_apply)
 	# Bots have no HUD; routing UI RPCs to a bot's peer hits the server peer
 	# (1), which would clobber the host human's overlay. Skip them entirely.
 	if not _is_bot_id(player_id_to_apply):
@@ -2616,6 +2678,43 @@ func _build_settings_panel() -> void:
 	spacer1.custom_minimum_size = Vector2(0, 6)
 	vb.add_child(spacer1)
 
+	# Player name — pre-filled from settings.cfg, broadcast on commit so the
+	# scoreboard + every peer's floating name tag pick it up immediately.
+	var name_row := HBoxContainer.new()
+	name_row.add_theme_constant_override("separation", 12)
+	var name_label := Label.new()
+	name_label.text = "Player name"
+	name_label.custom_minimum_size = Vector2(170, 0)
+	name_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	name_label.add_theme_color_override("font_color", Color(0.85, 0.85, 0.95))
+	name_row.add_child(name_label)
+	var name_input := LineEdit.new()
+	name_input.text = _player_name
+	name_input.placeholder_text = "Your callsign…"
+	name_input.max_length = 20
+	name_input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	name_input.custom_minimum_size = Vector2(0, 36)
+	name_row.add_child(name_input)
+	vb.add_child(name_row)
+	var commit_name := func() -> void:
+		var entered: String = name_input.text.strip_edges()
+		if entered.is_empty() or entered == _player_name:
+			name_input.text = _player_name
+			return
+		_player_name = entered
+		NetworkManager.local_player_name = entered
+		_save_settings()
+		# Update everyone's NetworkManager.players + scoreboard.
+		var my_id := multiplayer.get_unique_id()
+		if my_id != 0:
+			NetworkManager._register_player.rpc(my_id, entered)
+		# Update the floating name label on this peer's player node across peers.
+		var local_player_node := players_root.get_node_or_null(str(my_id))
+		if local_player_node and local_player_node.has_method("set_display_name"):
+			local_player_node.set_display_name.rpc(entered)
+	name_input.text_submitted.connect(func(_t: String) -> void: commit_name.call())
+	name_input.focus_exited.connect(commit_name)
+
 	var retro_toggle := CheckButton.new()
 	retro_toggle.text = "Retro shader look"
 	retro_toggle.button_pressed = _retro_enabled
@@ -2955,6 +3054,7 @@ func _pause_start_splitscreen() -> void:
 	pending_picker_id = 0
 	pending_pick_cards.clear()
 	pending_pick_cards_by_player.clear()
+	pending_pick_deadlines.clear()
 	completed_picks.clear()
 	eliminated_players.clear()
 	round_winner_id = 0
