@@ -139,6 +139,9 @@ const PALETTES: Array = [
 	},
 ]
 const COLOR_SPAWN := Color(1.00, 0.40, 0.18)
+const LAVA_TICK_SECONDS := 0.5
+const LAVA_TICK_DAMAGE := 15
+const LAVA_POOL_Y := -2.0
 
 const LAVA_SHADER_CODE := """
 shader_type spatial;
@@ -187,15 +190,15 @@ void fragment() {
 	float n2 = fbm(uv * 1.7 + vec2(-t * 0.7, t * 0.85));
 	float heat = (n1 + n2) * 0.5;
 
-	vec3 crust = vec3(0.32, 0.04, 0.02);
-	vec3 hot = vec3(1.55, 0.45, 0.08);
-	vec3 white_hot = vec3(2.80, 1.45, 0.30);
+	vec3 crust = vec3(0.18, 0.025, 0.01);
+	vec3 hot = vec3(0.78, 0.16, 0.02);
+	vec3 white_hot = vec3(0.95, 0.34, 0.04);
 
 	vec3 col = mix(crust, hot, smoothstep(0.30, 0.68, heat));
 	col = mix(col, white_hot, smoothstep(0.78, 0.95, heat));
 
-	ALBEDO = col * 0.5;
-	EMISSION = col * 1.8;
+	ALBEDO = col;
+	EMISSION = col * 0.35;
 }
 """
 
@@ -212,6 +215,7 @@ var _mat_spawn: StandardMaterial3D
 # enough for this scale and avoid axis-aligned rotation headaches).
 var _placed: Array = []
 var _spawn_positions: Array[Vector3] = []
+var _lava_damage_accum_by_player: Dictionary = {}
 
 var last_stats: Dictionary = {}
 var _regen_pending: bool = false
@@ -220,6 +224,12 @@ var _regen_pending: bool = false
 func _ready() -> void:
 	if not Engine.is_editor_hint() and regenerate_on_ready:
 		regenerate()
+
+
+func _process(delta: float) -> void:
+	if Engine.is_editor_hint():
+		return
+	_apply_lava_pool_damage(delta)
 
 
 func _queue_regen() -> void:
@@ -239,6 +249,7 @@ func regenerate() -> void:
 		c.queue_free()
 	_placed.clear()
 	_spawn_positions.clear()
+	_lava_damage_accum_by_player.clear()
 	_ensure_materials()
 
 	var t0: int = Time.get_ticks_usec()
@@ -672,7 +683,7 @@ func _build_lava_pool() -> void:
 	# samples noise in world space so features don't stretch with the size,
 	# and fog hides everything past ~120m anyway.
 	var pool_size: float = 6000.0
-	var pool_y: float = -2.0
+	var pool_y: float = LAVA_POOL_Y
 
 	var mi := MeshInstance3D.new()
 	mi.name = "LavaSurface"
@@ -694,7 +705,6 @@ func _build_lava_pool() -> void:
 	# is on layer 0, so we can't use body_entered.
 	area.collision_mask = 2
 	area.position = Vector3(0, pool_y, 0)
-	area.area_entered.connect(_on_lava_area_entered)
 
 	var col := CollisionShape3D.new()
 	var shape := BoxShape3D.new()
@@ -720,15 +730,27 @@ func _make_lava_material() -> ShaderMaterial:
 	return mat
 
 
-func _on_lava_area_entered(other_area: Area3D) -> void:
-	# Hitboxes are children of the player CharacterBody3D — climb to the
-	# parent to reach handle_environmental_death(). Filter to player_hitboxes
-	# so other Area3Ds in the scene (none today, but future-proof) don't kill.
-	if other_area == null or not other_area.is_in_group("player_hitboxes"):
-		return
-	var player_node: Node = other_area.get_parent()
-	if player_node and player_node.has_method("handle_environmental_death"):
-		player_node.handle_environmental_death("lava")
+func _apply_lava_pool_damage(delta: float) -> void:
+	var active_ids: Dictionary = {}
+	var lava_y := global_position.y + LAVA_POOL_Y
+	for p: Node in get_tree().get_nodes_in_group("players"):
+		if not p is Node3D:
+			continue
+		var pid := int(p.get("player_id")) if p.get("player_id") != null else p.get_instance_id()
+		var p3 := p as Node3D
+		if p3.global_position.y > lava_y + 1.2:
+			_lava_damage_accum_by_player.erase(pid)
+			continue
+		active_ids[pid] = true
+		var accum := float(_lava_damage_accum_by_player.get(pid, 0.0)) + delta
+		while accum >= LAVA_TICK_SECONDS:
+			accum -= LAVA_TICK_SECONDS
+			if p.has_method("apply_environmental_damage"):
+				p.apply_environmental_damage(LAVA_TICK_DAMAGE, "lava")
+		_lava_damage_accum_by_player[pid] = accum
+	for raw_id in _lava_damage_accum_by_player.keys():
+		if not active_ids.has(raw_id):
+			_lava_damage_accum_by_player.erase(raw_id)
 
 
 func _build_walls() -> void:

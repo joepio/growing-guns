@@ -311,36 +311,42 @@ func _handle_collision(result: Dictionary) -> void:
 		if hit_player:
 			var is_head: bool = shooter_node.call("_is_head_hit", collider)
 			var dmg: int = int(bullet_damage * (weapon_stats.get_headshot_mult() if is_head else 1.0))
+			var poison_total_damage := 0
+			var direct_damage := dmg
+			if weapon_stats.damage_over_time > 0.0:
+				poison_total_damage = maxi(1, int(round(float(dmg) * (1.0 + weapon_stats.damage_over_time))))
+				direct_damage = 0
 			var knock_dir: Vector3 = (direction + Vector3.UP * 0.18).normalized()
 			var gib_force := weapon_stats.knockback if weapon_stats.knockback > 0.0 else bullet_damage * 0.08
 			var direct_blast_radius := weapon_stats.explosive_radius
 			var direct_blast_severity := 1.0 if direct_blast_radius > 0.0 else 0.0
-			hit_player.take_damage.rpc_id(
-				hit_player.get_multiplayer_authority(),
-				dmg,
-				shooter_id,
-				hit_pos,
-				knock_dir,
-				gib_force,
-				direct_blast_radius,
-				direct_blast_severity,
-				is_head
-			)
+			if direct_damage > 0:
+				hit_player.take_damage.rpc_id(
+					hit_player.get_multiplayer_authority(),
+					direct_damage,
+					shooter_id,
+					hit_pos,
+					knock_dir,
+					gib_force,
+					direct_blast_radius,
+					direct_blast_severity,
+					is_head
+				)
 			if weapon_stats.knockback > 0.0:
 				hit_player.apply_knockback.rpc_id(hit_player.get_multiplayer_authority(), knock_dir * weapon_stats.knockback)
 
 			# Send hit confirmation ONLY to the shooter's client
 			if shooter_node:
-				shooter_node._hit_confirm.rpc_id(shooter_node.get_multiplayer_authority(), is_head, dmg, hit_pos)
+				shooter_node._hit_confirm.rpc_id(shooter_node.get_multiplayer_authority(), is_head, maxi(dmg, poison_total_damage), hit_pos)
 
 			if weapon_stats.lifesteal > 0.0:
-				var heal_amt: int = int(float(dmg) * weapon_stats.lifesteal)
+				var heal_amt: int = int(float(maxi(direct_damage, poison_total_damage)) * weapon_stats.lifesteal)
 				if heal_amt > 0:
 					shooter_node.heal.rpc_id(shooter_node.get_multiplayer_authority(), heal_amt)
-			if weapon_stats.damage_over_time > 0.0 and hit_player.has_method("apply_damage_over_time"):
+			if poison_total_damage > 0 and hit_player.has_method("apply_damage_over_time"):
 				hit_player.apply_damage_over_time.rpc_id(
 					hit_player.get_multiplayer_authority(),
-					int(weapon_stats.damage_over_time * shot_damage_mult),
+					poison_total_damage,
 					weapon_stats.dot_duration,
 					shooter_id
 				)
@@ -351,7 +357,7 @@ func _handle_collision(result: Dictionary) -> void:
 					weapon_stats.slow_duration
 				)
 			if shooter_node and shooter_node.has_method("_on_dealt_damage"):
-				shooter_node._on_dealt_damage.rpc_id(shooter_node.get_multiplayer_authority(), dmg)
+				shooter_node._on_dealt_damage.rpc_id(shooter_node.get_multiplayer_authority(), maxi(direct_damage, poison_total_damage))
 
 		elif collider and collider.is_in_group("grenades") and collider.has_method("detonate"):
 			collider.detonate()

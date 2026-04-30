@@ -19,7 +19,6 @@ const BASE_BULLET_COLOR := Color(1.0, 0.9, 0.3)
 # --- Special ability (RMB). Cards swap which one is equipped. ---
 const SPECIAL_GRENADE := "grenade"
 const SPECIAL_TELEPORT := "teleport"
-const SPECIAL_SHIELD := "shield"
 const SPECIAL_INVISIBLE := "invisible"
 const SPECIAL_ZOOM := "zoom"
 const SPECIAL_SWORD := "sword"
@@ -50,7 +49,7 @@ const BASE_KNOCKBACK := 3.0            # every shot gives a light nudge
 @export var melee_damage_mult: float = 1.0     # scales melee damage
 @export var melee_scale: float = 1.0           # scales melee animation and range
 @export var homing: float = 0.0                # degrees-per-second steering toward closest forward target
-@export var damage_over_time: float = 0.0      # extra bullet damage dealt over time
+@export var damage_over_time: float = 0.0      # bonus fraction for bullet damage converted to DOT
 @export var dot_duration: float = 3.0
 @export var slow_on_hit: float = 1.0           # <1 = target movement multiplier
 @export var slow_duration: float = 0.0
@@ -82,7 +81,6 @@ const BASE_BULLET_DROP := 30.0                  # matches Player.GRAVITY so bull
 @export var special_cooldown_refund_on_hit: float = 0.0
 @export var special_empower_damage: float = 1.0
 @export var special_empower_speed: float = 1.0
-@export var shield_pulse_damage: float = 0.0
 @export var teleport_blast_radius: float = 0.0
 @export var invisible_first_shot_mult: float = 1.0
 
@@ -112,7 +110,7 @@ func get_bullet_speed() -> float:
 		return 165.0 * bullet_speed_mult
 
 func get_melee_damage() -> int:
-	return int(100.0 * melee_damage_mult)
+	return int(70.0 * melee_damage_mult)
 
 func reset() -> void:
 		damage_mult = 1.0
@@ -159,7 +157,6 @@ func reset() -> void:
 		special_cooldown_refund_on_hit = 0.0
 		special_empower_damage = 1.0
 		special_empower_speed = 1.0
-		shield_pulse_damage = 0.0
 		teleport_blast_radius = 0.0
 		invisible_first_shot_mult = 1.0
 		applied_cards.clear()

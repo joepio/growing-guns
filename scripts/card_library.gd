@@ -333,12 +333,11 @@ static func all() -> Array:
 		{
 			"id": "poison",
 			"name": "POISON",
-			"desc": "Hits keep hurting after impact",
+			"desc": "Hits deal more damage, spread over time",
 			"color": Color(0.45, 1.0, 0.25),
 			"apply": func(w: Weapon) -> void:
-				w.damage_over_time += 45.0
+				w.damage_over_time += 0.7
 				w.dot_duration = maxf(w.dot_duration, 3.5)
-				w.damage_mult *= 0.85
 				w.bullet_color = w.bullet_color.lerp(Color(0.35, 1.0, 0.1), 0.45),
 		},
 		{
@@ -441,26 +440,6 @@ static func all() -> Array:
 				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.85, 0.18), 0.35),
 		},
 		{
-			"id": "shockwave",
-			"name": "SHOCKWAVE",
-			"desc": "RMB emits a close-range blast",
-			"rarity": "rare",
-			"color": Color(0.35, 0.75, 1.0),
-			"apply": func(w: Weapon) -> void:
-				w.shield_pulse_damage += 70.0
-				w.special_cooldown_mult *= 1.1,
-		},
-		{
-			"id": "blink_blast",
-			"name": "BLINK BLAST",
-			"desc": "RMB teleport blasts both endpoints",
-			"rarity": "rare",
-			"color": Color(0.78, 0.35, 1.0),
-			"apply": func(w: Weapon) -> void:
-				w.special = Weapon.SPECIAL_TELEPORT
-				w.teleport_blast_radius = maxf(w.teleport_blast_radius, 4.5),
-		},
-		{
 			"id": "ambush",
 			"name": "AMBUSH",
 			"desc": "RMB vanish; first shot out hits harder",
@@ -479,15 +458,6 @@ static func all() -> Array:
 				w.special = Weapon.SPECIAL_TELEPORT,
 		},
 		{
-			"id": "shield",
-			"name": "SHIELD",
-			"desc": "RMB: 2s invulnerability bubble",
-			"rarity": "rare",
-			"color": Color(0.4, 0.8, 1.0),
-			"apply": func(w: Weapon) -> void:
-				w.special = Weapon.SPECIAL_SHIELD,
-		},
-		{
 			"id": "invisible",
 			"name": "INVISIBLE",
 			"desc": "RMB: vanish for 4 seconds",
@@ -503,17 +473,6 @@ static func all() -> Array:
 			"color": Color(0.8, 0.8, 0.9),
 			"apply": func(w: Weapon) -> void:
 				w.special = Weapon.SPECIAL_SWORD,
-		},
-		{
-			"id": "cleaver",
-			"name": "CLEAVER",
-			"desc": "RMB: massive slash radius",
-			"rarity": "rare",
-			"color": Color(0.8, 0.4, 0.9),
-			"apply": func(w: Weapon) -> void:
-				w.special = Weapon.SPECIAL_SWORD
-				w.melee_damage_mult *= 3.0
-				w.melee_scale *= 1.8,
 		},
 		{
 			"id": "bazooka",

@@ -101,6 +101,7 @@ func show_help() -> void:
 		"G: Toggle Godmode\n" + \
 		"P: Toggle Passive AI\n" + \
 		"M: Restart Match\n" + \
+		"L: Trigger Lava\n" + \
 		"1: Reset Weapon\n" + \
 		"2: Apply Sniper\n" + \
 		"3: Apply Shotgun\n" + \
@@ -119,7 +120,7 @@ func _refresh() -> void:
 	for c in _content.get_children():
 		c.queue_free()
 	_heading("DEV  ·  F1 to close", Color(0.5, 0.9, 1.0), 20)
-	_note("Quick shortcuts: G (god), P (passive AI), M (restart), 1-5 (cards), ? (help)")
+	_note("Quick shortcuts: G (god), P (passive AI), M (restart), L (lava), 1-5 (cards), ? (help)")
 	_toggle_row("Passive AI (stationary, no shooting)", _game.bots_hold_fire, func(v: bool) -> void:
 		_game.bots_hold_fire = v
 		call_deferred("_refresh"))
