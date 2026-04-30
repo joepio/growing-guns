@@ -43,6 +43,8 @@ const HIGH_PING_WARN_MS := 180
 const HIGH_PING_WARN_INTERVAL := 8.0
 const KILL_FEED_LIFETIME := 3.0
 const KILL_FEED_MAX_ITEMS := 6
+const LAVA_LEAK_START_SECONDS := 30.0
+const LAVA_LEAK_SPREAD_SECONDS := 20.0
 
 func _is_bot_id(pid: int) -> bool:
 	return pid >= BOT_ID_BASE and pid < BOT_ID_LIMIT
@@ -81,6 +83,8 @@ var eliminated_players: Dictionary = {}
 var round_winner_id: int = 0
 var _round_music_level: int = 1
 var _round_damage_seen: bool = false
+var _round_elapsed: float = 0.0
+var _lava_leak_started: bool = false
 var local_player: Node3D
 
 # --- Match over / rematch ---
@@ -425,6 +429,7 @@ func _process(delta: float) -> void:
 			_tab_refresh_timer = 0.5
 			_refresh_tab_overlay()
 	if multiplayer.is_server() and state == State.PLAYING:
+		_update_lava_leak(delta)
 		_update_round_music_phase()
 	_update_custom_cursor()
 	# Polling-based pause toggle. On macOS, pressing Esc while the mouse is
@@ -499,7 +504,7 @@ func _input(event: InputEvent) -> void:
 		_toggle_pause_menu()
 		return
 
-	# Cheat hotkeys (G / P / M / 1-5 / ?) — only when dev tools are enabled.
+	# Cheat hotkeys (G / P / M / L / 1-5 / ?) — only when dev tools are enabled.
 	if event is InputEventKey and event.pressed and not event.echo and _dev_panel != null:
 		var cheat_handled := true
 		match event.keycode:
@@ -516,6 +521,11 @@ func _input(event: InputEvent) -> void:
 			KEY_M:
 				if multiplayer.is_server():
 					_restart_match()
+			KEY_L:
+				if multiplayer.is_server():
+					_lava_leak_started = true
+					_start_lava_leak.rpc(LAVA_LEAK_SPREAD_SECONDS)
+					_announce.rpc("LAVA TRIGGERED", 1.0)
 			KEY_1:
 				var t = _dev_panel.get_target()
 				if t:
@@ -991,6 +1001,8 @@ func _start_round_now() -> void:
 	_reset_round_tracking()
 	_round_damage_seen = false
 	_round_music_level = 2
+	_round_elapsed = 0.0
+	_lava_leak_started = false
 	var music_seed := randi()
 	_set_music_track.rpc(music_seed, current_round)
 	_set_music_energy.rpc(2, true)
@@ -1041,6 +1053,28 @@ func _start_round_now() -> void:
 	# Clear any leftover round-end banner ("PICKING A CARD…", "WAITING FOR …",
 	# etc.) so it doesn't bleed into the new round.
 	_announce.rpc("", 0)
+
+func _update_lava_leak(delta: float) -> void:
+	if _lava_leak_started:
+		return
+	_round_elapsed += delta
+	if _round_elapsed < LAVA_LEAK_START_SECONDS:
+		return
+	_lava_leak_started = true
+	_start_lava_leak.rpc(LAVA_LEAK_SPREAD_SECONDS)
+
+@rpc("authority", "call_local", "reliable")
+func _start_lava_leak(spread_seconds: float) -> void:
+	var arena := get_node_or_null("Arena")
+	if arena and arena.has_method("start_lava_leak"):
+		arena.start_lava_leak(spread_seconds)
+	_announce("LAVA LEAK", 1.5)
+
+@rpc("authority", "call_local", "reliable")
+func _stop_lava_leak() -> void:
+	var arena := get_node_or_null("Arena")
+	if arena and arena.has_method("stop_lava_leak"):
+		arena.stop_lava_leak()
 
 @rpc("authority", "call_local", "reliable")
 func _set_music_energy(level: int, immediate: bool = false, next_bar: bool = false) -> void:
@@ -1160,6 +1194,8 @@ func _reset_round_tracking() -> void:
 	completed_picks.clear()
 	eliminated_players.clear()
 	round_winner_id = 0
+	_round_elapsed = 0.0
+	_lava_leak_started = false
 
 func report_kill(killer_id: int, victim_id: int) -> void:
 	# Called on the server by Player._report_death. In 3+ player rounds,
@@ -1929,10 +1965,19 @@ func show_death_effect_for(player_id: int, show: bool) -> void:
 func _on_extend_pressed() -> void:
 	_extend_button.text = "VOTED TO EXTEND"
 	_extend_button.disabled = true
+	var vote_ids := _local_extend_vote_ids()
 	if multiplayer.is_server():
-		_server_extend_vote(multiplayer.get_unique_id())
+		for player_id in vote_ids:
+			_server_extend_vote(int(player_id))
 	else:
-		_server_extend_vote.rpc_id(1, multiplayer.get_unique_id())
+		for player_id in vote_ids:
+			_server_extend_vote.rpc_id(1, int(player_id))
+
+
+func _local_extend_vote_ids() -> Array[int]:
+	if _splitscreen and _splitscreen.is_enabled() and _splitscreen.has_method("_local_player_ids"):
+		return _splitscreen._local_player_ids()
+	return [multiplayer.get_unique_id()]
 
 @rpc("any_peer", "call_local", "reliable")
 func _server_extend_vote(player_id: int) -> void:

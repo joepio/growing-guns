@@ -8,7 +8,8 @@ const ARM_DELAY := 0.04          # ignore contacts for this long after spawn (ju
 const MINE_ARM_DELAY := 0.7
 const RADIUS := 6.0
 const MAX_DAMAGE := 100
-const MIN_DAMAGE := 10
+const MIN_DAMAGE := 20
+const MIN_FALLOFF := 0.2
 const SHAKE_RADIUS := 22.0
 const SHAKE_STRENGTH := 0.16     # max camera-shake amplitude (m) at the epicenter
 const VFX_TRANSIENT_LIGHTS := false
@@ -195,8 +196,8 @@ func _explode() -> void:
 		if not hit.is_empty():
 			continue
 
-		var falloff: float = clamp(1.0 - (dist / RADIUS), 0.0, 1.0)
-		var dmg: int = int(lerp(float(MIN_DAMAGE), float(MAX_DAMAGE), falloff))
+		var falloff: float = lerpf(MIN_FALLOFF, 1.0, clampf(1.0 - (dist / RADIUS), 0.0, 1.0))
+		var dmg: int = max(MIN_DAMAGE, int(float(MAX_DAMAGE) * falloff))
 
 		# Self-damage reduction
 		if p.player_id == shooter_id:

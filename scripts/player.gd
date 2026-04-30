@@ -22,7 +22,7 @@ const MAX_DASH_CHARGES := 2
 const DASH_RECHARGE_TIME := 3.0
 const GRAVITY := 30.0
 const MOUSE_SENS := 0.0022
-const CONTROLLER_LOOK_SENS := 3.0
+const CONTROLLER_LOOK_SENS := 4.2
 const CONTROLLER_LOOK_DEADZONE := 0.18
 
 # --- First-person gun feel ---
@@ -207,6 +207,7 @@ const BOT_DASH_CHANCE := 0.018           # per physics tick, when charge availab
 const BOT_EDGE_PROBE_DIST := 1.8
 const BOT_GAP_JUMP_MIN_LANDING := 4.5
 const BOT_GAP_JUMP_MAX_LANDING := 12.0
+const EXPLOSION_EDGE_FALLOFF := 0.2
 
 var _bot_target: Node3D = null
 var _bot_shoot_cooldown: float = 0.0
@@ -943,6 +944,14 @@ func handle_environmental_death(_reason: String = "void") -> void:
 	var lethal_amount: int = max(health, MAX_HEALTH)
 	_apply_damage(lethal_amount, player_id)
 
+
+func apply_environmental_damage(amount: int, _reason: String = "hazard") -> void:
+	if not is_multiplayer_authority():
+		return
+	if ghost_mode or god_mode or health <= 0 or frozen or launching:
+		return
+	_apply_damage(max(0, amount), 0)
+
 func _move_vector() -> Vector2:
 	if not _can_accept_gameplay_input():
 		return Vector2.ZERO
@@ -1150,8 +1159,9 @@ func _apply_bullet_splash(pos: Vector3, radius: float, damage: float, shooter_id
 
 		var dist_ratio := dist / radius
 		# Use a square-root falloff so the explosion stays 'hotter' for longer
-		var falloff := clampf(1.0 - dist_ratio, 0.0, 1.0)
-		var curve_falloff := sqrt(falloff)
+		var linear_falloff := clampf(1.0 - dist_ratio, 0.0, 1.0)
+		var falloff := lerpf(EXPLOSION_EDGE_FALLOFF, 1.0, linear_falloff)
+		var curve_falloff := lerpf(EXPLOSION_EDGE_FALLOFF, 1.0, sqrt(linear_falloff))
 
 		var dmg: int = int(damage * curve_falloff)
 
@@ -1497,11 +1507,7 @@ func clear_ragdoll() -> void:
 const TELEPORT_RELOAD := 2.0
 const TELEPORT_RANGE := 45.0
 const TELEPORT_OFFSET := 0.8
-const SHIELD_RELOAD := 8.0
-const SHIELD_DURATION := 2.0
 
-var shielded: bool = false
-var _shield_visual: Node3D = null
 var _invisible_timer: SceneTreeTimer = null
 
 func _use_special() -> void:
@@ -1509,8 +1515,6 @@ func _use_special() -> void:
 	match weapon.special:
 		Weapon.SPECIAL_TELEPORT:
 			grenade_cooldown = TELEPORT_RELOAD * mult
-		Weapon.SPECIAL_SHIELD:
-			grenade_cooldown = SHIELD_RELOAD * mult
 		Weapon.SPECIAL_INVISIBLE:
 			grenade_cooldown = INVISIBLE_RELOAD * mult
 		Weapon.SPECIAL_SWORD:
@@ -1541,8 +1545,6 @@ func _activate_special_effect(is_echo: bool) -> void:
 	match weapon.special:
 		Weapon.SPECIAL_TELEPORT:
 			_use_teleport()
-		Weapon.SPECIAL_SHIELD:
-			_use_shield()
 		Weapon.SPECIAL_INVISIBLE:
 			if not is_echo:
 				_use_invisible()
@@ -1722,13 +1724,6 @@ func _spawn_teleport_vfx(pos: Vector3) -> void:
 		ltw.tween_property(light, "light_energy", 0.0, 0.3)
 		ltw.tween_callback(light.queue_free)
 
-# -------------------- SHIELD --------------------
-
-func _use_shield() -> void:
-	_shield_on.rpc(SHIELD_DURATION)
-	if weapon.shield_pulse_damage > 0.0:
-		_request_special_blast.rpc_id(1, global_position, 5.5, weapon.shield_pulse_damage, player_id, Color(0.35, 0.75, 1.0))
-
 func _use_invisible() -> void:
 	_invisible_on.rpc(INVISIBLE_DURATION)
 
@@ -1755,45 +1750,6 @@ func _end_invisible() -> void:
 	invisible_mode = false
 	_invisible_timer = null
 	_apply_ghost_visuals()
-
-@rpc("authority", "call_local", "reliable")
-func _shield_on(duration: float) -> void:
-	shielded = true
-	if _shield_visual and is_instance_valid(_shield_visual):
-		_shield_visual.queue_free()
-	var mesh := MeshInstance3D.new()
-	var sphere := SphereMesh.new()
-	sphere.radius = 1.3
-	sphere.height = 2.6
-	mesh.mesh = sphere
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-
-	var is_me := is_multiplayer_authority() and not is_bot
-	var base_alpha := 0.04 if is_me else 0.25
-	var base_emission := 0.4 if is_me else 1.6
-
-	mat.albedo_color = Color(0.35, 0.75, 1.0, base_alpha)
-	mat.emission_enabled = true
-	mat.emission = Color(0.35, 0.75, 1.0)
-	mat.emission_energy_multiplier = base_emission
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	mesh.material_override = mat
-	add_child(mesh)
-	_shield_visual = mesh
-	# Fade out over the last 30% of the duration.
-	var fade_start := duration * 0.7
-	var fade_dur := duration - fade_start
-	var tw := mesh.create_tween().set_parallel(true)
-	tw.tween_property(mat, "albedo_color", Color(0.35, 0.75, 1.0, 0.0), fade_dur).set_delay(fade_start)
-	tw.tween_property(mat, "emission_energy_multiplier", 0.0, fade_dur).set_delay(fade_start)
-	get_tree().create_timer(duration).timeout.connect(_end_shield)
-func _end_shield() -> void:
-	shielded = false
-	if _shield_visual and is_instance_valid(_shield_visual):
-		_shield_visual.queue_free()
-	_shield_visual = null
 
 # -------------------- GRENADE --------------------
 
@@ -2101,8 +2057,6 @@ func _apply_damage(
 ) -> void:
 	if ghost_mode or frozen or health <= 0 or god_mode:
 		return
-	if shielded:
-		return  # SHIELD special absorbs the hit
 	health = max(0, health - amount)
 	var game_scene := get_tree().current_scene
 	if game_scene and game_scene.has_method("_report_player_damage"):
@@ -2279,7 +2233,6 @@ func server_respawn(pos: Vector3, yaw: float = 0.0) -> void:
 	elif scene and scene.has_method("show_death_effect"):
 		scene.show_death_effect(false)
 
-	_end_shield()
 	_apply_ghost_visuals()
 	# Push the teleport to every peer immediately so they don't see us at the
 	# old position for a frame while waiting for the next _physics_process.
