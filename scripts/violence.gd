@@ -1237,32 +1237,10 @@ static func spawn_crater(scene: Node, pos: Vector3, normal: Vector3, dmg_ratio: 
 
 		var hot_amount: float = clampf((dmg - CRATER_RED_HOT_DMG) / 3.0, 0.0, 1.0)
 
-		# Two glow layers stacked on the dark scorch:
-		#  • a soft FULL-SIZE additive quad that tints the whole crater area warm;
-		#  • a tiny BRIGHT additive quad in the centre as the molten spot.
-		# Both fade together over ~6 s like cooling metal.
-
-		var warm_node := MeshInstance3D.new()
-		warm_node.mesh = _get_crater_mesh()
-		# Use a unique random rotation but same uniform scale for the hot layers
-		var warm_b := b.rotated(n, randf_range(-PI, PI))
-		warm_node.global_transform = Transform3D(warm_b, pos + n * (0.016 + offset_jitter))
-		var warm_mat := StandardMaterial3D.new()
-		warm_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		warm_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		warm_mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
-		warm_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-		# Render on top of the dark scorch.
-		warm_mat.render_priority = 1
-		warm_mat.albedo_texture = _crater_textures[randi() % _crater_textures.size()]
-		# Soft red — dimmer than the bright spot below; alpha tied to dmg.
-		warm_mat.albedo_color = Color(0.85, 0.18, 0.04, lerpf(0.35, 0.65, hot_amount))
-		warm_node.material_override = warm_mat
-		extras.add_child(warm_node)
-
-		var warm_tw := warm_node.create_tween()
-		warm_tw.tween_property(warm_mat, "albedo_color", Color(0.4, 0.04, 0.0, 0.0), 6.0)\
-			.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+		# Single bright additive quad in the centre as the molten spot. The
+		# dark base scorch already darkens the wall material outside this
+		# centre — a full-size warm glow on top would just paint the whole
+		# crater red, which read as "way too hot" at any range.
 
 		var glow_node := MeshInstance3D.new()
 		glow_node.mesh = _get_crater_mesh()
@@ -1283,18 +1261,6 @@ static func spawn_crater(scene: Node, pos: Vector3, normal: Vector3, dmg_ratio: 
 
 		var hot_tw := glow_node.create_tween()
 		hot_tw.tween_property(glow_mat, "albedo_color", Color(0.55, 0.05, 0.0, 0.0), 6.0)\
-			.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
-
-		# Real point light so the molten spot actually illuminates surrounding geometry.
-		var glow := OmniLight3D.new()
-		glow.light_color = Color(1.0, 0.5, 0.18)
-		glow.light_energy = lerpf(0.8, 2.0, hot_amount)
-		glow.omni_range = lerpf(0.7, 1.4, hot_amount) * sqrt(maxf(scale_f, 0.5))
-		glow.position = pos + n * 0.05
-		extras.add_child(glow)
-
-		var glow_tw := glow.create_tween()
-		glow_tw.tween_property(glow, "light_energy", 0.0, 5.5)\
 			.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
 
 		# Kill the whole "hot" set after the longest fade (6 s) finishes.

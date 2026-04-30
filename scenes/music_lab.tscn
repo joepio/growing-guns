@@ -1,8 +1,8 @@
 [gd_scene format=3 uid="uid://musiclab01"]
 
-[ext_resource type="Script" path="res://scripts/music_lab.gd" id="1_music_lab"]
+[ext_resource type="Script" uid="uid://c2t6ihr1665uk" path="res://scripts/music_lab.gd" id="1_music_lab"]
 
-[node name="MusicLab" type="Control"]
+[node name="MusicLab" type="Control" unique_id=1917415377]
 layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0

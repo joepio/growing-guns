@@ -76,7 +76,7 @@ func setup(origin: Vector3, dir: Vector3, shooter: int, w: Weapon, damage_mult: 
 	mat.emission_energy_multiplier = 4.0
 
 	# Head — a small bright dot that always sits at the bullet's tip.
-	var s: float = weapon_stats.bullet_scale
+	var s: float = weapon_stats.get_bullet_scale()
 	var head_inst := MeshInstance3D.new()
 	var head_box := BoxMesh.new()
 	head_box.size = Vector3(0.08 * s, 0.08 * s, 0.14 * s)
@@ -242,7 +242,7 @@ func _maybe_zip_by() -> void:
 		# panning reflect the bullet's nearest point to the listener, not
 		# whichever side of it we happen to sample on this tick.
 		var fire_pos: Vector3 = closest_pos
-		SFX.bullet_zip(speed, weapon_stats.bullet_scale, fire_pos)
+		SFX.bullet_zip(speed, weapon_stats.get_bullet_scale(), fire_pos)
 	_prev_listener_dist_sq = d_sq
 
 func _handle_collision(result: Dictionary) -> void:
@@ -300,7 +300,7 @@ func _handle_collision(result: Dictionary) -> void:
 	if hit_player:
 		shooter_node.call("_spawn_blood", hit_pos, direction, dmg_ratio)
 	else:
-		shooter_node.call("_spawn_impact", hit_pos, weapon_stats.bullet_color, weapon_stats.bullet_scale, dmg_ratio, normal, weapon_stats.explosive_radius)
+		shooter_node.call("_spawn_impact", hit_pos, weapon_stats.bullet_color, weapon_stats.get_bullet_scale(), dmg_ratio, normal, weapon_stats.explosive_radius)
 		SFX.impact(hit_pos, dmg_ratio)
 
 	if weapon_stats.explosive_radius > 0.0 and not bench_skip_visuals:
