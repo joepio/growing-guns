@@ -1,29 +1,21 @@
 extends Node
 
-# Local couch-coop splitscreen. Each gamepad that presses X spawns its own
-# Player + camera + viewport in a quadrant. Toggled on via NetworkManager
-# metadata (`splitscreen_on_start`) before the Game scene loads.
-#
-# This script lives as a child of the Game node. All cross-system actions
-# (spawn / despawn / scoreboards / state transitions) go through `_game`.
-# RPC declarations stay on Game so the network contract doesn't change.
-
+const RENDER_PLAYER_SCRIPT := preload("res://scripts/render_player.gd")
 const SPLIT_PLAYER_ID_BASE := 10000
-# Mirrors Game.State.WAITING. Kept inline as a plain int so this manager
-# doesn't depend on Game gaining a class_name (which requires an editor
-# rescan to register globally and breaks headless boot).
 const _STATE_WAITING := 0
 
 var _game: Node = null
 var _enabled: bool = false
-
 var _layer: CanvasLayer = null
 var _grid: Control = null
 var _join_label: Label = null
 var _pause_menu: Control = null
 var _pause_device: int = -1
-var _players_by_device: Dictionary = {}  # device int → player_id
-var _views_by_player: Dictionary = {}    # player_id → {container, viewport, camera}
+var _pause_selected: int = 0
+var _pause_buttons: Array[Button] = []
+var _primary_device: int = -1
+var _players_by_device: Dictionary = {}
+var _renderers_by_player: Dictionary = {}
 
 
 func setup(game: Node) -> void:
@@ -34,46 +26,64 @@ func is_enabled() -> bool:
 	return _enabled
 
 
+func enable(primary_device: int = -1) -> void:
+	_set_primary_device(primary_device)
+	if _enabled:
+		update_views()
+		return
+	_enabled = true
+	NetworkManager.set_meta("splitscreen_on_start", true)
+	if _game and _game.has_method("_clear_render_players"):
+		_game._clear_render_players()
+	_build_layer()
+	update_views.call_deferred()
+
+
 func _ready() -> void:
 	_enabled = NetworkManager.has_meta("splitscreen_on_start") \
 		and NetworkManager.get_meta("splitscreen_on_start")
 	if _enabled:
 		_build_layer()
-		# Defer until Game's _ready has finished wiring up players_root etc.
+		_set_primary_device(int(NetworkManager.get_meta("splitscreen_primary_device", -1)))
 		update_views.call_deferred()
 
 
 func _process(_delta: float) -> void:
 	if _enabled:
-		_update_cameras()
+		update_views()
 
 
-# Returns true if the event was consumed.
 func handle_input(event: InputEvent) -> bool:
 	if not _enabled:
 		return false
+	for renderer in _renderers_by_player.values():
+		if renderer.handle_input(event):
+			return true
 	if not (event is InputEventJoypadButton) or not event.pressed:
 		return false
 	var device := event.device
 	if _pause_menu and _pause_menu.visible and device == _pause_device:
-		if event.button_index == JOY_BUTTON_B:
+		if event.button_index == JOY_BUTTON_B or event.button_index == JOY_BUTTON_START:
 			_close_pause_menu()
 			return true
-		if event.button_index == JOY_BUTTON_X or event.button_index == JOY_BUTTON_A:
-			_leave_player(device)
-			_close_pause_menu()
+		if event.button_index == JOY_BUTTON_DPAD_UP or event.button_index == JOY_BUTTON_DPAD_LEFT:
+			_select_pause_option(_pause_selected - 1)
 			return true
-	if event.button_index == JOY_BUTTON_X and not _players_by_device.has(device):
+		if event.button_index == JOY_BUTTON_DPAD_DOWN or event.button_index == JOY_BUTTON_DPAD_RIGHT:
+			_select_pause_option(_pause_selected + 1)
+			return true
+		if event.button_index == JOY_BUTTON_A or event.button_index == JOY_BUTTON_X:
+			_activate_pause_option()
+			return true
+	if event.button_index == JOY_BUTTON_X and device != _primary_device and _player_for_device(device) == 0:
 		_join_player(device)
 		return true
-	if event.button_index == JOY_BUTTON_START and _players_by_device.has(device):
+	if event.button_index == JOY_BUTTON_START and _player_for_device(device) != 0:
 		_open_pause_menu(device)
 		return true
 	return false
 
 
-# Total non-bot players currently in the match. Used by Game's lobby checks
-# and by the leave-player flow ("if we drop below 2, go back to WAITING").
 func active_match_player_count() -> int:
 	var count := 0
 	for pid in NetworkManager.players:
@@ -82,32 +92,89 @@ func active_match_player_count() -> int:
 	return count
 
 
+func show_card_pick(player_id: int, card_ids: Array) -> bool:
+	var renderer := _renderers_by_player.get(player_id) as RenderPlayer
+	if renderer == null:
+		return false
+	renderer.show_card_pick(card_ids)
+	return true
+
+
+func hide_card_pick(player_id: int) -> bool:
+	var renderer := _renderers_by_player.get(player_id) as RenderPlayer
+	if renderer == null:
+		return false
+	renderer.hide_card_pick()
+	return true
+
+
+func is_card_pick_visible() -> bool:
+	for renderer in _renderers_by_player.values():
+		if renderer.is_card_pick_visible():
+			return true
+	return false
+
+
+func show_hitmarker_for(player_id: int, kind: String) -> bool:
+	var renderer := _renderers_by_player.get(player_id) as RenderPlayer
+	if renderer == null:
+		return false
+	renderer.show_hitmarker(kind)
+	return true
+
+
+func show_damage_direction_for(player_id: int, from_pos: Vector3) -> bool:
+	var renderer := _renderers_by_player.get(player_id) as RenderPlayer
+	if renderer == null:
+		return false
+	renderer.show_damage_direction(from_pos)
+	return true
+
+
+func show_death_effect_for(player_id: int, show: bool) -> bool:
+	var renderer := _renderers_by_player.get(player_id) as RenderPlayer
+	if renderer == null:
+		return false
+	renderer.show_death_effect(show)
+	return true
+
+
 func update_views() -> void:
 	if not _grid:
 		return
 	var ids := _local_player_ids()
 	for id in ids:
-		if not _views_by_player.has(id):
-			_create_view(id)
-	for id in _views_by_player.keys():
+		if not _renderers_by_player.has(id):
+			_create_renderer(id)
+	for id in _renderers_by_player.keys():
 		if not ids.has(int(id)):
-			_remove_view(int(id))
+			_remove_renderer(int(id))
 
 	var n := ids.size()
 	_join_label.visible = n < 4
 	var rect := _grid.get_rect()
 	for i in range(n):
 		var id := ids[i]
-		var view: Dictionary = _views_by_player[id]
-		var container: SubViewportContainer = view.container
-		var viewport: SubViewport = view.viewport
+		var renderer := _renderers_by_player[id] as RenderPlayer
 		var slot := _slot_rect(i, n, rect.size)
-		container.position = slot.position
-		container.size = slot.size
-		viewport.size = Vector2i(maxi(1, int(slot.size.x)), maxi(1, int(slot.size.y)))
+		renderer.position = slot.position
+		renderer.size = slot.size
+		renderer.layout_for_size(slot.size)
 
 
-# ── Internals ──────────────────────────────────────────────────────────────
+func _set_primary_device(device: int) -> void:
+	_primary_device = device
+	NetworkManager.set_meta("splitscreen_primary_device", device)
+	if _game == null:
+		return
+	var primary_id := multiplayer.get_unique_id()
+	var player: Node = _game.players_root.get_node_or_null(str(primary_id))
+	if player:
+		player.set("split_screen_local", true)
+		player.set("local_input_device", device)
+		if player.has_method("_apply_ghost_visuals"):
+			player._apply_ghost_visuals()
+
 
 func _build_layer() -> void:
 	if _layer:
@@ -136,8 +203,41 @@ func _build_layer() -> void:
 	_join_label.offset_top = 18.0
 	_join_label.offset_bottom = 48.0
 	_layer.add_child(_join_label)
-
 	_build_pause_menu()
+
+
+func _create_renderer(id: int) -> void:
+	var renderer := RENDER_PLAYER_SCRIPT.new() as RenderPlayer
+	renderer.name = "RenderPlayer_%d" % id
+	_grid.add_child(renderer)
+	var device := _device_for_player(id)
+	renderer.setup(_game, id, device)
+	renderer.card_selected.connect(_game._on_render_player_card_selected)
+	_renderers_by_player[id] = renderer
+
+
+func _remove_renderer(id: int) -> void:
+	var renderer := _renderers_by_player.get(id) as Node
+	if renderer and is_instance_valid(renderer):
+		renderer.queue_free()
+	_renderers_by_player.erase(id)
+
+
+func _device_for_player(id: int) -> int:
+	if id == multiplayer.get_unique_id():
+		return _primary_device
+	for device in _players_by_device:
+		if int(_players_by_device[device]) == id:
+			return int(device)
+	return -1
+
+
+func _player_for_device(device: int) -> int:
+	if device == _primary_device and device >= 0:
+		return multiplayer.get_unique_id()
+	if _players_by_device.has(device):
+		return int(_players_by_device[device])
+	return 0
 
 
 func _join_player(device: int) -> void:
@@ -148,19 +248,27 @@ func _join_player(device: int) -> void:
 	var pname := "P%d" % suffix
 	NetworkManager.players[id] = pname
 	_game.round_wins[id] = 0
-	_game._do_spawn.rpc(id, pname, _game._random_spawn(_game._current_player_positions()), false, device, true)
+	_players_by_device[device] = id
+	var pick: Dictionary = _game._pick_spawn(_game._current_player_positions())
+	_game._do_spawn.rpc(id, pname, pick["pos"], false, device, true, pick["yaw"])
 	_game._broadcast_scores.rpc(_game.round_wins)
 	_game._maybe_start_match()
 	_game._update_scoreboard()
-	_players_by_device[device] = id
+	update_views()
 
 
 func _leave_player(device: int) -> void:
-	if not multiplayer.is_server() or not _players_by_device.has(device):
+	if not multiplayer.is_server():
 		return
-	var id := int(_players_by_device[device])
-	_players_by_device.erase(device)
-	_remove_view(id)
+	var id := _player_for_device(device)
+	if id == 0:
+		return
+	if device == _primary_device:
+		_primary_device = -1
+		NetworkManager.set_meta("splitscreen_primary_device", -1)
+	else:
+		_players_by_device.erase(device)
+	_remove_renderer(id)
 	_game._despawn.rpc(id)
 	NetworkManager.players.erase(id)
 	_game.round_wins.erase(id)
@@ -170,7 +278,7 @@ func _leave_player(device: int) -> void:
 	if _game.pending_picker_id == id:
 		_game.pending_picker_id = 0
 		_game.pending_pick_cards.clear()
-		_game._hide_card_pick.rpc_id(1)
+		_game._hide_card_pick_for.rpc_id(1, id)
 	_game._broadcast_scores.rpc(_game.round_wins)
 	_game._update_scoreboard()
 	update_views()
@@ -193,58 +301,15 @@ func _local_player_ids() -> Array[int]:
 	return ids
 
 
-func _slot_rect(index: int, count: int, size: Vector2) -> Rect2:
+func _slot_rect(index: int, count: int, view_size: Vector2) -> Rect2:
 	if count <= 1:
-		return Rect2(Vector2.ZERO, size)
+		return Rect2(Vector2.ZERO, view_size)
 	if count == 2:
-		var w := size.x * 0.5
-		return Rect2(Vector2(w * index, 0.0), Vector2(w, size.y))
-	var w2 := size.x * 0.5
-	var h2 := size.y * 0.5
+		var w := view_size.x * 0.5
+		return Rect2(Vector2(w * index, 0.0), Vector2(w, view_size.y))
+	var w2 := view_size.x * 0.5
+	var h2 := view_size.y * 0.5
 	return Rect2(Vector2(w2 * float(index % 2), h2 * float(index / 2)), Vector2(w2, h2))
-
-
-func _create_view(id: int) -> void:
-	var container := SubViewportContainer.new()
-	container.stretch = true
-	container.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_grid.add_child(container)
-
-	var viewport := SubViewport.new()
-	viewport.disable_3d = false
-	viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
-	viewport.world_3d = get_viewport().world_3d
-	container.add_child(viewport)
-
-	var camera := Camera3D.new()
-	camera.current = true
-	viewport.add_child(camera)
-	_views_by_player[id] = {"container": container, "viewport": viewport, "camera": camera}
-
-
-func _remove_view(id: int) -> void:
-	if not _views_by_player.has(id):
-		return
-	var view: Dictionary = _views_by_player[id]
-	var container: Node = view.container
-	if is_instance_valid(container):
-		container.queue_free()
-	_views_by_player.erase(id)
-
-
-func _update_cameras() -> void:
-	update_views()
-	for id in _views_by_player.keys():
-		var player: Node = _game.players_root.get_node_or_null(str(id))
-		if player == null:
-			continue
-		var source := player.get_node_or_null("Camera") as Camera3D
-		if source == null:
-			continue
-		var view: Dictionary = _views_by_player[id]
-		var camera: Camera3D = view.camera
-		camera.global_transform = source.global_transform
-		camera.fov = source.fov
 
 
 func _build_pause_menu() -> void:
@@ -253,9 +318,9 @@ func _build_pause_menu() -> void:
 	_pause_menu.mouse_filter = Control.MOUSE_FILTER_STOP
 	_pause_menu.set_anchors_preset(Control.PRESET_CENTER)
 	_pause_menu.offset_left = -170.0
-	_pause_menu.offset_top = -78.0
+	_pause_menu.offset_top = -92.0
 	_pause_menu.offset_right = 170.0
-	_pause_menu.offset_bottom = 78.0
+	_pause_menu.offset_bottom = 92.0
 	_layer.add_child(_pause_menu)
 
 	var vb := VBoxContainer.new()
@@ -264,21 +329,30 @@ func _build_pause_menu() -> void:
 	_pause_menu.add_child(vb)
 
 	var title := Label.new()
-	title.name = "Title"
 	title.text = "PLAYER MENU"
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.add_theme_font_size_override("font_size", 18)
 	vb.add_child(title)
 
 	var hint := Label.new()
-	hint.text = "A/X LEAVE   B RESUME"
+	hint.text = "A SELECT   B RESUME"
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	hint.add_theme_font_size_override("font_size", 13)
 	vb.add_child(hint)
 
+	_pause_buttons.clear()
+	for label_text in ["RESUME", "LEAVE"]:
+		var btn := Button.new()
+		btn.text = label_text
+		btn.focus_mode = Control.FOCUS_NONE
+		btn.custom_minimum_size = Vector2(210, 34)
+		vb.add_child(btn)
+		_pause_buttons.append(btn)
+
 
 func _open_pause_menu(device: int) -> void:
 	_pause_device = device
+	_select_pause_option(0)
 	_pause_menu.visible = true
 
 
@@ -288,7 +362,23 @@ func _close_pause_menu() -> void:
 		_pause_menu.visible = false
 
 
-# Lazy-mirrors Game's bot-id check (kept inline so this manager doesn't
-# depend on Game._is_bot_id signature).
+func _select_pause_option(index: int) -> void:
+	if _pause_buttons.is_empty():
+		return
+	_pause_selected = posmod(index, _pause_buttons.size())
+	for i in range(_pause_buttons.size()):
+		var btn := _pause_buttons[i]
+		btn.text = ("> %s <" if i == _pause_selected else "  %s  ") % (["RESUME", "LEAVE"][i])
+
+
+func _activate_pause_option() -> void:
+	if _pause_selected == 0:
+		_close_pause_menu()
+		return
+	var device := _pause_device
+	_close_pause_menu()
+	_leave_player(device)
+
+
 func _is_bot_id(pid: int) -> bool:
 	return pid >= 9000 and pid < 9100

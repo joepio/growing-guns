@@ -1746,7 +1746,9 @@ static func spawn_ragdoll(
 				continue
 			if first and local_is_authority:
 				player.set("_ragdoll_head", chunks[0])
-				if scene.has_method("show_death_effect"):
+				if scene.has_method("show_death_effect_for"):
+					scene.show_death_effect_for(int(player.get("player_id")), true)
+				elif scene.has_method("show_death_effect"):
 					scene.show_death_effect(true)
 				first = false
 			for c in chunks:
@@ -1770,7 +1772,9 @@ static func spawn_ragdoll(
 			ragdoll_pieces.append(torso_rb)
 			if local_is_authority:
 				player.set("_ragdoll_head", torso_rb)
-				if scene.has_method("show_death_effect"):
+				if scene.has_method("show_death_effect_for"):
+					scene.show_death_effect_for(int(player.get("player_id")), true)
+				elif scene.has_method("show_death_effect"):
 					scene.show_death_effect(true)
 		if not head_meshes.is_empty():
 			var head_v: Vector3 = base_vel + dir_n * 6.0 + Vector3.UP * 8.0

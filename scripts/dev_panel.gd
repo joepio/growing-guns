@@ -250,6 +250,7 @@ func _card_row(card: Dictionary, count: int) -> void:
 	n.text = "%s  —  %s" % [card.name, card.desc]
 	n.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	n.add_theme_color_override("font_color", card.color)
+	n.add_theme_font_size_override("font_size", 12)
 	hbox.add_child(n)
 
 	var clbl := Label.new()
@@ -257,6 +258,7 @@ func _card_row(card: Dictionary, count: int) -> void:
 	clbl.custom_minimum_size = Vector2(30, 0)
 	clbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	clbl.add_theme_color_override("font_color", Color(1, 1, 1) if count > 0 else Color(0.4, 0.4, 0.4))
+	clbl.add_theme_font_size_override("font_size", 10)
 	hbox.add_child(clbl)
 
 	var btn_minus := Button.new()
