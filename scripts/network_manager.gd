@@ -10,9 +10,11 @@ extends Node
 #   • signals: player_list_changed                    (UI hooks listen)
 
 signal player_list_changed
+signal network_status_changed(message: String, is_error: bool)
 
 var players: Dictionary = {}
 var local_player_name: String = "Player"
+var last_network_error: String = ""
 
 # Current iroh server's game ID (the connection string peers paste to join).
 # Empty when not hosting via iroh — e.g. when this peer is an iroh client.
@@ -28,15 +30,21 @@ var current_iroh_game_id: String = ""
 # success — share it with peers. Returns "" on failure.
 func host_game_iroh(player_name: String) -> String:
 	local_player_name = player_name
-	var server = IrohServer.start()
+	last_network_error = ""
+	if not ClassDB.class_exists("IrohServer"):
+		return _fail("Iroh networking failed to load. Re-extract the zip so MoreRounds.exe, MoreRounds.pck, and godot_iroh.dll are in the same folder.")
+	_emit_status("Starting online host...", false)
+	var server = ClassDB.class_call_static("IrohServer", "start")
 	if server == null:
-		push_error("Failed to start iroh server")
-		return ""
+		return _fail("Could not start the iroh host. Check firewall/security software and try launching from an extracted folder.")
 	multiplayer.multiplayer_peer = server
 	_connect_host_signals_once()
 	players[1] = player_name
 	current_iroh_game_id = server.connection_string()
+	if current_iroh_game_id.is_empty():
+		return _fail("Iroh host started but did not return a match ID.")
 	player_list_changed.emit()
+	_emit_status("Online host ready.", false)
 	return current_iroh_game_id
 
 # Join a game over iroh by its game ID. Returns true if the connection
@@ -44,9 +52,14 @@ func host_game_iroh(player_name: String) -> String:
 # multiplayer.connected_to_server / connection_failed).
 func join_game_iroh(game_id: String, player_name: String) -> bool:
 	local_player_name = player_name
-	var client = IrohClient.connect(game_id)
+	last_network_error = ""
+	if not ClassDB.class_exists("IrohClient"):
+		_fail("Iroh networking failed to load. Re-extract the zip so MoreRounds.exe, MoreRounds.pck, and godot_iroh.dll are in the same folder.")
+		return false
+	_emit_status("Connecting to host...", false)
+	var client = ClassDB.class_call_static("IrohClient", "connect", game_id)
 	if client == null:
-		push_error("Failed to create iroh client")
+		_fail("Could not start the iroh client. Check the match ID, firewall, and whether the game folder was fully extracted.")
 		return false
 	multiplayer.multiplayer_peer = client
 	_connect_client_signals_once()
@@ -61,6 +74,7 @@ func leave_game() -> void:
 		multiplayer.multiplayer_peer = null
 	players.clear()
 	current_iroh_game_id = ""
+	last_network_error = ""
 	player_list_changed.emit()
 
 
@@ -105,17 +119,27 @@ func _on_connected_to_server() -> void:
 	players[my_id] = local_player_name
 	_register_player.rpc(my_id, local_player_name)
 	player_list_changed.emit()
+	_emit_status("Connected to host.", false)
 
 
 func _on_connection_failed() -> void:
-	push_error("Connection failed")
+	var message := "Connection failed. Confirm the match ID, make sure the host is still running, and allow the game through Windows Firewall."
+	_fail(message)
 	multiplayer.multiplayer_peer = null
+	players.clear()
+	current_iroh_game_id = ""
+	set_meta("network_notice", message)
+	player_list_changed.emit()
+	get_tree().change_scene_to_file("res://scenes/game.tscn")
 
 
 func _on_server_disconnected() -> void:
 	players.clear()
 	current_iroh_game_id = ""
 	multiplayer.multiplayer_peer = null
+	var message := "Disconnected from host. Returning to solo play."
+	_fail(message)
+	set_meta("network_notice", message)
 	player_list_changed.emit()
 	# No main menu in the new flow — reloading game.tscn re-hosts a fresh
 	# iroh server in _ready, putting the user back into solo-vs-AI.
@@ -132,3 +156,17 @@ func _register_player(id: int, pname: String) -> void:
 func _unregister_player(id: int) -> void:
 	players.erase(id)
 	player_list_changed.emit()
+
+
+func _emit_status(message: String, is_error: bool) -> void:
+	if is_error:
+		push_error(message)
+	else:
+		print(message)
+	network_status_changed.emit(message, is_error)
+
+
+func _fail(message: String) -> String:
+	last_network_error = message
+	_emit_status(message, true)
+	return ""

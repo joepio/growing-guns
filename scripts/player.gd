@@ -192,6 +192,7 @@ const HIT_FACE_DURATION := 0.22
 @export var player_id: int = 1
 @export var player_name: String = "Player"
 @export var is_bot: bool = false
+@export var appearance_seed: int = 0
 @export var local_input_device: int = -1
 @export var split_screen_local: bool = false
 
@@ -319,6 +320,8 @@ func _apply_identity_cosmetics() -> void:
 	_apply_mouth_variant(mouth_kind)
 
 func _identity_seed() -> int:
+	if appearance_seed != 0:
+		return appearance_seed & 0x7fffffff
 	var s := "%d:%s" % [player_id, player_name]
 	var h := 2166136261
 	for i in s.length():
@@ -910,6 +913,9 @@ func _input_vector() -> Vector3:
 	return dir
 
 func _can_accept_gameplay_input() -> bool:
+	var g := get_tree().current_scene
+	if g and g.has_method("is_any_modal_open") and g.is_any_modal_open():
+		return false
 	return split_screen_local or Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
 
 func _handle_fell_off_map() -> void:
@@ -938,8 +944,10 @@ func handle_environmental_death(_reason: String = "void") -> void:
 	_apply_damage(lethal_amount, player_id)
 
 func _move_vector() -> Vector2:
+	if not _can_accept_gameplay_input():
+		return Vector2.ZERO
 	if local_input_device < 0:
-		return Input.get_vector("move_left", "move_right", "move_forward", "move_back")
+		return _keyboard_move_vector()
 	var raw := Vector2(
 		Input.get_joy_axis(local_input_device, JOY_AXIS_LEFT_X),
 		Input.get_joy_axis(local_input_device, JOY_AXIS_LEFT_Y)
@@ -949,19 +957,25 @@ func _move_vector() -> Vector2:
 	return raw.limit_length(1.0)
 
 func _move_axis_x() -> float:
+	if not _can_accept_gameplay_input():
+		return 0.0
 	if local_input_device < 0:
-		return Input.get_axis("move_right", "move_left")
+		var right := 1.0 if Input.is_physical_key_pressed(KEY_D) else 0.0
+		var left := 1.0 if Input.is_physical_key_pressed(KEY_A) else 0.0
+		return right - left
 	var x := Input.get_joy_axis(local_input_device, JOY_AXIS_LEFT_X)
 	return 0.0 if absf(x) < 0.18 else x
 
 func _action_pressed_local(action: StringName) -> bool:
+	if not _can_accept_gameplay_input():
+		return false
 	if local_input_device < 0:
-		return Input.is_action_pressed(action)
+		return _keyboard_action_pressed(action)
 	match action:
 		&"shoot":
 			return Input.get_joy_axis(local_input_device, JOY_AXIS_TRIGGER_RIGHT) > 0.35
 		&"shoot_grenade":
-			return Input.is_joy_button_pressed(local_input_device, JOY_BUTTON_RIGHT_SHOULDER) \
+			return Input.get_joy_axis(local_input_device, JOY_AXIS_TRIGGER_LEFT) > 0.35 \
 				or Input.is_joy_button_pressed(local_input_device, JOY_BUTTON_B)
 		&"jump":
 			return Input.is_joy_button_pressed(local_input_device, JOY_BUTTON_LEFT_SHOULDER) \
@@ -969,16 +983,44 @@ func _action_pressed_local(action: StringName) -> bool:
 		&"reload":
 			return Input.is_joy_button_pressed(local_input_device, JOY_BUTTON_X)
 		&"dash":
-			return Input.is_joy_button_pressed(local_input_device, JOY_BUTTON_LEFT_STICK)
+			return Input.is_joy_button_pressed(local_input_device, JOY_BUTTON_RIGHT_SHOULDER) \
+				or Input.is_joy_button_pressed(local_input_device, JOY_BUTTON_Y)
 	return false
 
 func _action_just_pressed_local(action: StringName) -> bool:
-	if local_input_device < 0:
-		return Input.is_action_just_pressed(action)
+	if not _can_accept_gameplay_input():
+		_prev_local_actions[action] = false
+		return false
 	var pressed := _action_pressed_local(action)
 	var was_pressed := bool(_prev_local_actions.get(action, false))
 	_prev_local_actions[action] = pressed
 	return pressed and not was_pressed
+
+func _keyboard_move_vector() -> Vector2:
+	var input := Vector2.ZERO
+	if Input.is_physical_key_pressed(KEY_A):
+		input.x -= 1.0
+	if Input.is_physical_key_pressed(KEY_D):
+		input.x += 1.0
+	if Input.is_physical_key_pressed(KEY_W):
+		input.y -= 1.0
+	if Input.is_physical_key_pressed(KEY_S):
+		input.y += 1.0
+	return input.limit_length(1.0)
+
+func _keyboard_action_pressed(action: StringName) -> bool:
+	match action:
+		&"shoot":
+			return Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
+		&"shoot_grenade":
+			return Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT)
+		&"jump":
+			return Input.is_physical_key_pressed(KEY_SPACE)
+		&"reload":
+			return Input.is_physical_key_pressed(KEY_R)
+		&"dash":
+			return Input.is_physical_key_pressed(KEY_SHIFT)
+	return false
 
 # -------------------- RIFLE (hitscan) --------------------
 
@@ -1391,7 +1433,9 @@ func _hit_confirm(is_headshot: bool, dmg: int = 0, hit_pos: Vector3 = Vector3.IN
 	if is_bot:
 		return  # bot has no HUD
 	var g := get_tree().current_scene
-	if g and g.has_method("show_hitmarker"):
+	if g and g.has_method("show_hitmarker_for"):
+		g.show_hitmarker_for(player_id, "head" if is_headshot else "body", dmg, hit_pos)
+	elif g and g.has_method("show_hitmarker"):
 		g.show_hitmarker("head" if is_headshot else "body", dmg, hit_pos)
 
 @rpc("any_peer", "call_local", "reliable")
@@ -1405,7 +1449,9 @@ func confirm_kill() -> void:
 	if is_bot:
 		return
 	var g := get_tree().current_scene
-	if g and g.has_method("show_hitmarker"):
+	if g and g.has_method("show_hitmarker_for"):
+		g.show_hitmarker_for(player_id, "kill")
+	elif g and g.has_method("show_hitmarker"):
 		g.show_hitmarker("kill")
 
 func _spawn_impact(pos: Vector3, color: Color = Color(1.0, 0.9, 0.3), scale_f: float = 1.0, dmg_ratio: float = 1.0, normal: Vector3 = Vector3.UP, explosive_radius: float = 0.0) -> void:
@@ -2165,7 +2211,9 @@ func _notify_damage_source(from_id: int) -> void:
 	if not attacker:
 		return
 	var g := get_tree().current_scene
-	if g and g.has_method("show_damage_direction"):
+	if g and g.has_method("show_damage_direction_for"):
+		g.show_damage_direction_for(player_id, attacker.global_position)
+	elif g and g.has_method("show_damage_direction"):
 		g.show_damage_direction(attacker.global_position)
 
 @rpc("any_peer", "call_local", "reliable")
@@ -2226,7 +2274,9 @@ func server_respawn(pos: Vector3, yaw: float = 0.0) -> void:
 	_ragdoll_head = null
 	camera.transform = Transform3D(Basis.IDENTITY, _camera_rest_pos)
 	var scene := get_tree().current_scene
-	if scene and scene.has_method("show_death_effect"):
+	if scene and scene.has_method("show_death_effect_for"):
+		scene.show_death_effect_for(player_id, false)
+	elif scene and scene.has_method("show_death_effect"):
 		scene.show_death_effect(false)
 
 	_end_shield()

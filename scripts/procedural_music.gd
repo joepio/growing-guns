@@ -4,7 +4,11 @@ extends Node
 # Streams a 4/4, 16th-note acid/synth/percussion loop into an
 # AudioStreamGenerator and crossfades four gameplay energy levels.
 
-const MIX_RATE := 44100.0
+const MIX_RATE := 32000.0
+const BUFFER_LENGTH_SECONDS := 0.5
+const MAX_FILL_SECONDS_PER_PROCESS := 0.015
+const MAX_FILL_USEC_PER_PROCESS := 3000
+const OVERLOAD_MUTE_SECONDS := 1.5
 const TWO_PI := TAU
 
 var enabled: bool = true
@@ -175,6 +179,9 @@ var _solo_snare: bool = false
 var _solo_hats: bool = false
 var _solo_perc: bool = false
 var _solo_glitch: bool = false
+var _max_fill_frames_per_process: int = int(MIX_RATE * MAX_FILL_SECONDS_PER_PROCESS)
+var _overload_mute_timer: float = 0.0
+var _music_overload_reported: bool = false
 
 
 func _ready() -> void:
@@ -197,6 +204,13 @@ func _process(delta: float) -> void:
 		_target_energy = 0.0
 	_energy = move_toward(_energy, _target_energy, delta * 0.75)
 	_external_duck = maxf(0.0, _external_duck - delta * 2.5)
+	if _overload_mute_timer > 0.0:
+		_overload_mute_timer = maxf(0.0, _overload_mute_timer - delta)
+		if _player:
+			_player.volume_db = -80.0
+		return
+	if _player:
+		_player.volume_db = music_db
 	_fill_audio()
 
 
@@ -442,7 +456,7 @@ func _ensure_music_bus() -> void:
 func _start_stream() -> void:
 	var stream := AudioStreamGenerator.new()
 	stream.mix_rate = MIX_RATE
-	stream.buffer_length = 0.35
+	stream.buffer_length = BUFFER_LENGTH_SECONDS
 	_player = AudioStreamPlayer.new()
 	_player.name = "ProceduralMusicPlayer"
 	_player.stream = stream
@@ -451,12 +465,22 @@ func _start_stream() -> void:
 	add_child(_player)
 	_player.play()
 	_playback = _player.get_stream_playback() as AudioStreamGeneratorPlayback
+	_fill_audio(true)
 
 
-func _fill_audio() -> void:
+func _fill_audio(unlimited: bool = false) -> void:
 	var frames := _playback.get_frames_available()
+	if not unlimited:
+		frames = mini(frames, _max_fill_frames_per_process)
+	var started_usec := Time.get_ticks_usec()
 	for i in frames:
 		_playback.push_frame(_next_frame())
+		if not unlimited and Time.get_ticks_usec() - started_usec >= MAX_FILL_USEC_PER_PROCESS:
+			_overload_mute_timer = OVERLOAD_MUTE_SECONDS
+			if not _music_overload_reported:
+				push_warning("Procedural music overloaded; temporarily muting to protect frame rate.")
+				_music_overload_reported = true
+			break
 
 
 func _next_frame() -> Vector2:
