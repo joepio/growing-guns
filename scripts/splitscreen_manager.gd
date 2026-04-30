@@ -2,6 +2,10 @@ extends Node
 
 const RENDER_PLAYER_SCRIPT := preload("res://scripts/render_player.gd")
 const SPLIT_PLAYER_ID_BASE := 10000
+# Reserved player ID for the keyboard/mouse splitscreen joiner (device == -1).
+# Sits well past any plausible controller index so it can't collide with a
+# controller-derived ID at SPLIT_PLAYER_ID_BASE + device.
+const KEYBOARD_PLAYER_ID := SPLIT_PLAYER_ID_BASE + 999
 const _STATE_WAITING := 0
 
 var _game: Node = null
@@ -59,6 +63,17 @@ func handle_input(event: InputEvent) -> bool:
 	for renderer in _renderers_by_player.values():
 		if renderer.handle_input(event):
 			return true
+	# Mouse-click join — only available when the primary is on a controller
+	# (so the mouse is otherwise unused for gameplay), no mouse player has
+	# joined yet, and there is no card pick in progress (clicks during card
+	# pick must reach the card buttons via _gui_input).
+	if event is InputEventMouseButton and event.pressed \
+			and event.button_index == MOUSE_BUTTON_LEFT \
+			and _primary_device >= 0 \
+			and _player_for_device(-1) == 0 \
+			and not is_card_pick_visible():
+		_join_player(-1)
+		return true
 	if not (event is InputEventJoypadButton) or not event.pressed:
 		return false
 	var device := event.device
@@ -115,6 +130,13 @@ func is_card_pick_visible() -> bool:
 	return false
 
 
+func is_card_pick_visible_for(player_id: int) -> bool:
+	var renderer := _renderers_by_player.get(player_id) as RenderPlayer
+	if renderer == null:
+		return false
+	return renderer.is_card_pick_visible()
+
+
 func show_hitmarker_for(player_id: int, kind: String) -> bool:
 	var renderer := _renderers_by_player.get(player_id) as RenderPlayer
 	if renderer == null:
@@ -165,6 +187,7 @@ func update_views() -> void:
 func _set_primary_device(device: int) -> void:
 	_primary_device = device
 	NetworkManager.set_meta("splitscreen_primary_device", device)
+	_refresh_join_label()
 	if _game == null:
 		return
 	var primary_id := multiplayer.get_unique_id()
@@ -174,6 +197,20 @@ func _set_primary_device(device: int) -> void:
 		player.set("local_input_device", device)
 		if player.has_method("_apply_ghost_visuals"):
 			player._apply_ghost_visuals()
+
+
+# Surface the prompt the host should see while waiting on extra players —
+# also used by game.gd for the centered _announce banner.
+func join_prompt_text() -> String:
+	if _primary_device >= 0 and DisplayServer.has_feature(DisplayServer.FEATURE_MOUSE):
+		return "PRESS X OR CLICK MOUSE TO JOIN"
+	return "PRESS X TO JOIN"
+
+
+func _refresh_join_label() -> void:
+	if _join_label == null:
+		return
+	_join_label.text = join_prompt_text()
 
 
 func _build_layer() -> void:
@@ -193,7 +230,7 @@ func _build_layer() -> void:
 	_join_label = Label.new()
 	_join_label.name = "JoinPrompt"
 	_join_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_join_label.text = "PRESS X TO JOIN"
+	_join_label.text = join_prompt_text()
 	_join_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_join_label.add_theme_font_size_override("font_size", 22)
 	_join_label.add_theme_color_override("font_color", Color(1.0, 0.9, 0.45))
@@ -243,7 +280,7 @@ func _player_for_device(device: int) -> int:
 func _join_player(device: int) -> void:
 	if not multiplayer.is_server() or _players_by_device.has(device):
 		return
-	var id := SPLIT_PLAYER_ID_BASE + device
+	var id := KEYBOARD_PLAYER_ID if device < 0 else SPLIT_PLAYER_ID_BASE + device
 	var suffix := _players_by_device.size() + 2
 	var pname := "P%d" % suffix
 	NetworkManager.players[id] = pname
@@ -284,7 +321,8 @@ func _leave_player(device: int) -> void:
 	update_views()
 	if active_match_player_count() < 2:
 		_game.state = _STATE_WAITING
-		_game._announce.rpc("PRESS X TO JOIN", 99.0)
+		# Don't blast the central banner — _join_label already prompts at the
+		# top while there are open splitscreen slots.
 
 
 func _local_player_ids() -> Array[int]:

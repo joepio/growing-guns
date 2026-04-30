@@ -109,6 +109,14 @@ func get_shots_per_trigger() -> int:
 func get_bullet_speed() -> float:
 		return 165.0 * bullet_speed_mult
 
+func get_bullet_scale() -> float:
+		# Visual size of the projectile + tracer + muzzle flash + impact decal.
+		# Derived from damage so a heavier round LOOKS heavier without every
+		# card having to bump bullet_scale by hand. Square-root keeps the curve
+		# from going cartoonish (5× damage → ~2.24× scale, not 5×). The
+		# bullet_scale field is left as a manual override for gun-lab previews.
+		return bullet_scale * sqrt(maxf(damage_mult, 0.1))
+
 func get_melee_damage() -> int:
 	return int(70.0 * melee_damage_mult)
 

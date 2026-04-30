@@ -121,6 +121,7 @@ var _network_status_panel: PanelContainer = null
 var _network_status_label: Label = null
 var _network_status_hide_token: int = 0
 var _kill_feed: VBoxContainer = null
+var _splitscreen_hint: Label = null
 var _join_auto_submit_text: String = ""
 var _join_in_progress: bool = false
 var _ping_ms_by_player: Dictionary = {}
@@ -188,6 +189,9 @@ func _ready() -> void:
 	_build_retro_filter()
 	_build_network_status_panel()
 	_build_kill_feed()
+	_build_splitscreen_hint()
+	Input.joy_connection_changed.connect(_on_joy_connection_changed)
+	_refresh_splitscreen_hint()
 	if NetworkManager.has_meta("network_notice"):
 		var notice := str(NetworkManager.get_meta("network_notice"))
 		NetworkManager.remove_meta("network_notice")
@@ -296,6 +300,7 @@ func _set_controller_hud_icons(enabled: bool) -> void:
 	_last_input_was_controller = enabled
 	HUD_ICON_SCRIPT.use_controller_icons = enabled
 	get_tree().call_group("hud_input_icons", "_refresh_input_device")
+	_refresh_splitscreen_hint()
 
 func _install_controller_input_map() -> void:
 	_add_joy_axis_action("move_left", JOY_AXIS_LEFT_X, -1.0)
@@ -1847,6 +1852,57 @@ func _build_kill_feed() -> void:
 	$HUD.add_child(_kill_feed)
 
 
+# Top-left hint that points the user at the SPLITSCREEN entry in the pause
+# menu when a controller is connected. Hidden once splitscreen is engaged, the
+# host loses control of the lobby (becomes a client), or no controller is
+# attached.
+func _build_splitscreen_hint() -> void:
+	if _splitscreen_hint != null:
+		return
+	var hint := Label.new()
+	hint.name = "SplitscreenHint"
+	hint.text = "2-PLAYER: open menu (Esc) → SPLITSCREEN"
+	hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hint.add_theme_font_size_override("font_size", 14)
+	hint.add_theme_color_override("font_color", Color(1.0, 0.9, 0.45))
+	hint.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
+	hint.add_theme_constant_override("outline_size", 4)
+	hint.set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
+	hint.offset_left = 16.0
+	hint.offset_top = 12.0
+	hint.offset_right = 420.0
+	hint.offset_bottom = 36.0
+	hint.visible = false
+	$HUD.add_child(hint)
+	_splitscreen_hint = hint
+
+
+func _on_joy_connection_changed(_device: int, _connected: bool) -> void:
+	_refresh_splitscreen_hint()
+
+
+func _refresh_splitscreen_hint() -> void:
+	if _splitscreen_hint == null:
+		return
+	_splitscreen_hint.visible = _should_show_splitscreen_hint()
+
+
+func _should_show_splitscreen_hint() -> bool:
+	if _splitscreen and _splitscreen.is_enabled():
+		return false
+	if not multiplayer.is_server():
+		return false
+	var pad_count := Input.get_connected_joypads().size()
+	if pad_count == 0:
+		return false
+	if pad_count >= 2:
+		return true
+	# One controller: only nudge if the host is currently on keyboard/mouse —
+	# otherwise that single pad is the host's own and a splitscreen partner
+	# would need their own pad anyway.
+	return not _last_input_was_controller
+
+
 @rpc("authority", "call_local", "reliable")
 func _show_kill_feed(killer_name: String, victim_name: String) -> void:
 	if killer_name.is_empty() or victim_name.is_empty():
@@ -2090,6 +2146,37 @@ func is_any_modal_open() -> bool:
 	# UI overlay (card pick, dev panel, pause menu, settings, rematch) is visible.
 	if _is_render_card_pick_visible():
 		return true
+	return _is_global_modal_open()
+
+
+# Per-player modal check used by Player._can_accept_gameplay_input — a
+# splitscreen teammate's card pick must NOT freeze everyone else on the
+# same machine, only the picker themselves.
+func is_modal_blocking_player(pid: int) -> bool:
+	if _is_card_pick_visible_for_player(pid):
+		return true
+	return _is_global_modal_open()
+
+func _is_cursor_modal_open() -> bool:
+	# Only mouse-using local pickers should force the cursor visible. A
+	# controller-using teammate can navigate cards without the cursor, so
+	# their pick shouldn't yank mouse capture away from a kbd+mouse player
+	# who's still alive and running around.
+	if _is_card_pick_visible_for_mouse_player():
+		return true
+	if _dev_panel and _dev_panel.is_open():
+		return true
+	if _pause_menu and _pause_menu.visible:
+		return true
+	if _settings_panel and _settings_panel.visible:
+		return true
+	if _rematch_overlay and _rematch_overlay.visible:
+		return true
+	if _audio_panel and _audio_panel.visible:
+		return true
+	return false
+
+func _is_global_modal_open() -> bool:
 	if _dev_panel and _dev_panel.is_open():
 		return true
 	if _pause_menu and _pause_menu.visible:
@@ -2104,21 +2191,6 @@ func is_any_modal_open() -> bool:
 		return true
 	return false
 
-func _is_cursor_modal_open() -> bool:
-	if _is_render_card_pick_visible():
-		return true
-	if _dev_panel and _dev_panel.is_open():
-		return true
-	if _pause_menu and _pause_menu.visible:
-		return true
-	if _settings_panel and _settings_panel.visible:
-		return true
-	if _rematch_overlay and _rematch_overlay.visible:
-		return true
-	if _audio_panel and _audio_panel.visible:
-		return true
-	return false
-
 func _is_render_card_pick_visible() -> bool:
 	for renderer in _render_players.values():
 		if renderer.is_card_pick_visible():
@@ -2126,6 +2198,37 @@ func _is_render_card_pick_visible() -> bool:
 	if _splitscreen and _splitscreen.is_enabled() and _splitscreen.has_method("is_card_pick_visible"):
 		return _splitscreen.is_card_pick_visible()
 	return false
+
+
+func _is_card_pick_visible_for_player(pid: int) -> bool:
+	var renderer := _render_players.get(pid) as RenderPlayer
+	if renderer and renderer.is_card_pick_visible():
+		return true
+	if _splitscreen and _splitscreen.is_enabled() and _splitscreen.has_method("is_card_pick_visible_for"):
+		return bool(_splitscreen.is_card_pick_visible_for(pid))
+	return false
+
+
+func _is_card_pick_visible_for_mouse_player() -> bool:
+	for pid in _render_players.keys():
+		if not _is_card_pick_visible_for_player(int(pid)):
+			continue
+		if _player_uses_mouse(int(pid)):
+			return true
+	if _splitscreen and _splitscreen.is_enabled() and _splitscreen.has_method("_local_player_ids"):
+		for pid in _splitscreen._local_player_ids():
+			if not _is_card_pick_visible_for_player(int(pid)):
+				continue
+			if _player_uses_mouse(int(pid)):
+				return true
+	return false
+
+
+func _player_uses_mouse(pid: int) -> bool:
+	var p := players_root.get_node_or_null(str(pid))
+	if p == null:
+		return false
+	return int(p.get("local_input_device")) < 0
 
 func _sync_mouse_mode() -> void:
 	var modal_open := _is_cursor_modal_open()
@@ -2864,7 +2967,10 @@ func _pause_start_splitscreen() -> void:
 		_toggle_pause_menu()
 	get_tree().paused = false
 	_sync_mouse_mode()
-	_announce.rpc("PRESS X TO JOIN", 99.0)
+	# The "PRESS X TO JOIN" hint lives on the persistent _join_label managed
+	# by splitscreen_manager — no central banner here, otherwise the host
+	# sees the same prompt twice (and one of them sticks around).
+	_refresh_splitscreen_hint()
 
 
 func _pause_restart_match() -> void:

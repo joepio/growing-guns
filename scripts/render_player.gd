@@ -7,6 +7,14 @@ const CROSSHAIR_SCRIPT := preload("res://scripts/crosshair.gd")
 const HIT_MARKER_SCRIPT := preload("res://scripts/hit_marker.gd")
 const DAMAGE_INDICATOR_SCRIPT := preload("res://scripts/damage_indicator.gd")
 const PLAYER_VISUAL_LAYER_BASE := 8
+# Higher than the gameplay look-deadzone — casual stick drift shouldn't
+# advance the selection while the card pick UI is up.
+const CARD_NAV_STICK_DEADZONE := 0.55
+# Base card geometry used everywhere (creation in _make_card, scaling in
+# _scale_card, width-fill calculation in layout_for_size).
+const CARD_BASE_WIDTH := 220.0
+const CARD_BASE_HEIGHT := 300.0
+const CARD_BASE_SEPARATION := 10.0
 
 var game: Node = null
 var player_id: int = 0
@@ -18,6 +26,9 @@ var _hud: Dictionary = {}
 var _card_ids: Array = []
 var _card_selected_index: int = 0
 var _card_pick_locked: bool = false
+# Edge-trigger state for left-stick X card nav: only fires once per push past
+# the deadzone, has to return to neutral before the next nav can register.
+var _card_stick_x_engaged: bool = false
 
 
 func setup(game_node: Node, id: int, device: int = -1) -> void:
@@ -45,6 +56,10 @@ func _process(_delta: float) -> void:
 func handle_input(event: InputEvent) -> bool:
 	if not is_card_pick_visible():
 		return false
+	# Track left-stick X across the lock window too, so a hold during the
+	# 0.75s reveal doesn't get re-fired the moment the lock releases.
+	if input_device >= 0 and event is InputEventJoypadMotion and event.device == input_device:
+		return _handle_card_nav_stick(event)
 	if _card_pick_locked:
 		return true
 	if input_device >= 0:
@@ -90,21 +105,72 @@ func show_card_pick(card_ids: Array) -> void:
 		row.add_child(_make_card(str(raw_id), card, index))
 		index += 1
 	_hud.card_overlay.visible = true
-	mouse_filter = Control.MOUSE_FILTER_STOP
+	# In splitscreen the global mouse cursor would otherwise reach whichever
+	# half it's hovering over and steal selection / picks from the player who
+	# owns that view — block mouse only on the secondary (joined) renderers.
+	# The primary peer keeps mouse-clickable cards so the host can still pick
+	# their own card with the mouse; secondary players act through their own
+	# controller (handled in handle_input below).
+	mouse_filter = Control.MOUSE_FILTER_IGNORE if _is_split_screen_secondary() else Control.MOUSE_FILTER_STOP
+	# Treat the stick as already-engaged if the user happens to be holding it
+	# right now; the next push (after returning to neutral) will fire nav.
+	_card_stick_x_engaged = _stick_x_past_deadzone()
 	await get_tree().create_timer(0.75).timeout
 	if is_card_pick_visible():
 		_card_pick_locked = false
 		_select_card(0)
+		_card_stick_x_engaged = _stick_x_past_deadzone()
 
 
 func hide_card_pick() -> void:
 	_card_ids.clear()
 	_card_pick_locked = false
+	_card_stick_x_engaged = false
 	_hud.card_overlay.visible = false
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var row: HBoxContainer = _hud.card_row
 	for child in row.get_children():
 		child.queue_free()
+
+
+func _handle_card_nav_stick(event: InputEventJoypadMotion) -> bool:
+	if event.axis != JOY_AXIS_LEFT_X:
+		return false
+	var x: float = event.axis_value
+	if absf(x) >= CARD_NAV_STICK_DEADZONE:
+		if not _card_stick_x_engaged:
+			_card_stick_x_engaged = true
+			if not _card_pick_locked:
+				_select_card(_card_selected_index + (1 if x > 0.0 else -1))
+	else:
+		_card_stick_x_engaged = false
+	return true
+
+
+func _stick_x_past_deadzone() -> bool:
+	if input_device < 0:
+		return false
+	return absf(Input.get_joy_axis(input_device, JOY_AXIS_LEFT_X)) >= CARD_NAV_STICK_DEADZONE
+
+
+func _is_splitscreen_active() -> bool:
+	if game == null:
+		return false
+	var ss: Variant = game.get("_splitscreen")
+	if ss == null or not is_instance_valid(ss):
+		return false
+	if not ss.has_method("is_enabled"):
+		return false
+	return bool(ss.is_enabled())
+
+
+# True only for additional joined splitscreen players (P2, P3, …). The primary
+# peer's renderer returns false even in splitscreen so its owner can still
+# click their own cards with the mouse.
+func _is_split_screen_secondary() -> bool:
+	if not _is_splitscreen_active():
+		return false
+	return player_id != multiplayer.get_unique_id()
 
 
 func is_card_pick_visible() -> bool:
@@ -191,12 +257,21 @@ func layout_for_size(view_size: Vector2) -> void:
 		label.offset_top = y - fisheye_offset.y
 		label.offset_bottom = y + 30.0 * scale - fisheye_offset.y
 
+	# Cards get their own scale so the row fills the view width — the HUD
+	# scale above caps at 1.0, which leaves big gaps in splitscreen halves
+	# (and even more space wasted on a single full-screen view).
+	var card_count := maxi(1, _card_ids.size())
+	var cards_total_base: float = CARD_BASE_WIDTH * card_count + CARD_BASE_SEPARATION * (card_count - 1)
+	var width_fit: float = (view_size.x * 0.92) / cards_total_base
+	# Title + breathing room above the row.
+	var height_fit: float = maxf(0.0, (view_size.y - 100.0)) / CARD_BASE_HEIGHT
+	var card_scale: float = clampf(minf(width_fit, height_fit), 0.7, 2.2)
 	var title: Label = _hud.card_title
-	title.add_theme_font_size_override("font_size", maxi(16, int(round(24.0 * scale))))
+	title.add_theme_font_size_override("font_size", maxi(16, int(round(24.0 * card_scale))))
 	var row: HBoxContainer = _hud.card_row
-	row.add_theme_constant_override("separation", maxi(6, int(round(10.0 * scale))))
+	row.add_theme_constant_override("separation", maxi(6, int(round(CARD_BASE_SEPARATION * card_scale))))
 	for child in row.get_children():
-		_scale_card(child as Control, scale)
+		_scale_card(child as Control, card_scale)
 
 
 func _build() -> void:

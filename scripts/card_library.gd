@@ -20,8 +20,7 @@ static func all() -> Array:
 			"color": Color(1.0, 0.25, 0.25),
 			"apply": func(w: Weapon) -> void:
 				w.damage_mult *= 1.5
-				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.2, 0.1), 0.35)
-				w.bullet_scale *= 1.1,
+				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.2, 0.1), 0.35),
 		},
 		{
 			"id": "healthy",
@@ -100,7 +99,18 @@ static func all() -> Array:
 						w.fire_rate_mult *= 0.3
 						w.bullet_speed_mult *= 0.75
 						w.spread = max(w.spread, deg_to_rad(2.0)) + deg_to_rad(2.0),
-		},		{
+		},
+		{
+			"id": "extra_barrel",
+			"name": "EXTRA BARREL",
+			"desc": "Each shot fires an extra parallel bullet",
+			"color": Color(0.72, 0.74, 0.82),
+			"apply": func(w: Weapon) -> void:
+				w.extra_projectiles += 1
+				w.spread = max(w.spread, deg_to_rad(0.8)) + deg_to_rad(0.8)
+				w.reload_mult *= 0.9,
+		},
+		{
 			"id": "lifesteal",
 			"name": "LIFESTEAL",
 			"desc": "",
@@ -123,7 +133,6 @@ static func all() -> Array:
 				else:
 					w.explosive_radius += 2.5
 				w.explosive_damage += 35.0
-				w.bullet_scale *= 1.35
 				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.45, 0.08), 0.45),
 		},
 			{
@@ -143,7 +152,6 @@ static func all() -> Array:
 				"apply": func(w: Weapon) -> void:
 					w.bullet_speed_mult *= 4.0
 					w.spread *= 0.1
-					w.bullet_scale *= 0.9
 					w.bullet_color = w.bullet_color.lerp(Color(0.72, 0.96, 1.0), 0.55),
 			},
 			{
@@ -156,7 +164,6 @@ static func all() -> Array:
 						w.damage_mult *= 2.0
 						w.bullet_speed_mult *= 0.65
 						w.fire_rate_mult *= 0.7
-						w.bullet_scale *= 1.4
 						w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.55, 0.2), 0.3),
 		},
 		{
@@ -169,10 +176,8 @@ static func all() -> Array:
 						w.damage_mult *= 3.0
 						w.bullet_speed_mult *= 2.5
 						w.fire_rate_mult *= 0.4
-						w.mag_size_bonus -= 7
-						w.spread = 0.0
+						w.spread *= 0.1
 						w.headshot_mult *= 1.5
-						w.bullet_scale *= 0.8
 						w.special = Weapon.SPECIAL_ZOOM
 						w.bullet_color = w.bullet_color.lerp(Color(0.55, 0.85, 1.0), 0.6),
 		},		{
@@ -186,7 +191,7 @@ static func all() -> Array:
 						w.fire_rate_mult *= 3.0
 						w.mag_size_bonus += 20
 						w.damage_mult *= 0.7
-						w.spread += deg_to_rad(2.5)
+						w.spread *= 2
 						w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.55, 0.15), 0.5),
 		},		{
 			"id": "homing",
@@ -210,7 +215,6 @@ static func all() -> Array:
 			"color": Color(0.65, 0.85, 1.0),
 			"apply": func(w: Weapon) -> void:
 				w.knockback += 30.0
-				w.bullet_scale *= 2
 				w.damage_mult *= 1.5
 				w.bullet_color = w.bullet_color.lerp(Color(0.6, 0.9, 1.0), 0.45),
 		},
@@ -222,7 +226,6 @@ static func all() -> Array:
 			"apply": func(w: Weapon) -> void:
 				w.damage_mult *= 1.8
 				w.head_scale *= 1.8
-				w.bullet_scale *= 1.15
 				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.5, 0.85), 0.3),
 		},
 		{
@@ -268,7 +271,6 @@ static func all() -> Array:
 				w.damage_mult *= 2.2
 				w.bullet_speed_mult *= 1.35
 				w.max_hp_bonus -= 45
-				w.bullet_scale *= 1.15
 				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.12, 0.32), 0.45),
 		},
 		{
@@ -293,8 +295,7 @@ static func all() -> Array:
 				w.damage_mult *= 2.5
 				w.fire_rate_mult *= 0.45
 				w.reload_mult *= 0.65
-				w.recoil_per_shot *= 1.25
-				w.bullet_scale *= 1.35,
+				w.recoil_per_shot *= 1.25,
 		},
 		{
 			"id": "wind_up",
@@ -327,7 +328,6 @@ static func all() -> Array:
 			"apply": func(w: Weapon) -> void:
 				w.grow_damage_per_meter += 0.015
 				w.bullet_speed_mult *= 0.85
-				w.bullet_scale *= 1.15
 				w.bullet_color = w.bullet_color.lerp(Color(0.45, 1.0, 0.25), 0.4),
 		},
 		{
@@ -379,8 +379,7 @@ static func all() -> Array:
 			"apply": func(w: Weapon) -> void:
 				w.world_pierce_count += 2
 				w.damage_mult *= 1.25
-				w.bullet_speed_mult *= 0.8
-				w.bullet_scale *= 1.2,
+				w.bullet_speed_mult *= 0.8,
 		},
 		{
 			"id": "landmine_rounds",
@@ -485,7 +484,6 @@ static func all() -> Array:
 				w.mag_size_bonus = 1 - int(Weapon.BASE_MAG_SIZE) # Force to 1
 				w.reload_mult = 0.3
 				w.bullet_speed_mult = 0.1
-				w.bullet_scale = 2.5
 				w.explosive_radius = 16.0
 				w.explosive_damage = 200.0
 				w.bullet_drop = 3.0  # rocket thrust mostly cancels gravity

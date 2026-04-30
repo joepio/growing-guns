@@ -644,6 +644,10 @@ func _physics_process(delta: float) -> void:
 		return
 	_tick_status_effects(delta)
 
+	if health <= 0:
+		velocity = Vector3.ZERO
+		return
+
 	if is_bot:
 		_bot_physics(delta)
 		return
@@ -915,7 +919,9 @@ func _input_vector() -> Vector3:
 
 func _can_accept_gameplay_input() -> bool:
 	var g := get_tree().current_scene
-	if g and g.has_method("is_any_modal_open") and g.is_any_modal_open():
+	# In splitscreen, a card pick on a teammate's view must not freeze this
+	# player — only THIS player's modal (or a global one) should gate input.
+	if g and g.has_method("is_modal_blocking_player") and g.is_modal_blocking_player(player_id):
 		return false
 	return split_screen_local or Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
 
@@ -1051,7 +1057,7 @@ func _fire_rifle() -> void:
 	var base_dir: Vector3 = (aim_point - origin).normalized()
 	# Local feel (authority-only; these fields are driven by the local physics loop).
 	# Scale recoil and kick by the size of the bullet
-	var scale_f := weapon.bullet_scale
+	var scale_f := weapon.get_bullet_scale()
 	recoil_pitch += RIFLE_RECOIL_PITCH * scale_f
 	muzzle_kick_z = max(muzzle_kick_z, RIFLE_RECOIL_KICK * scale_f)
 	shake_amt = max(shake_amt, RIFLE_SHAKE * scale_f)
@@ -1130,13 +1136,13 @@ func _rifle_fired(
 	bullet.setup(origin, dir, shooter_id, w, shot_damage_mult, shot_speed_mult)
 	BenchFlags.inc("bullets_spawned")
 
-	# Muzzle flash scales with bullet size AND damage so heavy rounds boom.
-	var dmg_ratio: float = clampf(w.get_damage() / Weapon.BASE_DAMAGE, 0.5, 4.0)
+	# Muzzle flash scales with bullet size — get_bullet_scale already folds
+	# in damage_mult, so no extra sqrt(dmg_ratio) factor here.
 	var local_first_person := shooter_id == multiplayer.get_unique_id() and is_multiplayer_authority() and not is_bot
 	var visual_anchor := muzzle if local_first_person else _third_person_gun
 	if visual_anchor == null:
 		visual_anchor = muzzle
-	_spawn_muzzle_flash(w.bullet_color, w.bullet_scale * sqrt(dmg_ratio), visual_anchor, local_first_person)
+	_spawn_muzzle_flash(w.bullet_color, w.get_bullet_scale(), visual_anchor, local_first_person)
 	if not local_first_person:
 		_spawn_third_person_casing(w)
 
@@ -1387,7 +1393,7 @@ func _spawn_third_person_casing(w: Weapon) -> void:
 	pmat.friction = 0.6
 	rb.physics_material_override = pmat
 
-	var size := clampf(w.bullet_scale, 0.65, 2.2)
+	var size := clampf(w.get_bullet_scale(), 0.65, 2.2)
 	if not BenchFlags.active:
 		var mi := MeshInstance3D.new()
 		var cm := CylinderMesh.new()
@@ -2103,6 +2109,10 @@ func _apply_damage(
 		_play_hurt_sound.rpc(global_position)
 	else:
 		_play_death_sound.rpc(global_position)
+		if is_bot:
+			_bot_target = null
+			_bot_shoot_cooldown = 999.0
+			velocity = Vector3.ZERO
 		var push: Vector3 = Vector3.UP
 		var ctx_force: float = maxf(gib_force, 0.0)
 		if hit_dir.length_squared() > 0.001:
@@ -2464,6 +2474,11 @@ func _update_body_scale() -> void:
 # -------------------- BOT AI --------------------
 
 func _bot_physics(delta: float) -> void:
+	if health <= 0 or ghost_mode:
+		velocity = Vector3.ZERO
+		_bot_target = null
+		_bot_shoot_cooldown = 999.0
+		return
 	if launching:
 		move_and_slide()
 		if is_on_floor():
@@ -2613,7 +2628,7 @@ func _bot_physics(delta: float) -> void:
 	# Fell off map.
 	_handle_fell_off_map()
 
-	if not ghost_mode and _bot_shoot_cooldown <= 0.0 and not reloading and _bot_has_los(_bot_target):
+	if health > 0 and not ghost_mode and _bot_shoot_cooldown <= 0.0 and not reloading and _bot_has_los(_bot_target):
 		# Round must be live (no shooting at corpses during card pick / match
 		# over), and the dev toggle in the F1 panel can hold fire entirely.
 		var game_scene_shoot: Node = get_tree().current_scene
