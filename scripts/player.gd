@@ -2233,6 +2233,11 @@ func server_respawn(pos: Vector3, yaw: float = 0.0) -> void:
 	grenade_cooldown = 0.0
 	melee_cooldown = 0.0
 	wall_jump_cooldown = 0.0
+	# Bots get their fire cooldown clamped to 999s on death so a corpse can't
+	# shoot during the death animation; without resetting it here, the same
+	# bot node is "frozen" silent for the rest of the match after its first
+	# kill.
+	_bot_shoot_cooldown = 0.0
 	mag = weapon.get_mag_size()
 	reloading = false
 	if _reload_tween and _reload_tween.is_valid():
