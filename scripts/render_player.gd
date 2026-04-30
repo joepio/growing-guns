@@ -6,6 +6,7 @@ signal card_selected(player_id: int, card_id: String)
 const CROSSHAIR_SCRIPT := preload("res://scripts/crosshair.gd")
 const HIT_MARKER_SCRIPT := preload("res://scripts/hit_marker.gd")
 const DAMAGE_INDICATOR_SCRIPT := preload("res://scripts/damage_indicator.gd")
+const HUD_ICON_SCRIPT := preload("res://scripts/hud_icon.gd")
 const PLAYER_VISUAL_LAYER_BASE := 8
 # Higher than the gameplay look-deadzone — casual stick drift shouldn't
 # advance the selection while the card pick UI is up.
@@ -105,13 +106,12 @@ func show_card_pick(card_ids: Array) -> void:
 		row.add_child(_make_card(str(raw_id), card, index))
 		index += 1
 	_hud.card_overlay.visible = true
-	# In splitscreen the global mouse cursor would otherwise reach whichever
-	# half it's hovering over and steal selection / picks from the player who
-	# owns that view — block mouse only on the secondary (joined) renderers.
-	# The primary peer keeps mouse-clickable cards so the host can still pick
-	# their own card with the mouse; secondary players act through their own
-	# controller (handled in handle_input below).
-	mouse_filter = Control.MOUSE_FILTER_IGNORE if _is_split_screen_secondary() else Control.MOUSE_FILTER_STOP
+	# Block the mouse on cards belonging to controller-using players, so the
+	# global cursor can't steal their selection while they navigate with
+	# DPAD/stick. Mouse-using players (incl. a kbd+mouse player who joined
+	# splitscreen via click-to-join) keep MOUSE_FILTER_STOP so they can still
+	# click their own cards.
+	mouse_filter = Control.MOUSE_FILTER_IGNORE if input_device >= 0 else Control.MOUSE_FILTER_STOP
 	# Treat the stick as already-engaged if the user happens to be holding it
 	# right now; the next push (after returning to neutral) will fire nav.
 	_card_stick_x_engaged = _stick_x_past_deadzone()
@@ -164,15 +164,6 @@ func _is_splitscreen_active() -> bool:
 	return bool(ss.is_enabled())
 
 
-# True only for additional joined splitscreen players (P2, P3, …). The primary
-# peer's renderer returns false even in splitscreen so its owner can still
-# click their own cards with the mouse.
-func _is_split_screen_secondary() -> bool:
-	if not _is_splitscreen_active():
-		return false
-	return player_id != multiplayer.get_unique_id()
-
-
 func is_card_pick_visible() -> bool:
 	return bool(_hud.get("card_overlay").visible)
 
@@ -220,42 +211,51 @@ func layout_for_size(view_size: Vector2) -> void:
 	var font_big := maxi(13, int(round(22.0 * scale)))
 	var font_small := maxi(11, int(round(16.0 * scale)))
 
-	# Fisheye compensation: shift HUD elements inward from screen edges
-	var fisheye_offset := Vector2.ZERO
+	# Retro/fisheye compensation. The shader bows the image outward, so HUD
+	# elements need to be pulled toward center to land where they should after
+	# distortion. The pull is proportional to the element's distance from
+	# centre — a flat sign-based offset (the previous approach) over-pulls
+	# centre-adjacent panels, which made the bottom-row icons overlap and look
+	# squished under retro.
+	var fisheye_pull_x := 0.0           # multiplicative: shift each item by base_x * pull
+	var fisheye_y_offset := 0.0         # additive: shift bottom row up by this many px
 	if game and game.has_method("_is_retro_enabled") and game.call("_is_retro_enabled"):
-		# Max distortion at edges. Pull HUD toward center by ~30% of edge distance.
-		fisheye_offset = Vector2(1.0, 0.8) * 25.0 * scale
+		fisheye_pull_x = 0.08
+		# Pull the row toward the vertical centre by the same fraction the x
+		# pull uses — view_size.y is the reference, so a half-screen split gets
+		# a smaller (proportional) lift than full-screen. Without this the
+		# bottom panels were getting clipped under the lens warp.
+		fisheye_y_offset = view_size.y * 0.5 * fisheye_pull_x
 
 	var crosshair: Control = _hud.crosshair
 	crosshair.set("line_width", maxf(1.0, 1.5 * scale))
 	crosshair.set("line_length", maxf(5.0, 8.0 * scale))
 	crosshair.set("base_gap", maxf(3.0, 4.0 * scale))
 
-	var health: Label = _hud.health
-	health.add_theme_font_size_override("font_size", font_big)
-
+	var panel_h := 30.0 * scale
 	var y := view_size.y - margin - 32.0 * scale
 	for item in [
-		{"node": _hud.health, "x": -285.0, "w": 100.0, "font": font_big},
-		{"node": _hud.ammo, "x": -150.0, "w": 120.0, "font": font_big},
-		{"node": _hud.special, "x": -35.0, "w": 140.0, "font": font_small},
-		{"node": _hud.dash, "x": 105.0, "w": 100.0, "font": font_small},
+		{"node": _hud.hp_panel, "x": -290.0, "w": 130.0, "font": font_big},
+		{"node": _hud.ammo_panel, "x": -140.0, "w": 130.0, "font": font_big},
+		{"node": _hud.special_panel, "x": 10.0, "w": 130.0, "font": font_small},
+		{"node": _hud.dash_panel, "x": 160.0, "w": 130.0, "font": font_small},
 	]:
-		var label: Label = item.node
-		label.add_theme_font_size_override("font_size", item.font)
-		label.anchor_left = 0.5
-		label.anchor_right = 0.5
-		label.anchor_top = 0.0
-		label.anchor_bottom = 0.0
+		var panel: Control = item.node
+		panel.set_meta("font_size", item.font)
+		panel.anchor_left = 0.5
+		panel.anchor_right = 0.5
+		panel.anchor_top = 0.0
+		panel.anchor_bottom = 0.0
 		var base_x: float = float(item.x) * scale
-		# Apply fisheye compensation: shift toward center
-		# Left side (negative): add offset to move right. Right side (positive): subtract to move left.
-		var compensated_x: float = base_x + (fisheye_offset.x if base_x < 0 else -fisheye_offset.x)
-		label.offset_left = compensated_x
-		label.offset_right = label.offset_left + float(item.w) * scale
+		# Multiplicative pull: outer panels travel more than inner ones, which
+		# matches the non-linear distortion and keeps the row's relative
+		# spacing consistent under retro.
+		var compensated_x: float = base_x * (1.0 - fisheye_pull_x)
+		panel.offset_left = compensated_x
+		panel.offset_right = panel.offset_left + float(item.w) * scale
 		# Y: bottom edge gets pushed down by fisheye, so move upward (negative offset)
-		label.offset_top = y - fisheye_offset.y
-		label.offset_bottom = y + 30.0 * scale - fisheye_offset.y
+		panel.offset_top = y - fisheye_y_offset
+		panel.offset_bottom = y + panel_h - fisheye_y_offset
 
 	# Cards get their own scale so the row fills the view width — the HUD
 	# scale above caps at 1.0, which leaves big gaps in splitscreen halves
@@ -265,13 +265,21 @@ func layout_for_size(view_size: Vector2) -> void:
 	var width_fit: float = (view_size.x * 0.92) / cards_total_base
 	# Title + breathing room above the row.
 	var height_fit: float = maxf(0.0, (view_size.y - 100.0)) / CARD_BASE_HEIGHT
-	var card_scale: float = clampf(minf(width_fit, height_fit), 0.7, 2.2)
+	var card_scale: float = clampf(minf(width_fit, height_fit), CARD_SCALE_MIN, CARD_SCALE_MAX)
 	var title: Label = _hud.card_title
 	title.add_theme_font_size_override("font_size", maxi(16, int(round(24.0 * card_scale))))
 	var row: HBoxContainer = _hud.card_row
 	row.add_theme_constant_override("separation", maxi(6, int(round(CARD_BASE_SEPARATION * card_scale))))
 	for child in row.get_children():
 		_scale_card(child as Control, card_scale)
+
+
+# Constants that drive `card_scale` in layout_for_size.
+# Upper bound was 2.2 — that was visually right for a small splitscreen half
+# but blew the cards up huge on a 1080p single-player viewport. Lowering the
+# cap also avoids cards crowding the screen on very tall displays.
+const CARD_SCALE_MIN := 0.7
+const CARD_SCALE_MAX := 1.5
 
 
 func _build() -> void:
@@ -293,18 +301,14 @@ func _build() -> void:
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hud_layer.add_child(root)
 
-	var health := _label(Color(1.0, 0.95, 0.82))
-	health.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	root.add_child(health)
-	var ammo := _label(Color(1.0, 0.94, 0.62))
-	ammo.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	root.add_child(ammo)
-	var special := _label(Color(0.7, 1.0, 0.55))
-	special.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	root.add_child(special)
-	var dash := _label(Color(0.65, 0.9, 1.0))
-	dash.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	root.add_child(dash)
+	var hp_panel := _build_hp_panel()
+	root.add_child(hp_panel)
+	var ammo_panel := _build_value_panel(HUD_ICON_SCRIPT.Type.LMB, Color(1.0, 0.94, 0.62))
+	root.add_child(ammo_panel)
+	var special_panel := _build_value_panel(HUD_ICON_SCRIPT.Type.RMB, Color(0.7, 1.0, 0.55))
+	root.add_child(special_panel)
+	var dash_panel := _build_dash_panel()
+	root.add_child(dash_panel)
 
 	var crosshair := Control.new()
 	crosshair.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -344,10 +348,10 @@ func _build() -> void:
 	retro_layer.add_child(retro)
 
 	_hud = {
-		"health": health,
-		"ammo": ammo,
-		"special": special,
-		"dash": dash,
+		"hp_panel": hp_panel,
+		"ammo_panel": ammo_panel,
+		"special_panel": special_panel,
+		"dash_panel": dash_panel,
 		"crosshair": crosshair,
 		"hitmarker": hitmarker,
 		"damage": damage,
@@ -358,6 +362,103 @@ func _build() -> void:
 		"card_title": card_overlay.title,
 		"retro_layer": retro_layer,
 	}
+
+
+# Bottom-row HUD panels. Each one is a plain Control with named children
+# whose layout is finalised in _layout_bottom_panel(). The panels themselves
+# are positioned by layout_for_size; their internals get sized + repositioned
+# every frame from _update_hud so reload progress + dash recharge can drive
+# the visible state without having to rebuild anything.
+func _build_hp_panel() -> Control:
+	var panel := Control.new()
+	panel.name = "HpPanel"
+	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var cross := CrossDraw.new()
+	cross.name = "Cross"
+	cross.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	panel.add_child(cross)
+	var label := _label(Color(1.0, 0.95, 0.82))
+	label.name = "Label"
+	label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	panel.add_child(label)
+	return panel
+
+
+func _build_value_panel(icon_type: int, text_color: Color) -> Control:
+	var panel := Control.new()
+	panel.name = "ValuePanel"
+	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var icon := Control.new()
+	icon.name = "Icon"
+	icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	icon.set_script(HUD_ICON_SCRIPT)
+	icon.set("icon_type", icon_type)
+	panel.add_child(icon)
+	var label := _label(text_color)
+	label.name = "Label"
+	label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	panel.add_child(label)
+	var bar_bg := ColorRect.new()
+	bar_bg.name = "BarBg"
+	bar_bg.color = Color(0, 0, 0, 0.55)
+	bar_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	bar_bg.visible = false
+	panel.add_child(bar_bg)
+	var bar_fill := ColorRect.new()
+	bar_fill.name = "BarFill"
+	bar_fill.color = text_color
+	bar_fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	bar_fill.visible = false
+	panel.add_child(bar_fill)
+	return panel
+
+
+func _build_dash_panel() -> Control:
+	var panel := Control.new()
+	panel.name = "DashPanel"
+	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var icon := Control.new()
+	icon.name = "Icon"
+	icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	icon.set_script(HUD_ICON_SCRIPT)
+	icon.set("icon_type", HUD_ICON_SCRIPT.Type.SHIFT)
+	panel.add_child(icon)
+	var dash_color := Color(0.65, 0.9, 1.0)
+	for i in 2:
+		var bg := ColorRect.new()
+		bg.name = "Bar%dBg" % i
+		bg.color = Color(0, 0, 0, 0.55)
+		bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		panel.add_child(bg)
+		var fill := ColorRect.new()
+		fill.name = "Bar%dFill" % i
+		fill.color = dash_color
+		fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		panel.add_child(fill)
+	return panel
+
+
+# Inner class that just draws a thick "+" cross using the panel-anchored size.
+class CrossDraw extends Control:
+	var cross_color: Color = Color(1.0, 0.35, 0.35)
+	func set_cross_color(c: Color) -> void:
+		if c == cross_color:
+			return
+		cross_color = c
+		queue_redraw()
+	func _draw() -> void:
+		var thick: float = size.x * 0.34
+		var horizontal := Rect2(0, (size.y - thick) * 0.5, size.x, thick)
+		var vertical := Rect2((size.x - thick) * 0.5, 0, thick, size.y)
+		draw_rect(horizontal, cross_color, true)
+		draw_rect(vertical, cross_color, true)
+		# Outline so the cross stays readable against bright surfaces.
+		draw_rect(horizontal, Color(0, 0, 0, 0.85), false, 1.5)
+		draw_rect(vertical, Color(0, 0, 0, 0.85), false, 1.5)
 
 
 func _build_card_overlay(root: Control) -> Dictionary:
@@ -449,6 +550,7 @@ func _make_card(card_id: String, card: Dictionary, index: int) -> Control:
 	title.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	title.add_theme_font_size_override("font_size", 18)
 	vb.add_child(title)
+	root.set_meta("title_label", title)
 
 	var desc := _label(Color(0.9, 0.9, 0.9))
 	desc.text = str(card.get("desc", ""))
@@ -456,10 +558,12 @@ func _make_card(card_id: String, card: Dictionary, index: int) -> Control:
 	desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	desc.add_theme_font_size_override("font_size", 14)
 	vb.add_child(desc)
+	root.set_meta("desc_label", desc)
 
 	var stats_vbox := VBoxContainer.new()
 	stats_vbox.add_theme_constant_override("separation", 1)
 	vb.add_child(stats_vbox)
+	root.set_meta("stats_vbox", stats_vbox)
 	for diff_line in _card_stat_diff(card_id):
 		var slbl := _label(Color(0.75, 0.85, 1.0, 0.85))
 		slbl.text = diff_line
@@ -614,6 +718,21 @@ func _scale_card(card: Control, scale: float) -> void:
 		body.custom_minimum_size = Vector2(200.0, 280.0) * scale
 		body.size = body.custom_minimum_size
 		body.pivot_offset = body.size * 0.5
+	# Inner text scales with the card so a small splitscreen card doesn't
+	# render with chunky default fonts and a big single-screen card doesn't
+	# render with tiny ones. Base sizes match the values used in _make_card.
+	var title := card.get_meta("title_label") as Label
+	if title:
+		title.add_theme_font_size_override("font_size", maxi(10, int(round(18.0 * scale))))
+	var desc := card.get_meta("desc_label") as Label
+	if desc:
+		desc.add_theme_font_size_override("font_size", maxi(9, int(round(14.0 * scale))))
+	var stats := card.get_meta("stats_vbox") as VBoxContainer
+	if stats:
+		var stat_size: int = maxi(8, int(round(12.0 * scale)))
+		for s in stats.get_children():
+			if s is Label:
+				(s as Label).add_theme_font_size_override("font_size", stat_size)
 
 
 func _add_holo_overlay(panel: Control, style: StyleBoxFlat) -> void:
@@ -708,21 +827,129 @@ func _card_stat_diff(card_id: String) -> Array[String]:
 func _update_hud(player: Node) -> void:
 	var is_ghost := bool(player.get("ghost_mode"))
 	var weapon: Weapon = player.get("weapon")
-	_hud.health.text = "GHOST" if is_ghost else "HP  %d" % int(player.get("health"))
+
+	_layout_hp_panel(player, is_ghost)
+
+	var reload_progress := 0.0
+	if not is_ghost and bool(player.get("reloading")):
+		var rifle_cd := float(player.get("rifle_cooldown"))
+		var reload_dur: float = maxf(0.01, weapon.get_reload_time())
+		reload_progress = clampf(1.0 - rifle_cd / reload_dur, 0.0, 1.0)
+	var ammo_text := "GHOST" if is_ghost else "%d / %d" % [int(player.get("mag")), weapon.get_mag_size()]
+	_layout_value_panel(_hud.ammo_panel, ammo_text, reload_progress, is_ghost)
+
+	var special_progress := 0.0
+	var special_text: String
 	if is_ghost:
-		_hud.ammo.text = "GHOST"
-		_hud.special.text = "MINE"
+		special_text = "MINE"
 	else:
-		_hud.ammo.text = "%d / %d" % [int(player.get("mag")), weapon.get_mag_size()]
-		var special_text := weapon.special.to_upper()
+		special_text = weapon.special.to_upper()
 		var special_cd := float(player.get("grenade_cooldown"))
-		if special_cd > 0.0:
-			special_text = "%.1f" % special_cd
-		_hud.special.text = special_text
-	_hud.dash.text = "DASH %d" % int(player.get("dash_charges"))
+		var special_max: float = float(player.get("special_cooldown_max"))
+		if special_cd > 0.0 and special_max > 0.0:
+			special_progress = clampf(1.0 - special_cd / special_max, 0.0, 1.0)
+	_layout_value_panel(_hud.special_panel, special_text, special_progress, is_ghost)
+
+	_layout_dash_panel(player)
+
 	_hud.crosshair.set("spread", player.call("get_effective_spread"))
 	_hud.ghost.color.a = 0.28 if is_ghost and not bool(_hud.card_overlay.visible) else 0.0
 	_hud.retro_layer.visible = bool(game.get("_retro_enabled"))
+
+
+func _layout_hp_panel(player: Node, is_ghost: bool) -> void:
+	var panel: Control = _hud.hp_panel
+	var w: float = panel.size.x
+	var h: float = panel.size.y
+	if h <= 0.0:
+		return
+	var cross: CrossDraw = panel.get_node("Cross") as CrossDraw
+	var label: Label = panel.get_node("Label") as Label
+	var cross_size: float = h * 0.85
+	cross.position = Vector2(0.0, (h - cross_size) * 0.5)
+	cross.size = Vector2(cross_size, cross_size)
+	cross.set_cross_color(Color(0.65, 0.85, 1.0) if is_ghost else Color(1.0, 0.35, 0.35))
+	var label_x: float = cross_size + 8.0
+	label.position = Vector2(label_x, 0.0)
+	label.size = Vector2(maxf(0.0, w - label_x), h)
+	var font_size: int = int(panel.get_meta("font_size", 22))
+	label.add_theme_font_size_override("font_size", font_size)
+	label.text = "GHOST" if is_ghost else str(int(player.get("health")))
+
+
+func _layout_value_panel(panel: Control, text: String, progress: float, is_ghost: bool) -> void:
+	var w: float = panel.size.x
+	var h: float = panel.size.y
+	if h <= 0.0:
+		return
+	var icon: Control = panel.get_node("Icon")
+	var label: Label = panel.get_node("Label") as Label
+	var bar_bg: ColorRect = panel.get_node("BarBg") as ColorRect
+	var bar_fill: ColorRect = panel.get_node("BarFill") as ColorRect
+	var icon_size: float = h * 0.95
+	icon.position = Vector2(0.0, (h - icon_size) * 0.5)
+	icon.size = Vector2(icon_size, icon_size)
+	icon.queue_redraw()
+	var content_x: float = icon_size + 8.0
+	var content_w: float = maxf(0.0, w - content_x)
+	var font_size: int = int(panel.get_meta("font_size", 22))
+	if progress > 0.0 and not is_ghost:
+		label.visible = false
+		bar_bg.visible = true
+		bar_fill.visible = true
+		var bar_h: float = h * 0.5
+		var bar_y: float = (h - bar_h) * 0.5
+		bar_bg.position = Vector2(content_x, bar_y)
+		bar_bg.size = Vector2(content_w, bar_h)
+		bar_fill.position = Vector2(content_x, bar_y)
+		bar_fill.size = Vector2(content_w * progress, bar_h)
+	else:
+		bar_bg.visible = false
+		bar_fill.visible = false
+		label.visible = true
+		label.position = Vector2(content_x, 0.0)
+		label.size = Vector2(content_w, h)
+		label.add_theme_font_size_override("font_size", font_size)
+		label.text = text
+
+
+func _layout_dash_panel(player: Node) -> void:
+	var panel: Control = _hud.dash_panel
+	var w: float = panel.size.x
+	var h: float = panel.size.y
+	if h <= 0.0:
+		return
+	var icon: Control = panel.get_node("Icon")
+	var icon_size: float = h * 0.95
+	icon.position = Vector2(0.0, (h - icon_size) * 0.5)
+	icon.size = Vector2(icon_size, icon_size)
+	icon.queue_redraw()
+	var charges: int = int(player.get("dash_charges"))
+	var recharge: float = float(player.get("dash_recharge_timer"))
+	var recharge_total: float = 3.0  # matches Player.DASH_RECHARGE_TIME
+	# Two horizontal slots; each shows full / partial / empty depending on the
+	# next charge being recharged.
+	var slot_x: float = icon_size + 8.0
+	var slot_total_w: float = maxf(0.0, w - slot_x)
+	var slot_gap: float = 6.0
+	var slot_w: float = (slot_total_w - slot_gap) * 0.5
+	var bar_h: float = h * 0.5
+	var bar_y: float = (h - bar_h) * 0.5
+	for i in 2:
+		var bg: ColorRect = panel.get_node("Bar%dBg" % i) as ColorRect
+		var fill: ColorRect = panel.get_node("Bar%dFill" % i) as ColorRect
+		var slot_left: float = slot_x + i * (slot_w + slot_gap)
+		bg.position = Vector2(slot_left, bar_y)
+		bg.size = Vector2(slot_w, bar_h)
+		var fill_amount: float
+		if i < charges:
+			fill_amount = 1.0
+		elif i == charges:
+			fill_amount = clampf(recharge / recharge_total, 0.0, 1.0)
+		else:
+			fill_amount = 0.0
+		fill.position = Vector2(slot_left, bar_y)
+		fill.size = Vector2(slot_w * fill_amount, bar_h)
 
 
 func _player() -> Node3D:

@@ -20,6 +20,11 @@ var _pause_buttons: Array[Button] = []
 var _primary_device: int = -1
 var _players_by_device: Dictionary = {}
 var _renderers_by_player: Dictionary = {}
+# Single AudioListener3D parked at the midpoint of all local players' cameras.
+# Each SubViewport has its own current Camera3D (for rendering), but the main
+# viewport ends up with no current camera in splitscreen mode — without this
+# listener, AudioStreamPlayer3D nodes have no reference point and play flat.
+var _audio_listener: AudioListener3D = null
 
 
 func setup(game: Node) -> void:
@@ -40,6 +45,7 @@ func enable(primary_device: int = -1) -> void:
 	if _game and _game.has_method("_clear_render_players"):
 		_game._clear_render_players()
 	_build_layer()
+	_setup_audio_listener()
 	update_views.call_deferred()
 
 
@@ -48,6 +54,7 @@ func _ready() -> void:
 		and NetworkManager.get_meta("splitscreen_on_start")
 	if _enabled:
 		_build_layer()
+		_setup_audio_listener()
 		_set_primary_device(int(NetworkManager.get_meta("splitscreen_primary_device", -1)))
 		update_views.call_deferred()
 
@@ -55,6 +62,7 @@ func _ready() -> void:
 func _process(_delta: float) -> void:
 	if _enabled:
 		update_views()
+		_update_audio_listener()
 
 
 func handle_input(event: InputEvent) -> bool:
@@ -182,6 +190,70 @@ func update_views() -> void:
 		renderer.position = slot.position
 		renderer.size = slot.size
 		renderer.layout_for_size(slot.size)
+
+
+func _setup_audio_listener() -> void:
+	if _audio_listener != null and is_instance_valid(_audio_listener):
+		return
+	if _game == null:
+		return
+	_audio_listener = AudioListener3D.new()
+	_audio_listener.name = "SplitscreenAudioListener"
+	_game.add_child(_audio_listener)
+	_audio_listener.make_current()
+
+
+func _update_audio_listener() -> void:
+	# Anchor the listener at the host-primary's camera (full transform — basis
+	# matters so directional pan tracks where the host is looking). Each
+	# additional local player's perspective is folded into the same audio
+	# output via "ghost" sources at shifted positions (see ghost_positions_for
+	# below) — that gave a cleaner result than averaging the listener.
+	if _audio_listener == null or not is_instance_valid(_audio_listener):
+		return
+	var cam := _host_primary_camera()
+	if cam == null:
+		return
+	_audio_listener.global_transform = cam.global_transform
+
+
+func _host_primary_camera() -> Camera3D:
+	if _game == null:
+		return null
+	var host_id := multiplayer.get_unique_id()
+	var host_player := _game.players_root.get_node_or_null(str(host_id)) as Node3D
+	if host_player == null:
+		return null
+	return host_player.get_node_or_null("Camera") as Camera3D
+
+
+# For a sound at `world_pos`, return one shifted world position per non-primary
+# local player such that, when played through the host-anchored listener, it
+# sounds the way that secondary player would have heard the original source.
+# Math: take the listener-local vector from secondary→source, then re-project
+# it into host-listener space (host_origin + host_basis * v_local).
+func ghost_positions_for(world_pos: Vector3) -> Array[Vector3]:
+	var out: Array[Vector3] = []
+	if not _enabled:
+		return out
+	var host_cam := _host_primary_camera()
+	if host_cam == null:
+		return out
+	var host_xform := host_cam.global_transform
+	var host_id := multiplayer.get_unique_id()
+	for id in _local_player_ids():
+		if id == host_id:
+			continue
+		var p := _game.players_root.get_node_or_null(str(id)) as Node3D
+		if p == null:
+			continue
+		var p_cam := p.get_node_or_null("Camera") as Camera3D
+		if p_cam == null:
+			continue
+		var p_xform := p_cam.global_transform
+		var v_local: Vector3 = p_xform.basis.inverse() * (world_pos - p_xform.origin)
+		out.append(host_xform.origin + host_xform.basis * v_local)
+	return out
 
 
 func _set_primary_device(device: int) -> void:

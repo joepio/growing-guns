@@ -100,6 +100,8 @@ var dash_recharge_timer := 0.0
 var rifle_cooldown := 0.0
 var grenade_cooldown := 0.0
 var melee_cooldown := 0.0
+# Last duration the special cooldown was set to. HUD progress = grenade_cooldown / special_cooldown_max.
+var special_cooldown_max: float = 0.0
 var wall_jump_cooldown := 0.0
 var weapon: Weapon = Weapon.new()
 var mag: int = Weapon.BASE_MAG_SIZE
@@ -227,6 +229,15 @@ signal cooldowns_changed  # emitted on local player for HUD
 func _enter_tree() -> void:
 	# Bots are server-owned — their player_id isn't a real peer.
 	set_multiplayer_authority(1 if (is_bot or split_screen_local) else player_id)
+
+@rpc("authority", "call_local", "reliable")
+func set_display_name(new_name: String) -> void:
+	# Mid-match rename: keep the player_name field + floating name tag in sync
+	# so other peers see the new callsign without having to leave + rejoin.
+	player_name = new_name
+	if name_label:
+		name_label.text = new_name
+
 
 func _ready() -> void:
 	name_label.text = player_name
@@ -1527,6 +1538,9 @@ func _use_special() -> void:
 			grenade_cooldown = MELEE_RELOAD * mult
 		_:
 			grenade_cooldown = GRENADE_RELOAD * mult
+	# Snapshot for HUD progress display — _update_hud divides current cooldown
+	# by this to render the fill bar.
+	special_cooldown_max = grenade_cooldown
 	_apply_special_mods_on_use()
 	_activate_special_effect(false)
 	for i in weapon.special_echo_count:
