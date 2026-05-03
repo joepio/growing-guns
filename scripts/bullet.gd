@@ -243,6 +243,14 @@ func _maybe_zip_by() -> void:
 		# whichever side of it we happen to sample on this tick.
 		var fire_pos: Vector3 = closest_pos
 		SFX.bullet_zip(speed, weapon_stats.get_bullet_scale(), fire_pos)
+		# Tell the server about the near miss so it can lift the music to
+		# "high" — this fires from whichever peer the camera is local to.
+		var scene := get_tree().current_scene
+		if scene and scene.has_method("_on_player_near_miss"):
+			if multiplayer.is_server():
+				scene._on_player_near_miss()
+			else:
+				scene._on_player_near_miss.rpc_id(1)
 	_prev_listener_dist_sq = d_sq
 
 func _handle_collision(result: Dictionary) -> void:

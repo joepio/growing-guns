@@ -442,6 +442,7 @@ func _process(delta: float) -> void:
 		_update_round_music_phase()
 	if multiplayer.is_server():
 		_tick_card_pick_deadlines(delta)
+		_update_music_muffle_broadcast()
 	_update_custom_cursor()
 	# Polling-based pause toggle. On macOS, pressing Esc while the mouse is
 	# captured auto-uncaptures it at the engine level and the resulting
@@ -703,6 +704,12 @@ func _pick_spawn(avoid: Array[Vector3] = []) -> Dictionary:
 		var pos: Vector3 = spawn.global_position
 		if not _spawn_is_clear(pos):
 			continue
+		# Reject spawns hovering over the floor hole or off the edge of the
+		# arena — without ground beneath them the player just falls into lava.
+		# _spawn_is_clear only checks obstacle overlap, not whether anything
+		# is below the capsule.
+		if not _spawn_has_ground(pos):
+			continue
 		found_clear = true
 		var min_d: float = _min_distance(pos, avoid) if not avoid.is_empty() else 100.0
 		# Heavy penalty when below the SPAWN_MIN_SPACING bar — but candidate
@@ -718,8 +725,14 @@ func _pick_spawn(avoid: Array[Vector3] = []) -> Dictionary:
 
 	if found_clear:
 		return {"pos": best_pos, "yaw": best_yaw}
-	# Last-ditch fallback: physics-blocked everywhere. Return the first spawn
-	# anyway so the round still runs.
+	# Last-ditch fallback: every spawn was blocked by an obstacle or the
+	# ground-check rejected them. Prefer one with ground (over an obstacle)
+	# over one in mid-air, so the player at least doesn't fall straight into
+	# lava on respawn.
+	for spawn in spawns:
+		var pos: Vector3 = (spawn as Node3D).global_position
+		if _spawn_has_ground(pos):
+			return {"pos": pos, "yaw": _spawn_yaw_at(pos, arena_origin)}
 	var fb: Vector3 = (spawns[0] as Node3D).global_position
 	return {"pos": fb, "yaw": _spawn_yaw_at(fb, arena_origin)}
 
@@ -771,6 +784,17 @@ func _spawn_is_clear(pos: Vector3) -> bool:
 	query.transform = Transform3D(Basis.IDENTITY, pos)
 	query.collision_mask = 1
 	return get_world_3d().direct_space_state.intersect_shape(query, 1).is_empty()
+
+
+# Cast a ray straight down from the spawn point — if nothing on layer 1
+# (world geometry) catches it within ~12 m, this spawn is hanging over the
+# floor hole or past the arena edge and the player would fall into the lava
+# the instant they're respawned. Used to reject those spawns in _pick_spawn.
+func _spawn_has_ground(pos: Vector3) -> bool:
+	var space := get_world_3d().direct_space_state
+	var query := PhysicsRayQueryParameters3D.create(pos, pos + Vector3.DOWN * 12.0)
+	query.collision_mask = 1
+	return not space.intersect_ray(query).is_empty()
 
 @rpc("authority", "call_local", "reliable")
 func _do_spawn(
@@ -1019,12 +1043,18 @@ func _maybe_start_match() -> void:
 func _start_round_now() -> void:
 	_reset_round_tracking()
 	_round_damage_seen = false
-	_round_music_level = 2
+	# Round opens at "low" — the track plays calmly until the first shot.
+	# Shooting bumps to mid, taking damage bumps to high.
+	_round_music_level = 1
 	_round_elapsed = 0.0
 	_lava_leak_started = false
 	var music_seed := randi()
 	_set_music_track.rpc(music_seed, current_round)
-	_set_music_energy.rpc(2, true)
+	# Cycle to the next bundled loop set each round so back-to-back rounds
+	# don't sound identical. Cheap now that ProceduralMusic plays pre-baked
+	# stems — switching just stops + restarts three AudioStreamPlayers.
+	_rebake_music.rpc()
+	_set_music_energy.rpc(1, true)
 	# Pick a random map for this round and broadcast the swap to all peers
 	# before respawning, so _pick_spawn() reads the new arena's spawn
 	# points (the call_local RPC runs the swap synchronously here too).
@@ -1110,6 +1140,12 @@ func _set_music_energy(level: int, immediate: bool = false, next_bar: bool = fal
 func _set_music_track(seed: int, round_index: int) -> void:
 	ProceduralMusic.generate_track(seed, round_index)
 
+
+@rpc("authority", "call_local", "reliable")
+func _rebake_music() -> void:
+	if ProceduralMusic.has_method("rebake"):
+		ProceduralMusic.rebake()
+
 @rpc("any_peer", "call_local", "reliable")
 func _report_player_damage(victim_id: int, attacker_id: int, amount: int, victim_health: int) -> void:
 	if not multiplayer.is_server():
@@ -1119,16 +1155,19 @@ func _report_player_damage(victim_id: int, attacker_id: int, amount: int, victim
 	if amount <= 0 or attacker_id == victim_id:
 		return
 	_round_damage_seen = true
+	# Damage = "high" — a player got hit.
 	if _round_music_level < 3:
 		_set_round_music_level(3)
 	_update_round_music_phase()
 
 func _update_round_music_phase() -> void:
-	if _round_music_level >= 4:
+	# Already at high on damage; the late-round low-HP heuristic just keeps it
+	# locked there (no extra escalation tier above 3 in the new mapping).
+	if _round_music_level >= 3:
 		return
 	if not _late_round_music_condition():
 		return
-	_set_round_music_level(4)
+	_set_round_music_level(3)
 
 func _late_round_music_condition() -> bool:
 	var alive := _alive_player_ids()
@@ -1146,6 +1185,56 @@ func _late_round_music_condition() -> bool:
 		if hp > 0 and hp <= int(ceil(float(max_hp) * 0.5)):
 			return true
 	return false
+
+# Plain shooting no longer escalates music on its own — the player has to
+# actually get a bullet near someone (→ mid via _on_player_near_miss) or
+# land a hit (→ high via _report_player_damage). Kept as a no-op so the
+# call from player._rifle_fired stays valid; remove the call entirely if
+# you want to drop the hook.
+func _on_player_shot() -> void:
+	pass
+
+
+# Server-only state for _update_music_muffle_broadcast — last value sent so
+# we don't hammer the RPC every frame.
+var _last_music_muffle_broadcast: bool = false
+
+
+# Server-side: every frame, decide whether the card-pick low-pass should be
+# engaged for *every* peer, then RPC the new state if it changed. Triggered
+# whenever fewer than 2 players are alive and the round has actually moved
+# into card-pick — so a peer without a local card pick UI still hears the
+# muffle. While 2+ players are alive (the round is still being played out
+# even if someone died), the muffle stays off.
+func _update_music_muffle_broadcast() -> void:
+	var muffle_on: bool = state == State.PICKING_CARD and _alive_player_ids().size() < 2
+	if muffle_on == _last_music_muffle_broadcast:
+		return
+	_last_music_muffle_broadcast = muffle_on
+	_set_music_muffle.rpc(muffle_on)
+
+
+# Receives the broadcast on every peer (call_local also runs it on the
+# server). ProceduralMusic owns the actual fade-in/fade-out timing.
+@rpc("authority", "call_local", "reliable")
+func _set_music_muffle(active: bool) -> void:
+	if ProceduralMusic.has_method("set_muffle"):
+		ProceduralMusic.set_muffle(active)
+
+
+# Bullet's near-miss zip — fired locally on whichever peer's camera the
+# bullet whizzed past, then RPC'd to the server (`rpc_id(1, ...)`) so the
+# server can drive the music. Bumps to "mid" — exciting enough to step up
+# from low, but not the full payoff of a hit (which goes to "high" via
+# _report_player_damage).
+@rpc("any_peer", "call_local", "reliable")
+func _on_player_near_miss() -> void:
+	if not multiplayer.is_server():
+		return
+	if state != State.PLAYING:
+		return
+	_set_round_music_level(2)
+
 
 func _set_round_music_level(level: int) -> void:
 	if level <= _round_music_level:
@@ -1268,9 +1357,11 @@ func _fallback_round_winner(victim_id: int) -> int:
 
 func _end_round(winner_id: int) -> void:
 	round_winner_id = winner_id
-	_round_music_level = 1
 	_round_damage_seen = false
-	_set_music_energy.rpc(1, false, true)
+	# Don't change music energy here — the track stays at whatever intensity
+	# the round ended on (typically high). The picker's machine applies a
+	# low-pass over the Music bus to muffle it during the card pick UI; see
+	# game._process / ProceduralMusic.set_muffle.
 	if winner_id != 0:
 		round_wins[winner_id] = int(round_wins.get(winner_id, 0)) + 1
 		_broadcast_scores.rpc(round_wins)

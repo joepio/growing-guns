@@ -611,6 +611,17 @@ func _make_emissive(color: Color, energy: float) -> StandardMaterial3D:
 
 # --- Builders -----------------------------------------------------------------
 
+# Returns the editor's currently-edited scene root, or null when we're not
+# inside the editor with a live tree (Engine.is_editor_hint() is also true
+# during headless --import / --export, where the node may not even be in a
+# tree yet — get_tree() prints "data.tree is null" if called too early).
+func _editor_owner() -> Node:
+	if not Engine.is_editor_hint() or not is_inside_tree():
+		return null
+	var tree := get_tree()
+	return tree.edited_scene_root if tree else null
+
+
 func _add_static_box(pos: Vector3, size: Vector3, mat: StandardMaterial3D, rotation_y: float = 0.0, with_collider: bool = true) -> StaticBody3D:
 	var body := StaticBody3D.new()
 	body.position = pos
@@ -630,12 +641,12 @@ func _add_static_box(pos: Vector3, size: Vector3, mat: StandardMaterial3D, rotat
 		shape.size = size
 		col.shape = shape
 		body.add_child(col)
-	if Engine.is_editor_hint():
-		var root: Node = get_tree().edited_scene_root
-		body.owner = root
-		mi.owner = root
+	var box_owner := _editor_owner()
+	if box_owner:
+		body.owner = box_owner
+		mi.owner = box_owner
 		if col:
-			col.owner = root
+			col.owner = box_owner
 	return body
 
 
@@ -715,8 +726,8 @@ func _build_lava_pool() -> void:
 	area.add_child(col)
 	add_child(area)
 
-	if Engine.is_editor_hint():
-		var root: Node = get_tree().edited_scene_root
+	var root := _editor_owner()
+	if root:
 		mi.owner = root
 		area.owner = root
 		col.owner = root
@@ -781,8 +792,9 @@ func _build_center_tower(h: float) -> void:
 	light.light_energy = 2.5
 	light.omni_range = 30.0
 	add_child(light)
-	if Engine.is_editor_hint():
-		light.owner = get_tree().edited_scene_root
+	var lava_owner := _editor_owner()
+	if lava_owner:
+		light.owner = lava_owner
 
 
 func _build_building(pos: Vector3, size: Vector3, rotation_y: float, accent_face: int, strip_color: StandardMaterial3D, light_color: Color) -> void:
@@ -813,8 +825,9 @@ func _build_building(pos: Vector3, size: Vector3, rotation_y: float, accent_face
 	light.light_energy = 2.0
 	light.omni_range = 18.0
 	add_child(light)
-	if Engine.is_editor_hint():
-		light.owner = get_tree().edited_scene_root
+	var building_owner := _editor_owner()
+	if building_owner:
+		light.owner = building_owner
 
 
 func _build_bridge(a_pos: Vector3, b_pos: Vector3, a_roof_y: float, b_roof_y: float) -> void:
@@ -880,11 +893,11 @@ func _build_floating_platform(pos: Vector3) -> void:
 	shape.height = 0.6
 	col.shape = shape
 	body.add_child(col)
-	if Engine.is_editor_hint():
-		var root: Node = get_tree().edited_scene_root
-		body.owner = root
-		mi.owner = root
-		col.owner = root
+	var spawn_root := _editor_owner()
+	if spawn_root:
+		body.owner = spawn_root
+		mi.owner = spawn_root
+		col.owner = spawn_root
 
 
 func _emit_spawnpoints() -> void:
@@ -894,8 +907,9 @@ func _emit_spawnpoints() -> void:
 		sp.position = _spawn_positions[i]
 		sp.add_to_group("spawnpoints")
 		add_child(sp)
-		if Engine.is_editor_hint():
-			sp.owner = get_tree().edited_scene_root
+		var sp_owner := _editor_owner()
+		if sp_owner:
+			sp.owner = sp_owner
 		if not show_spawn_markers:
 			continue
 		# Small disc at the player's foot height for visual feedback in preview.
@@ -909,8 +923,9 @@ func _emit_spawnpoints() -> void:
 		marker.material_override = _mat_spawn
 		marker.position.y = -1.0
 		sp.add_child(marker)
-		if Engine.is_editor_hint():
-			marker.owner = get_tree().edited_scene_root
+		var marker_owner := _editor_owner()
+		if marker_owner:
+			marker.owner = marker_owner
 
 
 func apply_palette_to_environment(env: Environment, sun: DirectionalLight3D = null, fill: Light3D = null) -> void:
