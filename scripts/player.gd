@@ -1129,6 +1129,13 @@ func _rifle_fired(
 	shot_damage_mult: float = 1.0,
 	shot_speed_mult: float = 1.0,
 ) -> void:
+	# Music: jump to high intensity the moment anyone fires this round.
+	# call_local means this RPC fires on every peer, but only the server
+	# drives _set_round_music_level (which then broadcasts via _set_music_energy).
+	if multiplayer.is_server():
+		var game_scene: Node = get_tree().current_scene
+		if game_scene and game_scene.has_method("_on_player_shot"):
+			game_scene._on_player_shot()
 	var shooter_node: Node3D = get_parent().get_node_or_null(str(shooter_id))
 	var w: Weapon = shooter_node.weapon if shooter_node else Weapon.new()
 	# `is_self` = the local human is the shooter. Their copy plays a 2D

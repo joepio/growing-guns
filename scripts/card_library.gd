@@ -123,7 +123,6 @@ static func all() -> Array:
 			"id": "explosive",
 			"name": "EXPLOSIVE ROUNDS",
 			"desc": "Bullets explode on impact",
-			"rarity": "rare",
 			"color": Color(1.0, 0.4, 0.1),
 			"apply": func(w: Weapon) -> void:
 				# First stack establishes a sizable baseline; each extra one
@@ -132,7 +131,7 @@ static func all() -> Array:
 					w.explosive_radius = 4.0
 				else:
 					w.explosive_radius += 2.5
-				w.explosive_damage += 35.0
+				w.explosive_damage += 25.0
 				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.45, 0.08), 0.45),
 		},
 			{
