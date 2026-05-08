@@ -56,6 +56,21 @@ jobs:
           unzip -q templates.tpz -d /tmp/godot-tpl
           mv /tmp/godot-tpl/templates/* "${GODOT_TEMPLATES_DIR}/"
 
+      # The exported binary reads its version from project.godot's
+      # application/config/version. Stamp the tag onto it (and the VERSION
+      # file the auto-update banner compares against) so the released exe
+      # reports the right version and version_check.gd doesn't think it's
+      # behind itself.
+      - name: Sync version into project.godot + VERSION
+        run: |
+          set -euxo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "Stamping version: ${VERSION}"
+          sed -i 's|^config/version="[^"]*"|config/version="'"${VERSION}"'"|' project.godot
+          echo "${VERSION}" > VERSION
+          grep '^config/version=' project.godot
+          cat VERSION
+
       # First import populates .godot/imported/* and resolves UIDs — required
       # before --export-release works on a fresh checkout.
       - name: Import project
