@@ -7,7 +7,7 @@ extends Node
 # sync by tools/build_release.sh), and if the remote is newer drops a small
 # clickable button in the bottom-right that opens the itch page on shell_open.
 
-const REMOTE_VERSION_URL := "https://raw.githubusercontent.com/joepio/rounds-fps/main/VERSION"
+const REMOTE_VERSION_URL := "https://raw.githubusercontent.com/joepio/more-rounds/main/VERSION"
 const ITCH_URL := "https://joepio.itch.io/more-rounds"
 
 
