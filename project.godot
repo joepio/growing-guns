@@ -10,7 +10,7 @@ config_version=5
 
 [application]
 
-config/name="More Rounds"
+config/name="Growing Guns"
 config/description="High-paced multiplayer arena shooter"
 config/version="0.2.6"
 run/main_scene="res://scenes/game.tscn"
@@ -35,6 +35,11 @@ window/size/viewport_height=720
 window/size/mode=3
 window/stretch/mode="canvas_items"
 window/vsync/vsync_mode=0
+
+[debug]
+
+file_logging/enable_file_logging=true
+file_logging/enable_file_logging.pc=true
 
 [editor_plugins]
 

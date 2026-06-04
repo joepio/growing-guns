@@ -879,5 +879,11 @@ func _add_torus(part_name: String, outer_r: float, ring_r: float, pos: Vector3, 
 # In-editor preview: ensure rebuilt children show in the scene tree dock and
 # get cleaned up next rebuild. At runtime owner doesn't matter.
 func _finalize_owner(node: Node) -> void:
-	if Engine.is_editor_hint() and get_tree() and get_tree().edited_scene_root:
-		node.owner = get_tree().edited_scene_root
+	if not Engine.is_editor_hint():
+		return
+	var tree := get_tree()
+	if tree == null:
+		return
+	var root := tree.edited_scene_root
+	if root != null:
+		node.owner = root
