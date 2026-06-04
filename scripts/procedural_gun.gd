@@ -75,7 +75,7 @@ extends Node3D
 # shot. Free-falling RigidBody3D's that despawn after a few seconds.
 @export var casing_radius_frac: float = 0.7   # fraction of barrel_radius
 @export var casing_length_frac: float = 0.4   # fraction of receiver length
-@export var casing_lifetime: float = 3.0      # seconds before despawn
+@export var casing_lifetime: float = 1.0      # seconds before despawn
 @export var casing_eject_speed: float = 2.8   # base m/s (jittered ±30%)
 @export var casing_color: Color = Color(0.85, 0.65, 0.25)  # brass
 
@@ -511,13 +511,13 @@ func _rebuild() -> void:
 	var n_barrels: int = max(1, barrel_count)
 	var barrel_pitch: float = barrel_radius * 2.4    # centre-to-centre spacing
 	var barrel_span: float = barrel_pitch * float(n_barrels - 1)
-	
+
 	var muzzle_r: float = barrel_radius * muzzle_flare
 	var bundle_radius: float = barrel_radius * 1.8
-	
-	# We calculate the final "effective" size once. The receiver widens to wrap 
-	# multiple barrels (X-axis), but we keep the height (Y-axis) dependent 
-	# only on the receiver's base stats so the sights don't move up with 
+
+	# We calculate the final "effective" size once. The receiver widens to wrap
+	# multiple barrels (X-axis), but we keep the height (Y-axis) dependent
+	# only on the receiver's base stats so the sights don't move up with
 	# barrel thickness.
 	var min_receiver_w: float = (bundle_radius + barrel_radius) * 2.2 if is_minigun else barrel_span + barrel_radius * 3.0
 	var effective_receiver_size := Vector3(maxf(receiver_size.x, min_receiver_w), receiver_size.y, receiver_size.z)
@@ -688,7 +688,7 @@ func _rebuild() -> void:
 		var bell_len: float = 0.04
 		var scope_y: float = rail_y + sight_rail_height * 0.5 + 0.025
 		var scope_z: float = 0.0
-		
+
 		# Scope rings (mounts)
 		var ring_w: float = 0.02
 		var ring_h: float = scope_y - (rail_y + sight_rail_height * 0.5)
@@ -769,10 +769,10 @@ func _add_picatinny_rail(pos: Vector3, size: Vector3, mat: Material) -> void:
 	var tooth_gap: float = 0.01 # approx 10mm gaps
 	var period: float = tooth_z + tooth_gap
 	var num_teeth: int = max(1, int(size.z / period))
-	
+
 	# Center the teeth along the length of the rail
 	var start_z: float = -((num_teeth - 1) * period) * 0.5
-	
+
 	for i in num_teeth:
 		var tz: float = start_z + i * period
 		# Teeth are slightly wider than the base for that Picatinny look
