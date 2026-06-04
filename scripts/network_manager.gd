@@ -36,7 +36,7 @@ func host_game_iroh(player_name: String) -> String:
 	_emit_status("Starting online host...", false)
 	var server = ClassDB.class_call_static("IrohServer", "start")
 	if server == null:
-		return _fail("Could not start the iroh host. Check firewall/security software and try launching from an extracted folder.")
+		return _fail("Couldn't start the online host. Windows Firewall or security software most likely blocked it — allow \"Growing Guns\" through the firewall, or check your network connection.")
 	multiplayer.multiplayer_peer = server
 	_connect_host_signals_once()
 	players[1] = player_name

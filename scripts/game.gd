@@ -34,8 +34,8 @@ const BOT_NAME_SUFFIXES: PackedStringArray = [
 	"Pulse", "Rush", "Scope", "Shift", "Slug", "Snap", "Volt", "Wire",
 ]
 const SPLIT_PLAYER_ID_BASE := 10000
-const IROH_NODE_ID_LENGTH := 52
-const IROH_NODE_ID_CHARS := "0123456789abcdefghijklmnopqrstuv"
+const IROH_NODE_ID_LENGTH := 40
+const IROH_NODE_ID_CHARS := "abcdefghijklmnopqrstuvwxyz234567"
 const JOIN_TIMEOUT_SECONDS := 12.0
 const PING_PROBE_INTERVAL := 2.0
 const PING_STALE_AFTER_MS := 7000
@@ -237,11 +237,37 @@ func _ready() -> void:
 	# experience "open game → playing immediately, ID ready to share".
 	# Godot 4 installs a default OfflineMultiplayerPeer when no peer is set,
 	# so a plain `== null` check never fires — must also reject that.
-	if multiplayer.multiplayer_peer == null \
-			or multiplayer.multiplayer_peer is OfflineMultiplayerPeer:
+	# Networking auto-host. The godot_iroh extension can fail to bring up its iroh
+	# endpoint on some machines (firewall / locked-down network / no connectivity).
+	# It returns null instead of crashing, so we handle it explicitly: a peer that
+	# never registers means no player spawns and the screen stays blank — that was
+	# the "friend opens the game and sees nothing" bug. On failure we surface a
+	# loud, blocking error AND fall back to a local solo session so the game is
+	# still playable. --offline forces that same local path up front.
+	var offline := "--offline" in OS.get_cmdline_args()
+	if not offline and (multiplayer.multiplayer_peer == null \
+			or multiplayer.multiplayer_peer is OfflineMultiplayerPeer):
 		var hosted_id := NetworkManager.host_game_iroh(_player_name)
-		if hosted_id.is_empty() and not NetworkManager.last_network_error.is_empty():
-			_on_network_status_changed(NetworkManager.last_network_error, true)
+		if hosted_id.is_empty():
+			var err := NetworkManager.last_network_error
+			if err.is_empty():
+				err = "Online host could not start (no reason reported by iroh)."
+			push_error("Iroh host failed: %s" % err)
+			_on_network_status_changed(err, true)
+			# Unmissable, blocking dialog — the player always learns what broke
+			# instead of staring at an empty screen.
+			OS.alert("%s\n\nStarting in OFFLINE mode (solo vs bots).\n\nLog file:\n%s" % [
+					err, OS.get_user_data_dir().path_join("logs/godot.log")],
+					"Online unavailable")
+			offline = true
+	if offline:
+		# Local-only session: register ourselves as player 1 so the is_server()
+		# branch below spawns us with a camera. OfflineMultiplayerPeer reports
+		# is_server() == true, so the rest of boot proceeds normally.
+		push_warning("Playing offline: iroh networking unavailable or skipped.")
+		NetworkManager.local_player_name = _player_name
+		NetworkManager.players[1] = _player_name
+		NetworkManager.player_list_changed.emit()
 
 	if multiplayer.is_server():
 		if not multiplayer.peer_connected.is_connected(_on_peer_connected):
