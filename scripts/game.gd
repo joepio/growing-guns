@@ -34,8 +34,9 @@ const BOT_NAME_SUFFIXES: PackedStringArray = [
 	"Pulse", "Rush", "Scope", "Shift", "Slug", "Snap", "Volt", "Wire",
 ]
 const SPLIT_PLAYER_ID_BASE := 10000
-const IROH_NODE_ID_LENGTH := 40
-const IROH_NODE_ID_CHARS := "abcdefghijklmnopqrstuvwxyz234567"
+const IROH_GAME_ID_MIN_LENGTH := 40
+const IROH_GAME_ID_MAX_LENGTH := 96
+const IROH_GAME_ID_CHARS := "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 const JOIN_TIMEOUT_SECONDS := 12.0
 const PING_PROBE_INTERVAL := 2.0
 const PING_STALE_AFTER_MS := 7000
@@ -2619,7 +2620,7 @@ func _build_pause_menu() -> void:
 	_pause_join_button = join_btn
 
 	var join_notice := Label.new()
-	join_notice.text = "Paste a 52-character iroh node ID"
+	join_notice.text = "Paste an iroh game ID"
 	join_notice.add_theme_font_size_override("font_size", 12)
 	join_notice.add_theme_color_override("font_color", Color(0.55, 0.60, 0.72))
 	vb.add_child(join_notice)
@@ -3035,7 +3036,7 @@ func _update_join_form() -> void:
 			_pause_join_notice.text = "Connecting..."
 			_pause_join_notice.add_theme_color_override("font_color", Color(0.76, 0.92, 1.0))
 		elif text.is_empty():
-			_pause_join_notice.text = "Paste a 52-character iroh node ID"
+			_pause_join_notice.text = "Paste an iroh game ID"
 			_pause_join_notice.add_theme_color_override("font_color", Color(0.55, 0.60, 0.72))
 		elif valid:
 			_pause_join_notice.text = "Valid ID - connecting automatically"
@@ -3046,25 +3047,27 @@ func _update_join_form() -> void:
 
 
 func _extract_iroh_node_id(text: String) -> String:
-	var lower := text.strip_edges().to_lower()
+	var stripped := text.strip_edges()
 	var run := ""
-	for i in lower.length():
-		var ch := lower.substr(i, 1)
-		if IROH_NODE_ID_CHARS.contains(ch):
+	for i in stripped.length():
+		var ch := stripped.substr(i, 1)
+		if IROH_GAME_ID_CHARS.contains(ch):
 			run += ch
-			if run.length() == IROH_NODE_ID_LENGTH:
-				return run
 		else:
+			if run.length() >= IROH_GAME_ID_MIN_LENGTH and run.length() <= IROH_GAME_ID_MAX_LENGTH:
+				return run
 			run = ""
-	return lower
+	if run.length() >= IROH_GAME_ID_MIN_LENGTH and run.length() <= IROH_GAME_ID_MAX_LENGTH:
+		return run
+	return stripped
 
 
 func _is_valid_iroh_node_id(text: String) -> bool:
-	var id := text.strip_edges().to_lower()
-	if id.length() != IROH_NODE_ID_LENGTH:
+	var id := text.strip_edges()
+	if id.length() < IROH_GAME_ID_MIN_LENGTH or id.length() > IROH_GAME_ID_MAX_LENGTH:
 		return false
 	for i in id.length():
-		if not IROH_NODE_ID_CHARS.contains(id.substr(i, 1)):
+		if not IROH_GAME_ID_CHARS.contains(id.substr(i, 1)):
 			return false
 	return true
 
