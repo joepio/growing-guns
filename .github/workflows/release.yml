@@ -90,8 +90,11 @@ jobs:
           set -euxo pipefail
           mkdir -p build/windows
           godot --headless --path . --export-release "Windows LAN" build/windows/MoreRounds.exe
-          # Re-zip exe + pck (matches tools/build_release.sh).
-          (cd build/windows && zip -q MoreRounds.zip MoreRounds.exe MoreRounds.pck)
+          test -f build/windows/godot_iroh.dll
+          # Re-zip exe + pck + native GDExtension DLL. Without the DLL next to
+          # the exe, Windows boots offline with "Iroh networking failed to load".
+          (cd build/windows && zip -q MoreRounds.zip MoreRounds.exe MoreRounds.pck godot_iroh.dll)
+          unzip -l build/windows/MoreRounds.zip | grep -F godot_iroh.dll
           ls -lh build/windows/MoreRounds.zip
 
       - name: Install butler
