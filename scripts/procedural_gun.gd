@@ -215,8 +215,7 @@ var _bolts: Array[MeshInstance3D] = []
 var _bolt_rest_z: float = 0.0
 var _bolt_back: float = 0.0
 # Per-instance see-through fade (0 = opaque, 1 = fully transparent), applied to
-# every gun part. Stored so a rebuild re-applies it. Used to fade the held gun
-# while the player is invisible. See set_see_through().
+# every gun part. Stored so a rebuild re-applies it.
 var _see_through: float = 0.0
 var _bolt_travel: float = 0.0
 var _bolt_cycle_seconds: float = 0.08
@@ -761,14 +760,13 @@ func _rebuild() -> void:
 	# Re-apply current heat to the freshly-built barrel material so swapping
 	# weapons mid-burst doesn't visually reset the temperature.
 	_update_heat_visual()
-	# Re-apply the see-through fade so rebuilding mid-invisibility keeps the
-	# gun ghosted instead of snapping back to opaque.
+	# Re-apply the see-through fade so rebuilding preserves the current fade.
 	_apply_see_through()
 
 
 # Fade the whole gun via per-instance transparency (Forward+/Mobile) so the
-# holder can tell they're invisible, without touching each part's material or
-# colour. 0 = opaque, 1 = fully transparent.
+# effect does not touch each part's material or colour.
+# 0 = opaque, 1 = fully transparent.
 func set_see_through(amount: float) -> void:
 	_see_through = clampf(amount, 0.0, 1.0)
 	_apply_see_through()

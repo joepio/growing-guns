@@ -430,42 +430,12 @@ static func all() -> Array:
 				w.special_cooldown_refund_on_hit += 0.45,
 		},
 		{
-			"id": "empower",
-			"name": "EMPOWER",
-			"desc": "RMB charges your next shot",
-			"rarity": "rare",
-			"color": Color(1.0, 0.85, 0.25),
-			"apply": func(w: Weapon) -> void:
-				w.special_empower_damage *= 2.0
-				w.special_empower_speed *= 1.4
-				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.85, 0.18), 0.35),
-		},
-		{
-			"id": "ambush",
-			"name": "AMBUSH",
-			"desc": "RMB vanish; first shot out hits harder",
-			"rarity": "rare",
-			"color": Color(0.55, 1.0, 0.85),
-			"apply": func(w: Weapon) -> void:
-				w.special = Weapon.SPECIAL_INVISIBLE
-				w.invisible_first_shot_mult *= 2.2,
-		},
-		{
 			"id": "teleport",
 			"name": "TELEPORT",
 			"desc": "RMB: teleport where you aim",
 			"color": Color(0.75, 0.35, 1.0),
 			"apply": func(w: Weapon) -> void:
 				w.special = Weapon.SPECIAL_TELEPORT,
-		},
-		{
-			"id": "invisible",
-			"name": "INVISIBLE",
-			"desc": "RMB: vanish for 4 seconds",
-			"rarity": "rare",
-			"color": Color(0.55, 1.0, 0.9),
-			"apply": func(w: Weapon) -> void:
-				w.special = Weapon.SPECIAL_INVISIBLE,
 		},
 		{
 			"id": "sword",
