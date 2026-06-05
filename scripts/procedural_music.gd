@@ -201,6 +201,15 @@ func rebake() -> void:
 	# also be "retiring" — clear that state.
 	if _current_set_idx < _set_retire_fade.size():
 		_set_retire_fade[_current_set_idx] = 0.0
+	# Restart the incoming set from its downbeat so a fresh track begins at 0.
+	# rebake() now only fires on a deliberate song change (the 2-minute
+	# boundary), so this is the "new song" moment — the retiring set keeps
+	# playing from its own position as it fades out.
+	if _current_set_idx < _all_players.size():
+		for p in _all_players[_current_set_idx]:
+			if p:
+				p.seek(0.0)
+	_last_bar_index = 0
 
 
 # ---- internals ------------------------------------------------------------

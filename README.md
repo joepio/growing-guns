@@ -1,16 +1,9 @@
-# More Rounds
+# Growing Guns
 
-**Download for free on Itch.io**
+[Download on itch.io](https://joepio.itch.io/growing-guns)
 
-- Fast paced Multiplayer FPS.
-- Last man standing, new map every round.
-- Losers of the round get to pick power-ups that stack.
-- Abilities:
-  - Left click is your gun, gets better / crazier depending on cards (more ammo, accuracy, power, explosions)
-  - Right click does "special", can be replaced by cards
-  - Space jump, double jump, can jump against walls (jumps further / higher than regular double jump)
-  - Shift dash, reloads 1s. Dashes in direction player is walking
-  - f = melee, instakill when hit from behind
+- Fast paced Multiplayer FPS, the loser of the round picks a card that gives them an upgrade!
+- Split-screen & online multiplayer (no-server, using iroh) 
 
 ## Development & Deployment
 

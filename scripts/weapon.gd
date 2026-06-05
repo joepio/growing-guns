@@ -36,8 +36,8 @@ const SPECIAL_SWORD := "sword"
 
 # --- Behaviour knobs ---
 @export var spread: float = BASE_SPREAD        # radians; random yaw+pitch offset per shot
-const BASE_RECOIL := 0.018                      # radians added to dynamic spread per shot
-@export var recoil_per_shot: float = BASE_RECOIL # decays in Player; stacks while spamming
+const BASE_RECOIL := 0.018                      # radians of shot-to-shot bloom; decays in Player
+@export var recoil_per_shot: float = BASE_RECOIL
 @export var full_auto: bool = false            # whether holding LMB auto-fires
 @export var lifesteal: float = 0.0             # fraction of damage dealt returned as heal
 @export var explosive_radius: float = 0.0      # per-bullet splash radius (m)
