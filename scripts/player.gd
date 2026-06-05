@@ -594,8 +594,6 @@ func _apply_ghost_visuals() -> void:
 	muzzle.visible = not ghost_mode
 	if _third_person_gun:
 		_third_person_gun.visible = not ghost_mode
-	if _procedural_gun and _procedural_gun.has_method("set_see_through"):
-		_procedural_gun.set_see_through(0.0)
 	if blade:
 		blade.transparency = 0.0
 
@@ -1532,15 +1530,6 @@ func _use_special() -> void:
 	# Snapshot for HUD progress display — _update_hud divides current cooldown
 	# by this to render the fill bar.
 	special_cooldown_max = grenade_cooldown
-	_apply_special_mods_on_use()
-	_activate_special_effect(false)
-	for i in weapon.special_echo_count:
-		var delay := 0.16 * float(i + 1)
-		get_tree().create_timer(delay).timeout.connect(func() -> void:
-			if is_instance_valid(self) and not ghost_mode and health > 0:
-				_activate_special_effect(true))
-
-func _apply_special_mods_on_use() -> void:
 	if weapon.special_reload_amount > 0:
 		mag = mini(weapon.get_mag_size(), mag + weapon.special_reload_amount)
 		if mag > 0 and reloading:
@@ -1548,8 +1537,14 @@ func _apply_special_mods_on_use() -> void:
 			rifle_cooldown = 0.0
 			_stop_reload_audio()
 	cooldowns_changed.emit()
+	_activate_special_effect()
+	for i in weapon.special_echo_count:
+		var delay := 0.16 * float(i + 1)
+		get_tree().create_timer(delay).timeout.connect(func() -> void:
+			if is_instance_valid(self) and not ghost_mode and health > 0:
+				_activate_special_effect())
 
-func _activate_special_effect(_is_echo: bool) -> void:
+func _activate_special_effect() -> void:
 	match weapon.special:
 		Weapon.SPECIAL_TELEPORT:
 			_use_teleport()
