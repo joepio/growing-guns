@@ -41,7 +41,7 @@ static func all() -> Array:
 		{
 			"id": "precision",
 			"name": "PRECISION",
-			"desc": "Tighter spread and lower per-shot recoil",
+			"desc": "Tighter spread and steadier aim",
 			"color": Color(0.45, 0.95, 1.0),
 			"apply": func(w: Weapon) -> void:
 				w.spread *= 0.4
@@ -275,14 +275,17 @@ static func all() -> Array:
 		{
 			"id": "spray",
 			"name": "SPRAY",
-			"desc": "Full-auto bullet hose with messy spread",
+			"desc": "Full-auto bullet hose — held fire sprays wild",
 			"color": Color(1.0, 0.78, 0.18),
 			"apply": func(w: Weapon) -> void:
 				w.full_auto = true
 				w.fire_rate_mult *= 2.2
 				w.mag_size_bonus += 15
 				w.damage_mult *= 0.65
-				w.spread += deg_to_rad(2.0)
+				w.spread += deg_to_rad(1.0)
+				# The real penalty: each held shot blooms hard, so sustained
+				# fire walks wide and only tapping stays controllable.
+				w.recoil_per_shot *= 3.0
 				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.72, 0.12), 0.4),
 		},
 		{

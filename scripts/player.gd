@@ -60,6 +60,10 @@ const GHOST_ALPHA := 0.06
 const INVISIBLE_RELOAD := 10.0
 const INVISIBLE_DURATION := 4.0
 const INVISIBLE_ALPHA := 0.06
+# How see-through the held (first-person) gun gets while invisible. Lighter than
+# the body so the holder still has a usable viewmodel, but clearly ghosted as a
+# reminder they're cloaked. 0 = opaque, 1 = fully transparent.
+const INVISIBLE_GUN_FADE := 0.7
 
 @onready var camera: Camera3D = $Camera
 @onready var muzzle: Node3D = $Camera/Muzzle
@@ -152,18 +156,25 @@ var _gun_tilt_z: float = 0.0
 # Long barrels sit further back against the shoulder; updated when the
 # weapon changes via _update_gun_visuals.
 var _gun_pull_back: Vector3 = Vector3.ZERO
-# Dynamic shot-to-shot spread: each fire adds weapon.recoil_per_shot, decays
-# back to zero. Combined with weapon.spread + movement bonus at fire time.
-var _recoil_spread: float = 0.0
+# Movement multiplies the gun's BASE spread (never a flat floor), so only the
+# gun's own inaccuracy is amplified while moving — a very accurate gun stays
+# accurate on the move; only sloppy guns walk wide. Kept gentle on purpose;
+# the real spray comes from the recoil bloom below.
+const MOVEMENT_SPREAD_MULT := 1.0        # full walk speed → ×(1 + 1) = ×2 base spread
+
+# Shot-to-shot "shaking hand" bloom: each shot adds weapon.recoil_per_shot, and
+# it eases back to zero (RECOIL_DECAY_RATE). Holding the trigger / full-auto
+# walks the spread wide and it recovers when you let off. Spray builds crank
+# recoil_per_shot; precision builds shrink it.
 const RECOIL_DECAY_RATE := 4.0           # higher = recovers accuracy faster
-const MOVEMENT_SPREAD_MAX := 0.045       # rad of extra spread at full walk speed
+var _recoil_spread: float = 0.0
 
 # Total effective spread used at fire time AND shown by the crosshair so the
 # UI always matches what bullets will actually do.
 func get_effective_spread() -> float:
 	var horiz_speed: float = Vector2(velocity.x, velocity.z).length()
-	var movement_spread: float = clampf(horiz_speed / WALK_SPEED, 0.0, 1.4) * MOVEMENT_SPREAD_MAX
-	return weapon.spread + movement_spread + _recoil_spread
+	var move_factor: float = clampf(horiz_speed / WALK_SPEED, 0.0, 1.0)
+	return weapon.spread * (1.0 + move_factor * MOVEMENT_SPREAD_MULT) + _recoil_spread
 var _head_hitbox_rest_y: float = 0.86
 var _torso_hitbox_rest_y: float = 0.12
 var _legs_hitbox_rest_y: float = -0.55
@@ -593,6 +604,12 @@ func _apply_ghost_visuals() -> void:
 	muzzle.visible = not ghost_mode
 	if _third_person_gun:
 		_third_person_gun.visible = not ghost_mode
+	# The held first-person gun is the procedural gun under the camera. Fade it
+	# while invisible so the holder can see their own cloak; restore when not.
+	if _procedural_gun and _procedural_gun.has_method("set_see_through"):
+		_procedural_gun.set_see_through(INVISIBLE_GUN_FADE if invisible_mode else 0.0)
+	if blade:
+		blade.transparency = INVISIBLE_GUN_FADE if invisible_mode else 0.0
 
 	var gun_meshes: Array[MeshInstance3D] = []
 	if gun_body: gun_meshes.append(gun_body)
@@ -709,9 +726,9 @@ func _physics_process(delta: float) -> void:
 	# Recoil decay + apply
 	recoil_pitch = lerp(recoil_pitch, 0.0, delta * 9.0)
 	muzzle_kick_z = lerp(muzzle_kick_z, 0.0, delta * 14.0)
+	_recoil_spread = lerp(_recoil_spread, 0.0, clampf(delta * RECOIL_DECAY_RATE, 0.0, 1.0))
 	shake_amt = lerp(shake_amt, 0.0, delta * 14.0)
 	_landing_bump_y = lerp(_landing_bump_y, 0.0, delta * 10.0) # Smooth recovery
-	_recoil_spread = lerp(_recoil_spread, 0.0, clampf(delta * RECOIL_DECAY_RATE, 0.0, 1.0))
 
 	# View punch decay
 	_view_punch_pos = _view_punch_pos.lerp(Vector3.ZERO, delta * 12.0)
@@ -1079,8 +1096,8 @@ func _fire_rifle() -> void:
 	var dmg_ratio: float = weapon.get_damage() / Weapon.BASE_DAMAGE
 	var kick_strength: float = clampf(0.4 * pow(dmg_ratio, 1.6), 0.1, 12.0)
 	velocity -= cam_dir * kick_strength * float(weapon.get_shots_per_trigger())
-	# Snapshot the effective spread BEFORE this shot's recoil kicks in,
-	# then add the per-shot recoil so the next shot is sloppier.
+	# Snapshot spread BEFORE this shot's bloom so the first shot is still crisp,
+	# then add the per-shot recoil so each successive held shot walks wider.
 	var spread: float = get_effective_spread()
 	_recoil_spread += weapon.recoil_per_shot
 	var shot_damage_mult := _next_shot_damage_mult

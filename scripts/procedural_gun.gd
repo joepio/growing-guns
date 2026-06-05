@@ -72,12 +72,17 @@ extends Node3D
 
 @export_group("Casings")
 # Spent shell casings ejected from the top-right of the receiver on each
-# shot. Free-falling RigidBody3D's that despawn after a few seconds.
+# shot. Free-falling RigidBody3D's. Instead of a fixed despawn timer (which
+# made a lone casing vanish almost immediately), we cap how many live at once
+# and retire the oldest — so few shots linger but a firefight stays bounded.
 @export var casing_radius_frac: float = 0.7   # fraction of barrel_radius
 @export var casing_length_frac: float = 0.4   # fraction of receiver length
-@export var casing_lifetime: float = 1.0      # seconds before despawn
+@export var max_casings: int = 50             # oldest casing retires past this
 @export var casing_eject_speed: float = 2.8   # base m/s (jittered ±30%)
 @export var casing_color: Color = Color(0.85, 0.65, 0.25)  # brass
+# FIFO of this gun's live casings (oldest first). Casings live in current_scene,
+# so we free them on _exit_tree to avoid leaking when the player respawns.
+var _live_casings: Array[RigidBody3D] = []
 
 @export_group("Heat")
 # Barrels glow when fired a lot. add_heat() pumps in per-shot heat (Player
@@ -209,12 +214,24 @@ var _heat_light: OmniLight3D = null
 var _bolts: Array[MeshInstance3D] = []
 var _bolt_rest_z: float = 0.0
 var _bolt_back: float = 0.0
+# Per-instance see-through fade (0 = opaque, 1 = fully transparent), applied to
+# every gun part. Stored so a rebuild re-applies it. Used to fade the held gun
+# while the player is invisible. See set_see_through().
+var _see_through: float = 0.0
 var _bolt_travel: float = 0.0
 var _bolt_cycle_seconds: float = 0.08
 
 func _ready() -> void:
 	_rebuild()
 	_request_preview()
+
+func _exit_tree() -> void:
+	# This gun's casings live in the scene, not under us — free our own when the
+	# gun goes away (player respawn / scene change) so they don't leak.
+	for c in _live_casings:
+		if is_instance_valid(c):
+			c.queue_free()
+	_live_casings.clear()
 
 func _process(delta: float) -> void:
 	# Minigun barrel rotation
@@ -348,14 +365,14 @@ func eject_casing() -> void:
 		SFX.casing_drop(rb.global_position, size_pitch * randf_range(0.96, 1.04), vol_db)
 	)
 
-	# Auto-despawn — keeps the world from filling with casings during a
-	# heavy firefight.
-	var timer := Timer.new()
-	timer.wait_time = casing_lifetime
-	timer.one_shot = true
-	timer.autostart = true
-	timer.timeout.connect(rb.queue_free)
-	rb.add_child(timer)
+	# Count-cap instead of a despawn timer: track this casing and, once we're
+	# over max_casings, retire the oldest still-alive one. A handful of casings
+	# lingers; a sustained firefight can't pile up past the cap.
+	_live_casings.append(rb)
+	while _live_casings.size() > maxi(1, max_casings):
+		var oldest: RigidBody3D = _live_casings.pop_front()
+		if is_instance_valid(oldest):
+			oldest.queue_free()
 
 # Called by Player on every shot — slams the bolt to its rear stop. The
 # forward return happens in _process so rapid fire keeps it pinned back.
@@ -744,6 +761,22 @@ func _rebuild() -> void:
 	# Re-apply current heat to the freshly-built barrel material so swapping
 	# weapons mid-burst doesn't visually reset the temperature.
 	_update_heat_visual()
+	# Re-apply the see-through fade so rebuilding mid-invisibility keeps the
+	# gun ghosted instead of snapping back to opaque.
+	_apply_see_through()
+
+
+# Fade the whole gun via per-instance transparency (Forward+/Mobile) so the
+# holder can tell they're invisible, without touching each part's material or
+# colour. 0 = opaque, 1 = fully transparent.
+func set_see_through(amount: float) -> void:
+	_see_through = clampf(amount, 0.0, 1.0)
+	_apply_see_through()
+
+
+func _apply_see_through() -> void:
+	for mi in find_children("*", "MeshInstance3D", true, false):
+		mi.transparency = _see_through
 
 # Vented square shroud — 4 slotted plates around the barrel. Each plate
 # has a front and back end cap (full tangential width), two long edge

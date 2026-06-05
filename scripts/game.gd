@@ -89,6 +89,11 @@ var _round_music_level: int = 1
 var _round_damage_seen: bool = false
 var _round_elapsed: float = 0.0
 var _lava_leak_started: bool = false
+# Music keeps the same track across rounds and only switches at a round
+# boundary once it has played at least this long — so short rounds don't
+# whiplash the soundtrack. 0 = no track started yet (force one on first round).
+const MUSIC_MIN_TRACK_SECONDS := 120.0
+var _music_track_started_ms: int = 0
 var local_player: Node3D
 
 # --- Match over / rematch ---
@@ -121,6 +126,11 @@ var _tab_content: VBoxContainer = null
 
 # --- Pause menu (ESC) ---
 var _pause_menu: Control = null
+# Frame on which _input already handled a ui_cancel press. _process polls the
+# same action as a cross-platform fallback (see the macOS note below); this
+# guard stops it from re-toggling the menu in the same frame _input closed it —
+# which otherwise reopened it instantly, so ESC never appeared to close.
+var _ui_cancel_frame: int = -1
 var _network_status_panel: PanelContainer = null
 var _network_status_label: Label = null
 var _network_status_hide_token: int = 0
@@ -222,13 +232,13 @@ func _ready() -> void:
 		_arena_env = we.environment
 		_base_tonemap_exposure = _arena_env.tonemap_exposure
 
-	# First-launch name prompt. We persist the chosen callsign in
-	# settings.cfg [player] name; if we never asked, block the boot until
-	# the player gives us one. The HUD is already built (see _build_*
-	# calls above), so the modal can attach to $HUD now.
+	# Don't gate boot on a name — solo/offline players shouldn't have to enter a
+	# callsign before they can play, and a blocking modal at boot is fragile. If
+	# we have no saved name (first launch), default to a generated handle and let
+	# the player rename anytime from the pause menu. Saved name is used as-is.
 	if _player_name.is_empty():
-		_show_name_prompt()
-		await self._player_name_set
+		_player_name = "Player_%d" % (randi() % 1000)
+		_save_settings()
 	NetworkManager.local_player_name = _player_name
 
 	# Auto-host an iroh server unless we're already wired to a real peer
@@ -476,7 +486,8 @@ func _process(delta: float) -> void:
 	# Input singleton's action state still flips for one frame, which polls
 	# fine from here. Gating on `paused` avoids double-toggling alongside
 	# the pause menu's Resume-button Shortcut.
-	if Input.is_action_just_pressed("ui_cancel") and not get_tree().paused:
+	if Input.is_action_just_pressed("ui_cancel") and not get_tree().paused \
+			and _ui_cancel_frame != Engine.get_process_frames():
 		if _dev_panel != null and _dev_panel.is_open():
 			_dev_panel.toggle()
 			_sync_mouse_mode()
@@ -491,6 +502,10 @@ func _process(delta: float) -> void:
 func _input(event: InputEvent) -> void:
 	_track_input_device(event)
 	var cancel_pressed := event.is_action_pressed("ui_cancel")
+	# Claim this frame's ui_cancel so the _process polling fallback doesn't also
+	# fire and undo whatever we do with it below (open/close race).
+	if cancel_pressed:
+		_ui_cancel_frame = Engine.get_process_frames()
 	# Controller B (alongside Esc / Start) backs out of the pause + settings
 	# menus. B isn't bound to ui_cancel globally because that would also pop
 	# the menu open from gameplay, where B fires a grenade.
@@ -1059,6 +1074,7 @@ func _maybe_start_match() -> void:
 		return
 	state = State.PLAYING
 	current_round = 1
+	_music_track_started_ms = 0  # fresh soundtrack each match
 	_reset_round_tracking()
 	for pid in NetworkManager.players:
 		var p := players_root.get_node_or_null(str(pid))
@@ -1074,13 +1090,25 @@ func _start_round_now() -> void:
 	_round_music_level = 1
 	_round_elapsed = 0.0
 	_lava_leak_started = false
-	var music_seed := randi()
-	_set_music_track.rpc(music_seed, current_round)
-	# Cycle to the next bundled loop set each round so back-to-back rounds
-	# don't sound identical. Cheap now that ProceduralMusic plays pre-baked
-	# stems — switching just stops + restarts three AudioStreamPlayers.
-	_rebake_music.rpc()
-	_set_music_energy.rpc(1, true)
+	# Only swap the track at this round boundary if the current one has played
+	# for MUSIC_MIN_TRACK_SECONDS (or none has started yet). Otherwise the same
+	# track carries over into the new round — switching happens "after 2 minutes
+	# AND at the end of a round", not every round.
+	var now_ms := Time.get_ticks_msec()
+	var track_age_s := (now_ms - _music_track_started_ms) / 1000.0
+	if _music_track_started_ms == 0 or track_age_s >= MUSIC_MIN_TRACK_SECONDS:
+		# New track: cross-fade to the next loop set and hard-snap to calm — a
+		# clean "fresh song" moment is fine here.
+		_music_track_started_ms = now_ms
+		var music_seed := randi()
+		_set_music_track.rpc(music_seed, current_round)
+		_rebake_music.rpc()
+		_set_music_energy.rpc(1, true)
+	else:
+		# Same track carries over: no rebake (no retire-fade), and ease energy
+		# back to calm on the next BAR instead of snapping immediately — so the
+		# round transition flows and stays beat-synced, like a change mid-round.
+		_set_music_energy.rpc(1, false)
 	# Pick a random map for this round and broadcast the swap to all peers
 	# before respawning, so _pick_spawn() reads the new arena's spawn
 	# points (the call_local RPC runs the swap synchronously here too).
@@ -1796,8 +1824,6 @@ var _mouse_sens_mult: float = 1.0
 var _movement_tilt_enabled: bool = true
 var _player_name: String = ""
 
-signal _player_name_set
-
 
 func _load_settings() -> void:
 	var cfg := ConfigFile.new()
@@ -2512,7 +2538,7 @@ func _build_pause_menu() -> void:
 
 	# Game title — readable from across the room.
 	var title := Label.new()
-	title.text = "MORE ROUNDS"
+	title.text = "GROWING GUNS"
 	title.add_theme_font_size_override("font_size", 36)
 	title.add_theme_color_override("font_color", Color(1, 0.9, 0.45))
 	title.add_theme_color_override("font_outline_color", Color(0.4, 0.0, 0.1))
@@ -2896,84 +2922,6 @@ func _build_settings_panel() -> void:
 
 	_settings_panel = root
 	_settings_panel.visible = false
-
-
-func _show_name_prompt() -> void:
-	# Blocking modal shown on first launch (no name in settings.cfg). _ready
-	# awaits _player_name_set before continuing to host_game_iroh, so the
-	# server is created with the player's chosen name on the very first try.
-	var modal := Control.new()
-	modal.name = "NamePrompt"
-	modal.process_mode = Node.PROCESS_MODE_ALWAYS
-	modal.anchor_right = 1.0
-	modal.anchor_bottom = 1.0
-	modal.mouse_filter = Control.MOUSE_FILTER_STOP
-	$HUD.add_child(modal)
-
-	var bg := ColorRect.new()
-	bg.color = Color(0, 0, 0, 0.65)
-	bg.anchor_right = 1.0
-	bg.anchor_bottom = 1.0
-	modal.add_child(bg)
-
-	var center := CenterContainer.new()
-	center.anchor_right = 1.0
-	center.anchor_bottom = 1.0
-	modal.add_child(center)
-
-	var panel := PanelContainer.new()
-	var sb := StyleBoxFlat.new()
-	sb.bg_color = Color(0.08, 0.08, 0.1, 0.95)
-	sb.border_color = Color(0.35, 0.7, 1.0)
-	sb.set_border_width_all(2)
-	sb.set_corner_radius_all(8)
-	sb.content_margin_left = 28
-	sb.content_margin_right = 28
-	sb.content_margin_top = 22
-	sb.content_margin_bottom = 22
-	panel.add_theme_stylebox_override("panel", sb)
-	center.add_child(panel)
-
-	var vb := VBoxContainer.new()
-	vb.add_theme_constant_override("separation", 14)
-	vb.custom_minimum_size = Vector2(380, 0)
-	panel.add_child(vb)
-
-	var title := Label.new()
-	title.text = "WHAT'S YOUR NAME?"
-	title.add_theme_font_size_override("font_size", 28)
-	title.add_theme_color_override("font_color", Color(1, 0.9, 0.45))
-	title.add_theme_color_override("font_outline_color", Color(0.4, 0.0, 0.1))
-	title.add_theme_constant_override("outline_size", 5)
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	vb.add_child(title)
-
-	var input := LineEdit.new()
-	input.placeholder_text = "Your callsign…"
-	input.max_length = 20
-	input.custom_minimum_size = Vector2(360, 36)
-	vb.add_child(input)
-
-	var submit_btn := Button.new()
-	submit_btn.text = "READY"
-	submit_btn.custom_minimum_size = Vector2(0, 44)
-	vb.add_child(submit_btn)
-
-	var on_submit := func() -> void:
-		var entered: String = input.text.strip_edges()
-		if entered.is_empty():
-			# Empty submit falls back to a Player_NNN handle so we never
-			# end up with a blank string in NetworkManager.
-			entered = "Player_%d" % (randi() % 1000)
-		_player_name = entered
-		_save_settings()
-		modal.queue_free()
-		_player_name_set.emit()
-
-	submit_btn.pressed.connect(on_submit)
-	input.text_submitted.connect(func(_t: String) -> void: on_submit.call())
-	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-	input.call_deferred("grab_focus")
 
 
 func _build_slider_row(label_text: String, value: float, min_val: float, max_val: float, step: float, value_text: String) -> Dictionary:
