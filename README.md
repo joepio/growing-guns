@@ -1,5 +1,7 @@
 # More Rounds
 
+**Download for free on Itch.io**
+
 - Fast paced Multiplayer FPS.
 - Last man standing, new map every round.
 - Losers of the round get to pick power-ups that stack.
