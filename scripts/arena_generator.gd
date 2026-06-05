@@ -142,6 +142,13 @@ const COLOR_SPAWN := Color(1.00, 0.40, 0.18)
 const LAVA_TICK_SECONDS := 0.5
 const LAVA_TICK_DAMAGE := 15
 const LAVA_POOL_Y := -2.0
+const LAVA_FLOOR_SURFACE_Y := 0.04
+const LAVA_FLOOR_DAMAGE_Y := 1.15
+const LAVA_ISLAND_TOP_Y := 1.0
+const LAVA_ISLAND_MAX_GAP := 5.6
+const LAVA_ISLAND_MIN_TOP_Y := 0.9
+const LAVA_ISLAND_MAX_TOP_Y := 9.0
+const LAVA_ISLAND_MAX_HEIGHT_STEP := 2.05
 
 const LAVA_SHADER_CODE := """
 shader_type spatial;
@@ -216,6 +223,8 @@ var _mat_spawn: StandardMaterial3D
 var _placed: Array = []
 var _spawn_positions: Array[Vector3] = []
 var _lava_damage_accum_by_player: Dictionary = {}
+var _lava_safe_zones: Array = []
+var _all_floor_lava: bool = false
 
 var last_stats: Dictionary = {}
 var _regen_pending: bool = false
@@ -229,7 +238,10 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	if Engine.is_editor_hint():
 		return
-	_apply_lava_pool_damage(delta)
+	if _all_floor_lava:
+		_apply_all_floor_lava_damage(delta)
+	else:
+		_apply_lava_pool_damage(delta)
 
 
 func _queue_regen() -> void:
@@ -250,6 +262,8 @@ func regenerate() -> void:
 	_placed.clear()
 	_spawn_positions.clear()
 	_lava_damage_accum_by_player.clear()
+	_lava_safe_zones.clear()
+	_all_floor_lava = false
 	_ensure_materials()
 
 	var t0: int = Time.get_ticks_usec()
@@ -263,18 +277,56 @@ func regenerate() -> void:
 	var hi: float = maxf(arena_size_min, arena_size_max)
 	arena_size = roundf(rng.randf_range(lo, hi))
 
-	# One roll picks the structural variant. 30% open arena (no perimeter
-	# walls — players can run off into the lava), 20% walled with a hole in
-	# the floor, 50% normal walled-and-solid. Mutually exclusive.
+	# One roll picks the structural variant. 18% all-floor-lava island arena,
+	# 24% open arena (no perimeter walls — players can run off into the lava),
+	# 16% walled with a hole in the floor, 42% normal walled-and-solid.
+	# Mutually exclusive.
 	var variant_roll: float = rng.randf()
-	var no_walls: bool = variant_roll < 0.30
-	var has_hole: bool = (not no_walls) and variant_roll < 0.50
+	var all_floor_lava: bool = variant_roll < 0.18
+	var no_walls: bool = (not all_floor_lava) and variant_roll < 0.42
+	var has_hole: bool = (not all_floor_lava) and (not no_walls) and variant_roll < 0.58
 	var hole_pos: Vector2 = Vector2.ZERO
 	var hole_size: float = 0.0
 	if has_hole:
 		hole_size = rng.randf_range(10.0, 16.0)
 		var max_off: float = arena_size * 0.25
 		hole_pos = Vector2(rng.randf_range(-max_off, max_off), rng.randf_range(-max_off, max_off))
+
+	if all_floor_lava:
+		_build_walls()
+		_build_lava_pool()
+		_build_lava_floor_surface()
+		var lava_stats: Dictionary = _build_lava_island_layout(rng, arena_size * 0.5 - 3.0)
+		_emit_spawnpoints()
+		var lava_palette: Dictionary = current_palette()
+		last_stats = {
+			"seed": seed,
+			"arena_size": arena_size,
+			"buildings": 0,
+			"bridges": lava_stats.get("bridges", 0),
+			"tunnels": 0,
+			"diagonal_walls": 0,
+			"spawnpoints": _spawn_positions.size(),
+			"has_center_tower": false,
+			"no_walls": false,
+			"has_hole": false,
+			"all_floor_lava": true,
+			"lava_platforms": lava_stats.get("platforms", 0),
+			"reachable_edges": lava_stats.get("reachable_edges", 0),
+			"reachable_valid": lava_stats.get("reachable_valid", false),
+			"palette": lava_palette["name"],
+			"sky_top": lava_palette["sky_top"],
+			"sky_horizon": lava_palette["sky_horizon"],
+			"ambient": lava_palette["ambient"],
+			"fog": lava_palette["fog"],
+			"fog_density": lava_palette.get("fog_density", 0.012),
+			"sun": lava_palette["sun"],
+			"fill": lava_palette["fill"],
+			"gen_ms": (Time.get_ticks_usec() - t0) / 1000.0,
+		}
+		_all_floor_lava = true
+		emit_signal("regenerated", last_stats)
+		return
 
 	_build_floor(has_hole, hole_pos, hole_size)
 	if not no_walls:
@@ -537,6 +589,7 @@ func regenerate() -> void:
 		"has_center_tower": has_center,
 		"no_walls": no_walls,
 		"has_hole": has_hole,
+		"all_floor_lava": false,
 		"palette": palette["name"],
 		"sky_top": palette["sky_top"],
 		"sky_horizon": palette["sky_horizon"],
@@ -733,12 +786,64 @@ func _build_lava_pool() -> void:
 		col.owner = root
 
 
+func _build_lava_floor_surface() -> void:
+	var mi := MeshInstance3D.new()
+	mi.name = "LavaFloorSurface"
+	var plane := PlaneMesh.new()
+	plane.size = Vector2(arena_size, arena_size)
+	plane.subdivide_width = 8
+	plane.subdivide_depth = 8
+	mi.mesh = plane
+	mi.position = Vector3(0, LAVA_FLOOR_SURFACE_Y, 0)
+	mi.material_override = _make_lava_material()
+	add_child(mi)
+	var floor_owner := _editor_owner()
+	if floor_owner:
+		mi.owner = floor_owner
+
+
 func _make_lava_material() -> ShaderMaterial:
 	var sh := Shader.new()
 	sh.code = LAVA_SHADER_CODE
 	var mat := ShaderMaterial.new()
 	mat.shader = sh
 	return mat
+
+
+func _apply_all_floor_lava_damage(delta: float) -> void:
+	var active_ids: Dictionary = {}
+	var lava_y := global_position.y + LAVA_FLOOR_SURFACE_Y
+	for p: Node in get_tree().get_nodes_in_group("players"):
+		if not p is Node3D:
+			continue
+		var pid := int(p.get("player_id")) if p.get("player_id") != null else p.get_instance_id()
+		var p3 := p as Node3D
+		if p3.global_position.y > lava_y + LAVA_FLOOR_DAMAGE_Y:
+			_lava_damage_accum_by_player.erase(pid)
+			continue
+		if _point_in_lava_safe_zone(Vector2(p3.global_position.x, p3.global_position.z)):
+			_lava_damage_accum_by_player.erase(pid)
+			continue
+		active_ids[pid] = true
+		var accum := float(_lava_damage_accum_by_player.get(pid, 0.0)) + delta
+		while accum >= LAVA_TICK_SECONDS:
+			accum -= LAVA_TICK_SECONDS
+			if p.has_method("apply_environmental_damage"):
+				p.apply_environmental_damage(LAVA_TICK_DAMAGE, "lava")
+		_lava_damage_accum_by_player[pid] = accum
+	for raw_id in _lava_damage_accum_by_player.keys():
+		if not active_ids.has(raw_id):
+			_lava_damage_accum_by_player.erase(raw_id)
+
+
+func _point_in_lava_safe_zone(world_xz: Vector2) -> bool:
+	var local := world_xz - Vector2(global_position.x, global_position.z)
+	for entry in _lava_safe_zones:
+		var center: Vector2 = entry[0]
+		var radius: float = entry[1]
+		if local.distance_to(center) <= radius:
+			return true
+	return false
 
 
 func _apply_lava_pool_damage(delta: float) -> void:
@@ -772,6 +877,227 @@ func _build_walls() -> void:
 	# E + W walls span Z, depth 1m on X.
 	_add_static_box(Vector3(half, wall_height * 0.5, 0), Vector3(1, wall_height, arena_size), _mat_wall)
 	_add_static_box(Vector3(-half, wall_height * 0.5, 0), Vector3(1, wall_height, arena_size), _mat_wall)
+
+
+func _build_lava_island_layout(rng: RandomNumberGenerator, perim_radius: float) -> Dictionary:
+	var platforms: Array = []
+	var edges: Array = []
+	var center_radius: float = 4.2
+	var center_top := Vector3(0, LAVA_ISLAND_TOP_Y, 0)
+	_register_lava_platform(center_top, center_radius, 1.0, platforms)
+	_placed.append([Vector2.ZERO, center_radius + 0.9])
+
+	var spine_anchor := center_top
+	var spine_anchor_radius := center_radius
+	for spine_i in rng.randi_range(3, 5):
+		var radius: float = rng.randf_range(3.0, 4.7)
+		var height_step: float = rng.randf_range(1.25, LAVA_ISLAND_MAX_HEIGHT_STEP)
+		var top_y: float = clampf(spine_anchor.y + height_step, LAVA_ISLAND_MIN_TOP_Y, LAVA_ISLAND_MAX_TOP_Y)
+		var gap: float = rng.randf_range(2.7, _lava_max_gap_for_height_step(top_y - spine_anchor.y))
+		var dist: float = spine_anchor_radius + radius + gap
+		var dir2 := Vector2(-1.0, rng.randf_range(-0.28, 0.28)).normalized()
+		var pos := Vector3(spine_anchor.x + dir2.x * dist, top_y, spine_anchor.z + dir2.y * dist)
+		if absf(pos.x) + radius > perim_radius or absf(pos.z) + radius > perim_radius:
+			break
+		if not _try_place(pos, radius + 0.9):
+			break
+		var mirror_pos := _mirror(pos)
+		var column_extra: float = rng.randf_range(0.6, 1.4)
+		_register_lava_platform(pos, radius, column_extra, platforms)
+		_register_lava_platform(mirror_pos, radius, column_extra, platforms)
+		edges.append([spine_anchor, pos])
+		edges.append([_mirror(spine_anchor), mirror_pos])
+		spine_anchor = pos
+		spine_anchor_radius = radius
+
+	var target_pairs: int = clampi(int(round(arena_size / 6.0)) + rng.randi_range(1, 4), 10, 18)
+	for i in target_pairs:
+		for attempt in 80:
+			var anchor: Dictionary = platforms[rng.randi_range(0, platforms.size() - 1)]
+			var anchor_pos: Vector3 = anchor["pos"]
+			var anchor_radius: float = anchor["radius"]
+			if anchor_pos.x > 0.0:
+				anchor_pos = _mirror(anchor_pos)
+			var radius: float = rng.randf_range(2.2, 5.2)
+			var angle: float = rng.randf() * TAU
+			var height_step: float = rng.randf_range(-1.55, LAVA_ISLAND_MAX_HEIGHT_STEP)
+			if rng.randf() < 0.58 and anchor_pos.y < LAVA_ISLAND_MAX_TOP_Y - 0.7:
+				height_step = rng.randf_range(0.6, LAVA_ISLAND_MAX_HEIGHT_STEP)
+			var top_y: float = clampf(anchor_pos.y + height_step, LAVA_ISLAND_MIN_TOP_Y, LAVA_ISLAND_MAX_TOP_Y)
+			var actual_height_step: float = top_y - anchor_pos.y
+			var gap: float = rng.randf_range(2.8, _lava_max_gap_for_height_step(actual_height_step))
+			var dist: float = anchor_radius + radius + gap
+			var pos := Vector3(
+				anchor_pos.x + cos(angle) * dist,
+				top_y,
+				anchor_pos.z + sin(angle) * dist
+			)
+			if pos.x > -0.35:
+				continue
+			if absf(pos.x) + radius > perim_radius or absf(pos.z) + radius > perim_radius:
+				continue
+			if absf(pos.y - anchor_pos.y) > LAVA_ISLAND_MAX_HEIGHT_STEP:
+				continue
+			if not _try_place(pos, radius + 0.9):
+				continue
+			var mirror_pos := _mirror(pos)
+			var column_extra: float = rng.randf_range(0.45, 1.5)
+			_register_lava_platform(pos, radius, column_extra, platforms)
+			_register_lava_platform(mirror_pos, radius, column_extra, platforms)
+			edges.append([anchor_pos, pos])
+			edges.append([_mirror(anchor_pos), mirror_pos])
+			break
+
+	# A few guaranteed cross-arena stepping stones keep the graph from feeling
+	# like two disconnected mirrored halves. They are also individually within
+	# reach of the center platform.
+	var axis_step := Vector3(-(center_radius + 3.2 + LAVA_ISLAND_MAX_GAP * 0.55), LAVA_ISLAND_TOP_Y + 0.15, 0.0)
+	if _try_place(axis_step, 3.1):
+		_register_lava_platform(axis_step, 3.0, 1.25, platforms)
+		_register_lava_platform(_mirror(axis_step), 3.0, 1.25, platforms)
+		edges.append([center_top, axis_step])
+		edges.append([center_top, _mirror(axis_step)])
+
+	var decorative_bridges: int = _build_lava_island_bridges(edges, rng)
+	_add_lava_island_cover(platforms, rng)
+	var reachable_valid := _validate_lava_platform_graph(platforms, edges)
+	if not reachable_valid:
+		push_warning("Lava island graph failed reachability validation for seed %d" % seed)
+	return {
+		"platforms": platforms.size(),
+		"reachable_edges": edges.size(),
+		"bridges": decorative_bridges,
+		"reachable_valid": reachable_valid,
+	}
+
+
+func _register_lava_platform(top_pos: Vector3, radius: float, platform_height: float, platforms: Array) -> void:
+	var height := maxf(0.45, top_pos.y - LAVA_FLOOR_SURFACE_Y + platform_height)
+	var center := Vector3(top_pos.x, top_pos.y - height * 0.5, top_pos.z)
+	_build_lava_jump_platform(center, radius, height)
+	_lava_safe_zones.append([Vector2(top_pos.x, top_pos.z), radius + 0.25])
+	_spawn_positions.append(Vector3(top_pos.x, top_pos.y + 1.0, top_pos.z))
+	platforms.append({
+		"pos": top_pos,
+		"radius": radius,
+		"height": height,
+	})
+
+
+func _validate_lava_platform_graph(platforms: Array, edges: Array) -> bool:
+	if platforms.is_empty():
+		return false
+	var radii: Dictionary = {}
+	var adjacency: Dictionary = {}
+	for platform in platforms:
+		var pos: Vector3 = platform["pos"]
+		var key := _lava_platform_key(pos)
+		radii[key] = float(platform["radius"])
+		adjacency[key] = []
+	for edge in edges:
+		var a: Vector3 = edge[0]
+		var b: Vector3 = edge[1]
+		var a_key := _lava_platform_key(a)
+		var b_key := _lava_platform_key(b)
+		if not adjacency.has(a_key) or not adjacency.has(b_key):
+			push_warning("Lava reachability edge references missing platform: %s -> %s" % [a_key, b_key])
+			return false
+		var gap := Vector2(a.x - b.x, a.z - b.z).length() - float(radii[a_key]) - float(radii[b_key])
+		var max_gap := _lava_max_gap_for_height_step(b.y - a.y)
+		if gap > max_gap + 0.05:
+			push_warning("Lava reachability edge gap too wide: %.2f > %.2f (%s -> %s)" % [gap, max_gap, a_key, b_key])
+			return false
+		if absf(a.y - b.y) > LAVA_ISLAND_MAX_HEIGHT_STEP + 0.05:
+			push_warning("Lava reachability height step too tall: %.2f > %.2f (%s -> %s)" % [absf(a.y - b.y), LAVA_ISLAND_MAX_HEIGHT_STEP, a_key, b_key])
+			return false
+		(adjacency[a_key] as Array).append(b_key)
+		(adjacency[b_key] as Array).append(a_key)
+	var start_key := _lava_platform_key(platforms[0]["pos"])
+	var visited: Dictionary = {start_key: true}
+	var queue: Array = [start_key]
+	while not queue.is_empty():
+		var key: String = queue.pop_front()
+		for next_key in adjacency[key]:
+			if visited.has(next_key):
+				continue
+			visited[next_key] = true
+			queue.append(next_key)
+	if visited.size() != platforms.size():
+		push_warning("Lava reachability graph disconnected: %d / %d platforms reached" % [visited.size(), platforms.size()])
+		return false
+	return true
+
+
+func _lava_platform_key(pos: Vector3) -> String:
+	var x := 0.0 if absf(pos.x) < 0.005 else pos.x
+	var y := 0.0 if absf(pos.y) < 0.005 else pos.y
+	var z := 0.0 if absf(pos.z) < 0.005 else pos.z
+	return "%.2f,%.2f,%.2f" % [x, y, z]
+
+
+func _lava_max_gap_for_height_step(height_step: float) -> float:
+	var climb_t := clampf(absf(height_step) / LAVA_ISLAND_MAX_HEIGHT_STEP, 0.0, 1.0)
+	return lerpf(LAVA_ISLAND_MAX_GAP, 3.1, climb_t)
+
+
+func _build_lava_island_bridges(edges: Array, rng: RandomNumberGenerator) -> int:
+	var built: int = 0
+	for edge in edges:
+		if rng.randf() > 0.22:
+			continue
+		var a: Vector3 = edge[0]
+		var b: Vector3 = edge[1]
+		var dxz := Vector2(b.x - a.x, b.z - a.z)
+		var length: float = dxz.length()
+		if length < 7.0:
+			continue
+		var midpoint := (a + b) * 0.5
+		midpoint.y = minf(a.y, b.y) + 0.08
+		var angle := atan2(dxz.y, dxz.x)
+		_add_static_box(midpoint, Vector3(length - 4.8, 0.22, 1.0), _mat_dark, angle)
+		built += 1
+	return built
+
+
+func _add_lava_island_cover(platforms: Array, rng: RandomNumberGenerator) -> void:
+	for platform in platforms:
+		if rng.randf() > 0.38:
+			continue
+		var pos: Vector3 = platform["pos"]
+		var radius: float = platform["radius"]
+		if radius < 3.0:
+			continue
+		var angle := rng.randf() * TAU
+		var off := rng.randf_range(0.0, radius * 0.35)
+		var cover_pos := Vector3(pos.x + cos(angle) * off, pos.y + 0.55, pos.z + sin(angle) * off)
+		var cover_size := Vector3(rng.randf_range(1.8, 2.8), 1.1, rng.randf_range(0.8, 1.2))
+		_add_static_box(cover_pos, cover_size, _mat_dark, rng.randf() * TAU)
+
+
+func _build_lava_jump_platform(center: Vector3, radius: float, height: float) -> void:
+	var body := StaticBody3D.new()
+	body.position = center
+	add_child(body)
+	var mi := MeshInstance3D.new()
+	var cyl := CylinderMesh.new()
+	cyl.radial_segments = 10
+	cyl.top_radius = radius
+	cyl.bottom_radius = maxf(0.9, radius * 0.58)
+	cyl.height = height
+	mi.mesh = cyl
+	mi.material_override = _mat_dark
+	body.add_child(mi)
+	var col := CollisionShape3D.new()
+	var shape := CylinderShape3D.new()
+	shape.radius = radius * 0.96
+	shape.height = height
+	col.shape = shape
+	body.add_child(col)
+	var island_owner := _editor_owner()
+	if island_owner:
+		body.owner = island_owner
+		mi.owner = island_owner
+		col.owner = island_owner
 
 
 func _build_center_tower(h: float) -> void:
