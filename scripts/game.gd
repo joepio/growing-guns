@@ -81,6 +81,7 @@ var pending_pick_cards_by_player: Dictionary = {}
 # Server-only countdown until each pending pick auto-resolves (player_id ->
 # seconds remaining). Beeps fire at the integer crossings of the last 3s.
 const CARD_PICK_TIMEOUT := 7.0
+const ROUND_WIN_TO_CARD_PICK_DELAY := 0.35
 var pending_pick_deadlines: Dictionary = {}
 var completed_picks: Dictionary = {}
 var eliminated_players: Dictionary = {}
@@ -499,28 +500,54 @@ func _process(delta: float) -> void:
 	# Tab is handled in _input — Godot's GUI focus navigation eats the Tab key
 	# before _process polling can see it, so we intercept it earlier.
 
-func _input(event: InputEvent) -> void:
-	_track_input_device(event)
+func _unhandled_key_input(event: InputEvent) -> void:
+	if _handle_global_cancel_or_pause(event):
+		get_viewport().set_input_as_handled()
+
+
+func _handle_global_cancel_or_pause(event: InputEvent) -> bool:
 	var cancel_pressed := event.is_action_pressed("ui_cancel")
-	# Claim this frame's ui_cancel so the _process polling fallback doesn't also
-	# fire and undo whatever we do with it below (open/close race).
-	if cancel_pressed:
-		_ui_cancel_frame = Engine.get_process_frames()
-	# Controller B (alongside Esc / Start) backs out of the pause + settings
-	# menus. B isn't bound to ui_cancel globally because that would also pop
-	# the menu open from gameplay, where B fires a grenade.
+	var enter_pressed := false
+	if event is InputEventKey:
+		cancel_pressed = cancel_pressed or (
+			event.pressed
+			and not event.echo
+			and (event.keycode == KEY_ESCAPE or event.physical_keycode == KEY_ESCAPE)
+		)
+		enter_pressed = event.pressed and not event.echo and (
+			event.keycode == KEY_ENTER
+			or event.keycode == KEY_KP_ENTER
+		)
+	# Controller B backs out of pause/settings menus only. It is intentionally
+	# not a gameplay pause shortcut because B is also grenade on controller.
 	var menu_back_pressed: bool = cancel_pressed or (
 		event is InputEventJoypadButton and event.pressed and event.button_index == JOY_BUTTON_B
 	)
 	if menu_back_pressed:
 		if _settings_panel != null and _settings_panel.visible:
+			_ui_cancel_frame = Engine.get_process_frames()
 			_close_settings()
-			get_viewport().set_input_as_handled()
-			return
+			return true
 		if _pause_menu != null and _pause_menu.visible:
+			_ui_cancel_frame = Engine.get_process_frames()
 			_toggle_pause_menu()
-			get_viewport().set_input_as_handled()
-			return
+			return true
+	if cancel_pressed or enter_pressed:
+		_ui_cancel_frame = Engine.get_process_frames()
+		if _dev_panel != null and _dev_panel.is_open():
+			_dev_panel.toggle()
+			_sync_mouse_mode()
+			return true
+		_toggle_pause_menu()
+		return true
+	return false
+
+
+func _input(event: InputEvent) -> void:
+	_track_input_device(event)
+	if _handle_global_cancel_or_pause(event):
+		get_viewport().set_input_as_handled()
+		return
 
 	# When solo play pauses the scene tree, only pause/menu close handling
 	# above should continue through Game._input.
@@ -547,20 +574,6 @@ func _input(event: InputEvent) -> void:
 		if _dev_panel != null:
 			_dev_panel.toggle()
 			_sync_mouse_mode()
-		return
-
-	# Pause menu: ui_cancel (Esc / Start), Enter, and numpad Enter.
-	var pause_pressed: bool = cancel_pressed \
-		or (event is InputEventKey and event.pressed and not event.echo and (
-			event.keycode == KEY_ENTER \
-			or event.keycode == KEY_KP_ENTER
-		))
-	if pause_pressed:
-		if _dev_panel != null and _dev_panel.is_open():
-			_dev_panel.toggle()
-			_sync_mouse_mode()
-			return
-		_toggle_pause_menu()
 		return
 
 	# Cheat hotkeys (G / P / M / L / 1-5 / ?) — only when dev tools are enabled.
@@ -1439,10 +1452,10 @@ func _end_round(winner_id: int) -> void:
 					pn.set_frozen.rpc(true)
 		_match_over.rpc(winner_id)
 		return
-	# Hold on the "X WINS THE ROUND" banner for a beat before the card-pick
-	# UI cascade overwrites it.
+	# Hold on the "X WINS THE ROUND" banner just long enough to register, then
+	# let the card UI arrive while the death/blood effect is still playing.
 	if winner_id != 0:
-		await get_tree().create_timer(1.4).timeout
+		await get_tree().create_timer(ROUND_WIN_TO_CARD_PICK_DELAY).timeout
 	# Freeze the losers and wait for them to finish their picks.
 	state = State.PICKING_CARD
 	# Don't freeze losers during card pick — let everyone keep moving while
@@ -1652,6 +1665,9 @@ func _active_picker_names() -> PackedStringArray:
 
 @rpc("authority", "call_local", "reliable")
 func _show_card_pick(loser_id: int, card_ids: Array) -> void:
+	# The loser sees the card UI almost immediately after death, so clear the
+	# round-win banner locally before the card title fades in.
+	_set_banner("", 0.0)
 	_show_render_card_pick(loser_id, card_ids)
 	_sync_mouse_mode()
 
