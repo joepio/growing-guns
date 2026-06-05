@@ -835,9 +835,11 @@ func _add_barrel_shroud(centre_z: float, length: float, half_extent: float, slot
 # ---- Helpers ----
 func _make_material(col: Color, metallic: float, roughness: float) -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
-	m.albedo_color = col
-	m.metallic = clampf(metallic, 0.0, 1.0)
-	m.roughness = clampf(roughness, 0.0, 1.0)
+	m.albedo_color = col.lightened(0.06)
+	m.metallic = 0.0
+	m.roughness = 1.0
+	m.diffuse_mode = BaseMaterial3D.DIFFUSE_TOON
+	m.specular_mode = BaseMaterial3D.SPECULAR_DISABLED
 	return m
 
 func _add_box(part_name: String, size: Vector3, pos: Vector3, mat: Material, parent: Node3D = null) -> MeshInstance3D:

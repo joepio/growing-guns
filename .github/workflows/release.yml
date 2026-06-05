@@ -109,8 +109,8 @@ jobs:
           set -euxo pipefail
           # Tag looks like "v0.2.3" — strip the leading v for itch's userversion.
           VERSION="${GITHUB_REF_NAME#v}"
-          ./butler push --userversion "$VERSION" build/macos/MoreRounds.zip   joepio/more-rounds:mac
-          ./butler push --userversion "$VERSION" build/windows/MoreRounds.zip joepio/more-rounds:win
+          ./butler push --userversion "$VERSION" build/macos/MoreRounds.zip   joepio/growing-guns:mac
+          ./butler push --userversion "$VERSION" build/windows/MoreRounds.zip joepio/growing-guns:win
 
       - name: Create GitHub Release
         # Skips on workflow_dispatch (no tag context); only fires on tag push.

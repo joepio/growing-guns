@@ -294,10 +294,7 @@ func _setup_third_person_gun() -> void:
 	var body_mesh := BoxMesh.new()
 	body_mesh.size = Vector3(0.14, 0.14, 0.44)
 	gun.mesh = body_mesh
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.18, 0.18, 0.22)
-	mat.metallic = 0.8
-	mat.roughness = 0.3
+	var mat := _make_mat(Color(0.18, 0.18, 0.22), 1.0, 0.0)
 	gun.material_override = mat
 	gun.position = Vector3(0.0, -0.03, -0.18)
 	gun_root.rotation_degrees = Vector3(10.0, 0.0, 0.0)
@@ -343,9 +340,11 @@ func _identity_seed() -> int:
 
 func _make_mat(color: Color, roughness: float = 0.8, metallic: float = 0.0) -> StandardMaterial3D:
 	var mat := StandardMaterial3D.new()
-	mat.albedo_color = color
-	mat.roughness = roughness
-	mat.metallic = metallic
+	mat.albedo_color = color.lightened(0.06)
+	mat.roughness = 1.0
+	mat.metallic = 0.0
+	mat.diffuse_mode = BaseMaterial3D.DIFFUSE_TOON
+	mat.specular_mode = BaseMaterial3D.SPECULAR_DISABLED
 	return mat
 
 func _apply_eye_variant(kind: int, eyelid_mat: StandardMaterial3D) -> void:

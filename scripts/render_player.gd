@@ -105,7 +105,17 @@ func show_card_pick(card_ids: Array) -> void:
 			continue
 		row.add_child(_make_card(str(raw_id), card, index))
 		index += 1
+	var bg: ColorRect = _hud.card_bg
+	if bg.has_meta("tween"):
+		var old_tw: Tween = bg.get_meta("tween")
+		if old_tw and old_tw.is_valid():
+			old_tw.kill()
+	bg.color.a = 0.0
 	_hud.card_overlay.visible = true
+	var dim_tw := bg.create_tween()
+	bg.set_meta("tween", dim_tw)
+	dim_tw.tween_property(bg, "color:a", 0.70, 0.55)\
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
 	# Block the mouse on cards belonging to controller-using players, so the
 	# global cursor can't steal their selection while they navigate with
 	# DPAD/stick. Mouse-using players (incl. a kbd+mouse player who joined
@@ -126,6 +136,12 @@ func hide_card_pick() -> void:
 	_card_ids.clear()
 	_card_pick_locked = false
 	_card_stick_x_engaged = false
+	var bg: ColorRect = _hud.card_bg
+	if bg.has_meta("tween"):
+		var old_tw: Tween = bg.get_meta("tween")
+		if old_tw and old_tw.is_valid():
+			old_tw.kill()
+	bg.color.a = 0.0
 	_hud.card_overlay.visible = false
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var row: HBoxContainer = _hud.card_row
@@ -358,6 +374,7 @@ func _build() -> void:
 		"death": death,
 		"ghost": ghost,
 		"card_overlay": card_overlay.overlay,
+		"card_bg": card_overlay.bg,
 		"card_row": card_overlay.row,
 		"card_title": card_overlay.title,
 		"retro_layer": retro_layer,
@@ -486,7 +503,7 @@ func _build_card_overlay(root: Control) -> Dictionary:
 	var row := HBoxContainer.new()
 	row.alignment = BoxContainer.ALIGNMENT_CENTER
 	vb.add_child(row)
-	return {"overlay": overlay, "row": row, "title": title}
+	return {"overlay": overlay, "bg": bg, "row": row, "title": title}
 
 
 func _label(color: Color) -> Label:

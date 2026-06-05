@@ -648,17 +648,24 @@ func current_palette() -> Dictionary:
 
 func _make_mat(color: Color, roughness: float) -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
-	m.albedo_color = color
-	m.roughness = roughness
+	m.albedo_color = color.lightened(0.08)
+	m.roughness = 1.0
+	m.metallic = 0.0
+	m.diffuse_mode = BaseMaterial3D.DIFFUSE_TOON
+	m.specular_mode = BaseMaterial3D.SPECULAR_DISABLED
 	return m
 
 
 func _make_emissive(color: Color, energy: float) -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
-	m.albedo_color = color
+	m.albedo_color = color.lightened(0.05)
+	m.roughness = 1.0
+	m.metallic = 0.0
+	m.diffuse_mode = BaseMaterial3D.DIFFUSE_TOON
+	m.specular_mode = BaseMaterial3D.SPECULAR_DISABLED
 	m.emission_enabled = true
 	m.emission = color
-	m.emission_energy_multiplier = energy
+	m.emission_energy_multiplier = energy * 0.75
 	return m
 
 
