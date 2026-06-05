@@ -57,13 +57,6 @@ const REMOTE_SNAP_DISTANCE := 8.0
 const MINE_RELOAD := 2.5
 const MINE_FORWARD_OFFSET := 0.9
 const GHOST_ALPHA := 0.06
-const INVISIBLE_RELOAD := 10.0
-const INVISIBLE_DURATION := 4.0
-const INVISIBLE_ALPHA := 0.06
-# How see-through the held (first-person) gun gets while invisible. Lighter than
-# the body so the holder still has a usable viewmodel, but clearly ghosted as a
-# reminder they're cloaked. 0 = opaque, 1 = fully transparent.
-const INVISIBLE_GUN_FADE := 0.7
 
 @onready var camera: Camera3D = $Camera
 @onready var muzzle: Node3D = $Camera/Muzzle
@@ -123,7 +116,6 @@ var tilt_enabled: bool = true
 # want gravity + move_and_slide to run while it's on.
 var launching: bool = false
 var ghost_mode: bool = false
-var invisible_mode: bool = false
 var is_zooming: bool = false
 var _poison_damage_left: float = 0.0
 var _poison_dps: float = 0.0
@@ -132,8 +124,6 @@ var _poison_tick_accum: float = 0.0
 var _slow_timer: float = 0.0
 var _slow_mult: float = 1.0
 var _phoenix_charges_left: int = 0
-var _next_shot_damage_mult: float = 1.0
-var _next_shot_speed_mult: float = 1.0
 
 # Last broadcast state — avoids flooding the wire when idle.
 var _last_sync_pos: Vector3 = Vector3.INF
@@ -597,19 +587,17 @@ func _apply_ghost_visuals() -> void:
 	if body_model == null:
 		return
 	body_model.visible = (is_bot or split_screen_local or not is_multiplayer_authority())
-	name_label.visible = not ghost_mode and not invisible_mode and (is_bot or (not split_screen_local and not is_multiplayer_authority()))
+	name_label.visible = not ghost_mode and (is_bot or (not split_screen_local and not is_multiplayer_authority()))
 	# Hide both first-person muzzle gun and third-person gun while ghosting —
 	# spectators shouldn't see their weapon, and other players shouldn't see
 	# a gun floating in a translucent ghost.
 	muzzle.visible = not ghost_mode
 	if _third_person_gun:
 		_third_person_gun.visible = not ghost_mode
-	# The held first-person gun is the procedural gun under the camera. Fade it
-	# while invisible so the holder can see their own cloak; restore when not.
 	if _procedural_gun and _procedural_gun.has_method("set_see_through"):
-		_procedural_gun.set_see_through(INVISIBLE_GUN_FADE if invisible_mode else 0.0)
+		_procedural_gun.set_see_through(0.0)
 	if blade:
-		blade.transparency = INVISIBLE_GUN_FADE if invisible_mode else 0.0
+		blade.transparency = 0.0
 
 	var gun_meshes: Array[MeshInstance3D] = []
 	if gun_body: gun_meshes.append(gun_body)
@@ -628,14 +616,6 @@ func _apply_ghost_visuals() -> void:
 			mat.metallic = 0.0
 			mat.roughness = 1.0
 			mesh.material_override = mat
-		elif invisible_mode:
-			var stealth := StandardMaterial3D.new()
-			stealth.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-			stealth.albedo_color = Color(0.75, 1.0, 0.9, INVISIBLE_ALPHA)
-			stealth.emission_enabled = true
-			stealth.emission = Color(0.45, 1.0, 0.8)
-			stealth.emission_energy_multiplier = 0.08
-			mesh.material_override = stealth
 		else:
 			mesh.material_override = _body_materials.get(mesh, mesh.material_override)
 
@@ -1100,13 +1080,6 @@ func _fire_rifle() -> void:
 	# then add the per-shot recoil so each successive held shot walks wider.
 	var spread: float = get_effective_spread()
 	_recoil_spread += weapon.recoil_per_shot
-	var shot_damage_mult := _next_shot_damage_mult
-	var shot_speed_mult := _next_shot_speed_mult
-	if invisible_mode and weapon.invisible_first_shot_mult > 1.0:
-		shot_damage_mult *= weapon.invisible_first_shot_mult
-		_end_invisible()
-	_next_shot_damage_mult = 1.0
-	_next_shot_speed_mult = 1.0
 	# Multi-shot: fire N rays with random yaw+pitch spread (MULTI-SHOT card).
 	var shots: int = weapon.get_shots_per_trigger()
 	var cam_right: Vector3 = camera.global_transform.basis.x
@@ -1120,7 +1093,7 @@ func _fire_rifle() -> void:
 			var theta: float = randf() * TAU
 			var r: float = spread * randf() * randf()
 			dir = base_dir.rotated(cam_up, r * cos(theta)).rotated(cam_right, r * sin(theta)).normalized()
-		_rifle_fired.rpc(origin, dir, player_id, shot_damage_mult, shot_speed_mult)
+		_rifle_fired.rpc(origin, dir, player_id)
 	# Barrel overheating — pump in heat per shot, scaled by damage. Cooldown
 	# happens passively in procedural_gun._process. Heavy / fast builds
 	# steady-state into a red glow; the base gun stays under the threshold.
@@ -1143,8 +1116,6 @@ func _rifle_fired(
 	origin: Vector3,
 	dir: Vector3,
 	shooter_id: int,
-	shot_damage_mult: float = 1.0,
-	shot_speed_mult: float = 1.0,
 ) -> void:
 	# Music: jump to high intensity the moment anyone fires this round.
 	# call_local means this RPC fires on every peer, but only the server
@@ -1168,7 +1139,7 @@ func _rifle_fired(
 	var bullet := Node3D.new()
 	bullet.set_script(bullet_script)
 	get_tree().current_scene.add_child(bullet)
-	bullet.setup(origin, dir, shooter_id, w, shot_damage_mult, shot_speed_mult)
+	bullet.setup(origin, dir, shooter_id, w)
 	BenchFlags.inc("bullets_spawned")
 
 	# Muzzle flash scales with bullet size — get_bullet_scale already folds
@@ -1549,15 +1520,11 @@ const TELEPORT_RELOAD := 2.0
 const TELEPORT_RANGE := 45.0
 const TELEPORT_OFFSET := 0.8
 
-var _invisible_timer: SceneTreeTimer = null
-
 func _use_special() -> void:
 	var mult: float = weapon.special_cooldown_mult
 	match weapon.special:
 		Weapon.SPECIAL_TELEPORT:
 			grenade_cooldown = TELEPORT_RELOAD * mult
-		Weapon.SPECIAL_INVISIBLE:
-			grenade_cooldown = INVISIBLE_RELOAD * mult
 		Weapon.SPECIAL_SWORD:
 			grenade_cooldown = MELEE_RELOAD * mult
 		_:
@@ -1580,18 +1547,12 @@ func _apply_special_mods_on_use() -> void:
 			reloading = false
 			rifle_cooldown = 0.0
 			_stop_reload_audio()
-	if weapon.special_empower_damage > 1.0 or weapon.special_empower_speed > 1.0:
-		_next_shot_damage_mult = maxf(_next_shot_damage_mult, weapon.special_empower_damage)
-		_next_shot_speed_mult = maxf(_next_shot_speed_mult, weapon.special_empower_speed)
 	cooldowns_changed.emit()
 
-func _activate_special_effect(is_echo: bool) -> void:
+func _activate_special_effect(_is_echo: bool) -> void:
 	match weapon.special:
 		Weapon.SPECIAL_TELEPORT:
 			_use_teleport()
-		Weapon.SPECIAL_INVISIBLE:
-			if not is_echo:
-				_use_invisible()
 		Weapon.SPECIAL_SWORD:
 			_swing_melee()
 		_:
@@ -1768,9 +1729,6 @@ func _spawn_teleport_vfx(pos: Vector3) -> void:
 		ltw.tween_property(light, "light_energy", 0.0, 0.3)
 		ltw.tween_callback(light.queue_free)
 
-func _use_invisible() -> void:
-	_invisible_on.rpc(INVISIBLE_DURATION)
-
 @rpc("any_peer", "call_local", "reliable")
 func _request_special_blast(pos: Vector3, radius: float, damage: float, shooter_id: int, color: Color) -> void:
 	if not multiplayer.is_server():
@@ -1779,21 +1737,6 @@ func _request_special_blast(pos: Vector3, radius: float, damage: float, shooter_
 		return
 	_spawn_bullet_blast(pos, radius, color)
 	_apply_bullet_splash(pos + Vector3.UP * 0.1, radius, damage, shooter_id)
-
-@rpc("authority", "call_local", "reliable")
-func _invisible_on(duration: float) -> void:
-	invisible_mode = true
-	_apply_ghost_visuals()
-	if _invisible_timer:
-		# timer objects are fire-and-forget; just invalidate by replacing reference
-		_invisible_timer = null
-	_invisible_timer = get_tree().create_timer(duration)
-	_invisible_timer.timeout.connect(_end_invisible, CONNECT_ONE_SHOT)
-
-func _end_invisible() -> void:
-	invisible_mode = false
-	_invisible_timer = null
-	_apply_ghost_visuals()
 
 # -------------------- GRENADE --------------------
 
@@ -2241,7 +2184,6 @@ func server_respawn(pos: Vector3, yaw: float = 0.0) -> void:
 	rotation.y = yaw
 	velocity = Vector3.ZERO
 	ghost_mode = false
-	invisible_mode = false
 	health = MAX_HEALTH + weapon.max_hp_bonus
 	_phoenix_charges_left = weapon.phoenix_revives
 	_poison_damage_left = 0.0
@@ -2249,8 +2191,6 @@ func server_respawn(pos: Vector3, yaw: float = 0.0) -> void:
 	_poison_tick_accum = 0.0
 	_slow_timer = 0.0
 	_slow_mult = 1.0
-	_next_shot_damage_mult = 1.0
-	_next_shot_speed_mult = 1.0
 	if _procedural_gun and _procedural_gun.has_method("reset_heat"):
 		_procedural_gun.reset_heat()
 	rifle_cooldown = 0.0
@@ -2301,7 +2241,6 @@ func set_ghost_mode(enabled: bool) -> void:
 	ghost_mode = enabled
 	if enabled:
 		frozen = false
-		invisible_mode = false
 		health = 0
 		# Detach the death-cam from the tumbling ragdoll head so the camera
 		# snaps back to the body at the death position. Otherwise we'd watch
@@ -2316,7 +2255,6 @@ func set_ghost_mode(enabled: bool) -> void:
 		if is_multiplayer_authority():
 			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	else:
-		invisible_mode = false
 		health = MAX_HEALTH + weapon.max_hp_bonus
 		_phoenix_charges_left = weapon.phoenix_revives
 	_apply_ghost_visuals()
@@ -2419,8 +2357,6 @@ func reset_weapon() -> void:
 	_poison_dps = 0.0
 	_slow_timer = 0.0
 	_slow_mult = 1.0
-	_next_shot_damage_mult = 1.0
-	_next_shot_speed_mult = 1.0
 	if _procedural_gun and _procedural_gun.has_method("reset_heat"):
 		_procedural_gun.reset_heat()
 	_update_gun_visuals()

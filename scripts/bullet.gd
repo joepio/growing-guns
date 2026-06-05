@@ -15,7 +15,6 @@ var distance_traveled: float = 0.0
 var ricochet_left: int = 0
 var world_pierce_left: int = 0
 var ricochet_hits: int = 0
-var shot_damage_mult: float = 1.0
 var excluded_rids: Array[RID] = []
 
 # Per-bullet ray query — allocated once in setup() and re-used every physics
@@ -37,14 +36,13 @@ var _max_trail_length: float = 2.0
 
 const HITSCAN_THRESHOLD := 550.0
 
-func setup(origin: Vector3, dir: Vector3, shooter: int, w: Weapon, damage_mult: float = 1.0, speed_mult: float = 1.0) -> void:
+func setup(origin: Vector3, dir: Vector3, shooter: int, w: Weapon) -> void:
 	global_position = origin
 	direction = dir.normalized()
 	shooter_id = shooter
 	weapon_stats = w
-	shot_damage_mult = damage_mult
 	add_to_group("projectiles")
-	speed = w.get_bullet_speed() * speed_mult
+	speed = w.get_bullet_speed()
 	velocity = direction * speed
 	ricochet_left = w.ricochet_count
 	world_pierce_left = w.world_pierce_count
@@ -184,7 +182,7 @@ func _do_hitscan() -> void:
 	queue_free()
 
 func _current_damage() -> float:
-	var dmg := weapon_stats.get_damage() * shot_damage_mult
+	var dmg := weapon_stats.get_damage()
 	if weapon_stats.grow_damage_per_meter > 0.0:
 		dmg *= 1.0 + distance_traveled * weapon_stats.grow_damage_per_meter
 	if ricochet_hits > 0 and weapon_stats.ricochet_damage_mult > 1.0:

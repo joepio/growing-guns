@@ -19,7 +19,6 @@ const BASE_BULLET_COLOR := Color(1.0, 0.9, 0.3)
 # --- Special ability (RMB). Cards swap which one is equipped. ---
 const SPECIAL_GRENADE := "grenade"
 const SPECIAL_TELEPORT := "teleport"
-const SPECIAL_INVISIBLE := "invisible"
 const SPECIAL_ZOOM := "zoom"
 const SPECIAL_SWORD := "sword"
 
@@ -79,10 +78,7 @@ const BASE_BULLET_DROP := 30.0                  # matches Player.GRAVITY so bull
 @export var special_echo_count: int = 0        # extra delayed special activations
 @export var special_reload_amount: int = 0     # ammo restored when special is used
 @export var special_cooldown_refund_on_hit: float = 0.0
-@export var special_empower_damage: float = 1.0
-@export var special_empower_speed: float = 1.0
 @export var teleport_blast_radius: float = 0.0
-@export var invisible_first_shot_mult: float = 1.0
 
 # --- Tracking ---
 @export var applied_cards: Array[String] = []
@@ -163,8 +159,5 @@ func reset() -> void:
 		special_echo_count = 0
 		special_reload_amount = 0
 		special_cooldown_refund_on_hit = 0.0
-		special_empower_damage = 1.0
-		special_empower_speed = 1.0
 		teleport_blast_radius = 0.0
-		invisible_first_shot_mult = 1.0
 		applied_cards.clear()
