@@ -214,9 +214,6 @@ var _heat_light: OmniLight3D = null
 var _bolts: Array[MeshInstance3D] = []
 var _bolt_rest_z: float = 0.0
 var _bolt_back: float = 0.0
-# Per-instance see-through fade (0 = opaque, 1 = fully transparent), applied to
-# every gun part. Stored so a rebuild re-applies it.
-var _see_through: float = 0.0
 var _bolt_travel: float = 0.0
 var _bolt_cycle_seconds: float = 0.08
 
@@ -760,21 +757,7 @@ func _rebuild() -> void:
 	# Re-apply current heat to the freshly-built barrel material so swapping
 	# weapons mid-burst doesn't visually reset the temperature.
 	_update_heat_visual()
-	# Re-apply the see-through fade so rebuilding preserves the current fade.
-	_apply_see_through()
 
-
-# Fade the whole gun via per-instance transparency (Forward+/Mobile) so the
-# effect does not touch each part's material or colour.
-# 0 = opaque, 1 = fully transparent.
-func set_see_through(amount: float) -> void:
-	_see_through = clampf(amount, 0.0, 1.0)
-	_apply_see_through()
-
-
-func _apply_see_through() -> void:
-	for mi in find_children("*", "MeshInstance3D", true, false):
-		mi.transparency = _see_through
 
 # Vented square shroud — 4 slotted plates around the barrel. Each plate
 # has a front and back end cap (full tangential width), two long edge
