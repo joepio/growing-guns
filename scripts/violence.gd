@@ -947,7 +947,7 @@ static func spawn_shockwave_ring(scene: Node, pos: Vector3, radius: float) -> vo
 
 # `vfx_max_*`: caller passes the budget caps so the global VFX flag stays
 # in player.gd (along with all other dev toggles).
-static func spawn_impact(scene: Node, pos: Vector3, color: Color = Color(1.0, 0.9, 0.3), scale_f: float = 1.0, dmg_ratio: float = 1.0, vfx_max_impact_dust: int = 5, normal: Vector3 = Vector3.UP, explosive_radius: float = 0.0) -> void:
+static func spawn_impact(scene: Node, pos: Vector3, color: Color = Color(1.0, 0.9, 0.3), scale_f: float = 1.0, dmg_ratio: float = 1.0, vfx_max_impact_dust: int = 5, normal: Vector3 = Vector3.UP, explosive_radius: float = 0.0, collider: Node = null) -> void:
 	if scene == null:
 		return
 	# Heavier guns leave a bigger crater of dust + a brighter spark, and once
@@ -960,12 +960,12 @@ static func spawn_impact(scene: Node, pos: Vector3, color: Color = Color(1.0, 0.
 	# damage. High-damage rounds add a glowing red-hot phase that fades; very
 	# heavy rounds add a brief bright blink on top of the existing spark light
 	# below. Round-reset clears the "craters" group.
-	spawn_crater(scene, pos, normal, dmg_ratio, scale_f)
+	spawn_crater(scene, pos, normal, dmg_ratio, scale_f, collider)
 	# Explosive rounds leave a larger soot ring AROUND the central crater —
 	# the wider blast scorch. Sized off the actual explosive_radius rather
 	# than damage so HEAVY-ROUNDS doesn't accidentally produce a giant ring.
 	if explosive_radius > 0.0:
-		spawn_blast_crater(scene, pos, normal, explosive_radius)
+		spawn_blast_crater(scene, pos, normal, explosive_radius, collider)
 
 	# Heavy hits flash a brief colored point light at the impact. Pistol-base
 	# shots stay dark so the GPU doesn't burn cycles on every plink.
@@ -1174,7 +1174,92 @@ static func _generate_crater_texture(rng: RandomNumberGenerator) -> Texture2D:
 			img.set_pixel(x, y, Color(1, 1, 1, alpha))
 	return ImageTexture.create_from_image(img)
 
-static func spawn_crater(scene: Node, pos: Vector3, normal: Vector3, dmg_ratio: float, scale_f: float = 1.0) -> void:
+
+static func _first_collision_shape(collider: Node) -> CollisionShape3D:
+	if collider == null:
+		return null
+	if collider is CollisionShape3D:
+		return collider as CollisionShape3D
+	for child in collider.get_children():
+		if child is CollisionShape3D:
+			return child as CollisionShape3D
+	return null
+
+
+static func _distance_to_box_edge(local_pos: Vector3, local_dir: Vector3, half: Vector3) -> float:
+	var d := local_dir.normalized()
+	var best := INF
+	if absf(d.x) > 0.0001:
+		best = minf(best, ((half.x if d.x > 0.0 else -half.x) - local_pos.x) / d.x)
+	if absf(d.y) > 0.0001:
+		best = minf(best, ((half.y if d.y > 0.0 else -half.y) - local_pos.y) / d.y)
+	if absf(d.z) > 0.0001:
+		best = minf(best, ((half.z if d.z > 0.0 else -half.z) - local_pos.z) / d.z)
+	return maxf(0.0, best) if best < INF else INF
+
+
+static func _distance_to_cylinder_edge(local_pos: Vector3, local_dir: Vector3, shape: CylinderShape3D) -> float:
+	var d := local_dir.normalized()
+	var best := INF
+	var half_h := shape.height * 0.5
+	if absf(d.y) > 0.0001:
+		best = minf(best, ((half_h if d.y > 0.0 else -half_h) - local_pos.y) / d.y)
+	var a := d.x * d.x + d.z * d.z
+	if a > 0.0001:
+		var b := 2.0 * (local_pos.x * d.x + local_pos.z * d.z)
+		var c := local_pos.x * local_pos.x + local_pos.z * local_pos.z - shape.radius * shape.radius
+		var disc := b * b - 4.0 * a * c
+		if disc >= 0.0:
+			var root := sqrt(disc)
+			var t1 := (-b - root) / (2.0 * a)
+			var t2 := (-b + root) / (2.0 * a)
+			if t1 > 0.0001:
+				best = minf(best, t1)
+			if t2 > 0.0001:
+				best = minf(best, t2)
+	return maxf(0.0, best) if best < INF else INF
+
+
+static func _crater_surface_scale(pos: Vector3, right: Vector3, bitan: Vector3, size: float, collider: Node) -> Vector2:
+	var col := _first_collision_shape(collider)
+	if col == null or col.shape == null:
+		return Vector2(size, size)
+	var local_pos: Vector3 = col.global_transform.affine_inverse() * pos
+	var inv_basis := col.global_transform.basis.inverse()
+	var right_local: Vector3 = (inv_basis * right).normalized()
+	var bitan_local: Vector3 = (inv_basis * bitan).normalized()
+	var edge_pad := 0.96
+	var max_right := INF
+	var max_bitan := INF
+	if col.shape is BoxShape3D:
+		var half: Vector3 = (col.shape as BoxShape3D).size * 0.5
+		max_right = minf(
+			_distance_to_box_edge(local_pos, right_local, half),
+			_distance_to_box_edge(local_pos, -right_local, half)
+		)
+		max_bitan = minf(
+			_distance_to_box_edge(local_pos, bitan_local, half),
+			_distance_to_box_edge(local_pos, -bitan_local, half)
+		)
+	elif col.shape is CylinderShape3D:
+		var cyl := col.shape as CylinderShape3D
+		max_right = minf(
+			_distance_to_cylinder_edge(local_pos, right_local, cyl),
+			_distance_to_cylinder_edge(local_pos, -right_local, cyl)
+		)
+		max_bitan = minf(
+			_distance_to_cylinder_edge(local_pos, bitan_local, cyl),
+			_distance_to_cylinder_edge(local_pos, -bitan_local, cyl)
+		)
+	if max_right == INF or max_bitan == INF:
+		return Vector2(size, size)
+	return Vector2(
+		maxf(0.035, minf(size, max_right * 2.0 * edge_pad)),
+		maxf(0.035, minf(size, max_bitan * 2.0 * edge_pad))
+	)
+
+
+static func spawn_crater(scene: Node, pos: Vector3, normal: Vector3, dmg_ratio: float, scale_f: float = 1.0, collider: Node = null) -> void:
 	if scene == null or not _can_spawn_crater_this_frame():
 		return
 	_ensure_crater_textures()
@@ -1204,8 +1289,10 @@ static func spawn_crater(scene: Node, pos: Vector3, normal: Vector3, dmg_ratio: 
 	# the PlaneMesh's XZ plane sits flush on the wall. Right-handed basis.
 	# Uniform scale + pre-rotation avoids stretching even if the wall or
 	# root node is non-uniformly scaled.
-	var b := Basis(right, n, bitan)
-	b = b.rotated(n, randf_range(-PI, PI)).scaled(Vector3.ONE * size)
+	var rot := randf_range(-PI, PI)
+	var b := Basis(right, n, bitan).rotated(n, rot)
+	var crater_scale := _crater_surface_scale(pos, b.x.normalized(), b.z.normalized(), size, collider)
+	b = b.scaled(Vector3(crater_scale.x, 1.0, crater_scale.y))
 	# Random jitter on the surface offset prevents Z-fighting when multiple 
 	# shots hit the exact same spot.
 	var offset_jitter: float = randf_range(-0.002, 0.002)
@@ -1291,7 +1378,7 @@ static func spawn_crater(scene: Node, pos: Vector3, normal: Vector3, dmg_ratio: 
 
 # Outer scorch ring left by an explosive bullet — diameter scales with the
 # blast radius, opacity is lower.
-static func spawn_blast_crater(scene: Node, pos: Vector3, normal: Vector3, blast_radius: float) -> void:
+static func spawn_blast_crater(scene: Node, pos: Vector3, normal: Vector3, blast_radius: float, collider: Node = null) -> void:
 	if scene == null or blast_radius <= 0.0 or _blast_craters_active >= MAX_BLAST_CRATERS:
 		return
 	_blast_craters_active += 1
@@ -1311,7 +1398,9 @@ static func spawn_blast_crater(scene: Node, pos: Vector3, normal: Vector3, blast
 	var right: Vector3 = helper.cross(n).normalized()
 	var bitan: Vector3 = n.cross(right).normalized()
 	# Apply uniform scale + pre-rotation directly to basis.
-	var b := Basis(right, n, bitan).rotated(n, randf_range(-PI, PI)).scaled(Vector3.ONE * size)
+	var b := Basis(right, n, bitan).rotated(n, randf_range(-PI, PI))
+	var crater_scale := _crater_surface_scale(pos, b.x.normalized(), b.z.normalized(), size, collider)
+	b = b.scaled(Vector3(crater_scale.x, 1.0, crater_scale.y))
 	# Sit slightly further off the surface than the central crater.
 	splat.global_transform = Transform3D(b, pos + n * 0.008)
 
