@@ -125,7 +125,7 @@ func show_card_pick(card_ids: Array) -> void:
 	# Treat the stick as already-engaged if the user happens to be holding it
 	# right now; the next push (after returning to neutral) will fire nav.
 	_card_stick_x_engaged = _stick_x_past_deadzone()
-	await get_tree().create_timer(0.75).timeout
+	await get_tree().create_timer(0.75, true).timeout
 	if is_card_pick_visible():
 		_card_pick_locked = false
 		_select_card(0)
@@ -483,6 +483,7 @@ func _build_card_overlay(root: Control) -> Dictionary:
 	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	overlay.mouse_filter = Control.MOUSE_FILTER_STOP
 	overlay.visible = false
+	overlay.process_mode = Node.PROCESS_MODE_ALWAYS
 	root.add_child(overlay)
 	var bg := ColorRect.new()
 	bg.color = Color(0.0, 0.0, 0.0, 0.70)
@@ -680,7 +681,7 @@ func _emit_selected_card() -> void:
 		else:
 			tw.tween_property(body, "scale", Vector2(0.5, 0.5), 0.35).set_trans(Tween.TRANS_CUBIC)
 			tw.tween_property(body, "modulate:a", 0.0, 0.28)
-	await get_tree().create_timer(0.48).timeout
+	await get_tree().create_timer(0.48, true).timeout
 	card_selected.emit(player_id, card_id)
 
 

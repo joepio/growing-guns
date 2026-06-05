@@ -22,6 +22,8 @@ enum State { WAITING, PLAYING, PICKING_CARD, MATCH_OVER }
 const CARDS_PER_PICK := 3
 const SPAWN_CAPSULE_RADIUS := 0.4
 const SPAWN_CAPSULE_HEIGHT := 1.8
+const SPAWN_CLEARANCE_RADIUS := 0.58
+const SPAWN_CLEARANCE_HEIGHT := 2.0
 const BOT_ID_BASE := 9000
 const BOT_ID_LIMIT := 9100  # IDs 9000..9099 are reserved for bots
 const BOT_NAME := "BOT"
@@ -34,9 +36,8 @@ const BOT_NAME_SUFFIXES: PackedStringArray = [
 	"Pulse", "Rush", "Scope", "Shift", "Slug", "Snap", "Volt", "Wire",
 ]
 const SPLIT_PLAYER_ID_BASE := 10000
-const IROH_GAME_ID_MIN_LENGTH := 40
-const IROH_GAME_ID_MAX_LENGTH := 96
-const IROH_GAME_ID_CHARS := "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+const IROH_GAME_ID_MIN_LENGTH := 20
+const IROH_GAME_ID_MAX_LENGTH := 256
 const JOIN_TIMEOUT_SECONDS := 12.0
 const PING_PROBE_INTERVAL := 2.0
 const PING_STALE_AFTER_MS := 7000
@@ -101,10 +102,11 @@ var local_player: Node3D
 # --- Match over / rematch ---
 var _rematch_overlay: Control = null
 var _rematch_subtitle: Label = null
+var _rematch_button: Button = null
 var _extend_button: Button = null
 var _exit_to_menu_button: Button = null
 var _rematch_requested: bool = false
-var _extend_votes: Dictionary = {} # id -> bool
+var _match_end_votes: Dictionary = {} # id -> "rematch" | "extend"
 
 # --- Dev panel (F1) ---
 # Owned by scripts/dev_panel.gd, instantiated in _ready and added under $HUD.
@@ -533,6 +535,11 @@ func _handle_global_cancel_or_pause(event: InputEvent) -> bool:
 			_ui_cancel_frame = Engine.get_process_frames()
 			_toggle_pause_menu()
 			return true
+	if _is_render_card_pick_visible():
+		if menu_back_pressed:
+			_ui_cancel_frame = Engine.get_process_frames()
+			return true
+		return false
 	if cancel_pressed or enter_pressed:
 		_ui_cancel_frame = Engine.get_process_frames()
 		if _dev_panel != null and _dev_panel.is_open():
@@ -757,13 +764,7 @@ func _pick_spawn(avoid: Array[Vector3] = []) -> Dictionary:
 	var found_clear: bool = false
 	for spawn in spawns:
 		var pos: Vector3 = spawn.global_position
-		if not _spawn_is_clear(pos):
-			continue
-		# Reject spawns hovering over the floor hole or off the edge of the
-		# arena — without ground beneath them the player just falls into lava.
-		# _spawn_is_clear only checks obstacle overlap, not whether anything
-		# is below the capsule.
-		if not _spawn_has_ground(pos):
+		if not _spawn_is_valid(pos):
 			continue
 		found_clear = true
 		var min_d: float = _min_distance(pos, avoid) if not avoid.is_empty() else 100.0
@@ -781,12 +782,11 @@ func _pick_spawn(avoid: Array[Vector3] = []) -> Dictionary:
 	if found_clear:
 		return {"pos": best_pos, "yaw": best_yaw}
 	# Last-ditch fallback: every spawn was blocked by an obstacle or the
-	# ground-check rejected them. Prefer one with ground (over an obstacle)
-	# over one in mid-air, so the player at least doesn't fall straight into
-	# lava on respawn.
+	# ground-check rejected them. Do not choose blocked-but-grounded spawns:
+	# that can wedge a player into a lava platform cover column.
 	for spawn in spawns:
 		var pos: Vector3 = (spawn as Node3D).global_position
-		if _spawn_has_ground(pos):
+		if _spawn_is_valid(pos):
 			return {"pos": pos, "yaw": _spawn_yaw_at(pos, arena_origin)}
 	var fb: Vector3 = (spawns[0] as Node3D).global_position
 	return {"pos": fb, "yaw": _spawn_yaw_at(fb, arena_origin)}
@@ -832,13 +832,17 @@ func _wall_within(pos: Vector3, yaw: float, dist: float) -> bool:
 
 func _spawn_is_clear(pos: Vector3) -> bool:
 	var shape := CapsuleShape3D.new()
-	shape.radius = SPAWN_CAPSULE_RADIUS
-	shape.height = SPAWN_CAPSULE_HEIGHT
+	shape.radius = SPAWN_CLEARANCE_RADIUS
+	shape.height = SPAWN_CLEARANCE_HEIGHT
 	var query := PhysicsShapeQueryParameters3D.new()
 	query.shape = shape
 	query.transform = Transform3D(Basis.IDENTITY, pos)
 	query.collision_mask = 1
 	return get_world_3d().direct_space_state.intersect_shape(query, 1).is_empty()
+
+
+func _spawn_is_valid(pos: Vector3) -> bool:
+	return _spawn_is_clear(pos) and _spawn_has_ground(pos)
 
 
 # Cast a ray straight down from the spawn point — if nothing on layer 1
@@ -847,9 +851,13 @@ func _spawn_is_clear(pos: Vector3) -> bool:
 # the instant they're respawned. Used to reject those spawns in _pick_spawn.
 func _spawn_has_ground(pos: Vector3) -> bool:
 	var space := get_world_3d().direct_space_state
-	var query := PhysicsRayQueryParameters3D.create(pos, pos + Vector3.DOWN * 12.0)
+	var query := PhysicsRayQueryParameters3D.create(pos + Vector3.UP * 0.2, pos + Vector3.DOWN * 20.0)
 	query.collision_mask = 1
-	return not space.intersect_ray(query).is_empty()
+	var hit := space.intersect_ray(query)
+	if hit.is_empty():
+		return false
+	var normal: Vector3 = hit.get("normal", Vector3.UP)
+	return normal.dot(Vector3.UP) >= 0.65
 
 @rpc("authority", "call_local", "reliable")
 func _do_spawn(
@@ -1804,6 +1812,12 @@ func _build_rematch_overlay() -> void:
 	_rematch_subtitle.add_theme_color_override("font_color", Color(0.86, 0.86, 0.95))
 	vb.add_child(_rematch_subtitle)
 
+	_rematch_button = Button.new()
+	_rematch_button.text = "REMATCH"
+	_rematch_button.custom_minimum_size = Vector2(260, 46)
+	_rematch_button.pressed.connect(_on_rematch_pressed)
+	vb.add_child(_rematch_button)
+
 	_extend_button = Button.new()
 	_extend_button.text = "5 MORE ROUNDS"
 	_extend_button.custom_minimum_size = Vector2(260, 46)
@@ -1820,6 +1834,9 @@ func _show_rematch_overlay(_winner_id: int) -> void:
 	if _rematch_overlay == null:
 		_build_rematch_overlay()
 	_rematch_requested = false
+	if _rematch_button:
+		_rematch_button.disabled = false
+		_rematch_button.text = "REMATCH"
 	_extend_button.disabled = false
 	_extend_button.text = "5 MORE ROUNDS"
 	_rematch_overlay.visible = true
@@ -2241,48 +2258,75 @@ func show_death_effect_for(player_id: int, show: bool) -> void:
 		return
 
 func _on_extend_pressed() -> void:
-	_extend_button.text = "VOTED TO EXTEND"
-	_extend_button.disabled = true
-	var vote_ids := _local_extend_vote_ids()
+	_submit_match_end_vote("extend")
+
+
+func _on_rematch_pressed() -> void:
+	_submit_match_end_vote("rematch")
+
+
+func _submit_match_end_vote(choice: String) -> void:
+	if _rematch_button:
+		_rematch_button.disabled = true
+		_rematch_button.text = "VOTED REMATCH" if choice == "rematch" else "REMATCH"
+	if _extend_button:
+		_extend_button.disabled = true
+		_extend_button.text = "VOTED 5 MORE" if choice == "extend" else "5 MORE ROUNDS"
+	var vote_ids := _local_match_end_vote_ids()
 	if multiplayer.is_server():
 		for player_id in vote_ids:
-			_server_extend_vote(int(player_id))
+			_server_match_end_vote(int(player_id), choice)
 	else:
 		for player_id in vote_ids:
-			_server_extend_vote.rpc_id(1, int(player_id))
+			_server_match_end_vote.rpc_id(1, int(player_id), choice)
 
 
-func _local_extend_vote_ids() -> Array[int]:
+func _local_match_end_vote_ids() -> Array[int]:
 	if _splitscreen and _splitscreen.is_enabled() and _splitscreen.has_method("_local_player_ids"):
 		return _splitscreen._local_player_ids()
 	return [multiplayer.get_unique_id()]
 
 @rpc("any_peer", "call_local", "reliable")
-func _server_extend_vote(player_id: int) -> void:
+func _server_match_end_vote(player_id: int, choice: String) -> void:
 	if not multiplayer.is_server():
 		return
 	if state != State.MATCH_OVER:
 		return
-	_extend_votes[player_id] = true
+	if choice != "rematch" and choice != "extend":
+		return
+	_match_end_votes[player_id] = choice
 
-	# Check if everyone has voted to extend
-	var all_voted := true
+	var all_humans_voted := true
+	var all_extend := true
 	for pid in NetworkManager.players:
-		# Bots always effectively vote 'yes' instantly
 		if _is_bot_id(int(pid)):
 			continue
-		if not _extend_votes.get(pid, false):
-			all_voted = false
+		if not _match_end_votes.has(pid):
+			all_humans_voted = false
 			break
+		if str(_match_end_votes.get(pid)) != "extend":
+			all_extend = false
 
-	if all_voted:
+	if not all_humans_voted:
+		return
+	if all_extend:
 		_extend_match()
+	else:
+		_rematch_match()
+
+
+func _rematch_match() -> void:
+	_match_end_votes.clear()
+	for player_id in NetworkManager.players:
+		show_death_effect_for(int(player_id), false)
+	_hide_rematch_overlay.rpc()
+	_restart_match()
 
 func _extend_match() -> void:
 	# Increase goal, hide UI, continue match
 	var new_goal := rounds_to_win + 5
 	_set_rounds_to_win.rpc(new_goal)
-	_extend_votes.clear()
+	_match_end_votes.clear()
 	for player_id in NetworkManager.players:
 		show_death_effect_for(int(player_id), false)
 
@@ -2305,6 +2349,13 @@ func _hide_rematch_overlay() -> void:
 	if _rematch_overlay:
 		_rematch_overlay.visible = false
 	_rematch_requested = false
+	_match_end_votes.clear()
+	if _rematch_button:
+		_rematch_button.disabled = false
+		_rematch_button.text = "REMATCH"
+	if _extend_button:
+		_extend_button.disabled = false
+		_extend_button.text = "5 MORE ROUNDS"
 
 @rpc("authority", "call_local", "reliable")
 func _broadcast_scores(scores: Dictionary) -> void:
@@ -3042,23 +3093,19 @@ func _update_join_form() -> void:
 			_pause_join_notice.text = "Valid ID - connecting automatically"
 			_pause_join_notice.add_theme_color_override("font_color", Color(0.58, 1.0, 0.65))
 		else:
-			_pause_join_notice.text = "That does not look like an iroh node ID"
+			_pause_join_notice.text = "Paste the full iroh game ID"
 			_pause_join_notice.add_theme_color_override("font_color", Color(1.0, 0.62, 0.50))
 
 
 func _extract_iroh_node_id(text: String) -> String:
 	var stripped := text.strip_edges()
-	var run := ""
-	for i in stripped.length():
-		var ch := stripped.substr(i, 1)
-		if IROH_GAME_ID_CHARS.contains(ch):
-			run += ch
-		else:
-			if run.length() >= IROH_GAME_ID_MIN_LENGTH and run.length() <= IROH_GAME_ID_MAX_LENGTH:
-				return run
-			run = ""
-	if run.length() >= IROH_GAME_ID_MIN_LENGTH and run.length() <= IROH_GAME_ID_MAX_LENGTH:
-		return run
+	var pieces := stripped.split("\n", false)
+	if pieces.size() == 1:
+		pieces = stripped.split("\t", false)
+	for raw_piece in pieces:
+		var piece := str(raw_piece).strip_edges()
+		if _is_valid_iroh_node_id(piece):
+			return piece
 	return stripped
 
 
@@ -3066,9 +3113,8 @@ func _is_valid_iroh_node_id(text: String) -> bool:
 	var id := text.strip_edges()
 	if id.length() < IROH_GAME_ID_MIN_LENGTH or id.length() > IROH_GAME_ID_MAX_LENGTH:
 		return false
-	for i in id.length():
-		if not IROH_GAME_ID_CHARS.contains(id.substr(i, 1)):
-			return false
+	if id.contains(" "):
+		return false
 	return true
 
 

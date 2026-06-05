@@ -646,6 +646,10 @@ func current_palette() -> Dictionary:
 	return PALETTES[absi(seed) % PALETTES.size()]
 
 
+func is_all_floor_lava() -> bool:
+	return _all_floor_lava or bool(last_stats.get("all_floor_lava", false))
+
+
 func _make_mat(color: Color, roughness: float) -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
 	m.albedo_color = color.lightened(0.08)
@@ -1075,9 +1079,12 @@ func _add_lava_island_cover(platforms: Array, rng: RandomNumberGenerator) -> voi
 		if radius < 3.0:
 			continue
 		var angle := rng.randf() * TAU
-		var off := rng.randf_range(0.0, radius * 0.35)
-		var cover_pos := Vector3(pos.x + cos(angle) * off, pos.y + 0.55, pos.z + sin(angle) * off)
 		var cover_size := Vector3(rng.randf_range(1.8, 2.8), 1.1, rng.randf_range(0.8, 1.2))
+		var cover_half := maxf(cover_size.x, cover_size.z) * 0.5
+		var min_off := minf(radius * 0.82, cover_half + 0.95)
+		var max_off := maxf(min_off, radius * 0.78)
+		var off := rng.randf_range(min_off, max_off)
+		var cover_pos := Vector3(pos.x + cos(angle) * off, pos.y + 0.55, pos.z + sin(angle) * off)
 		_add_static_box(cover_pos, cover_size, _mat_dark, rng.randf() * TAU)
 
 
