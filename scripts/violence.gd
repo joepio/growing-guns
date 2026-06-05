@@ -1096,9 +1096,11 @@ const MAX_CRATERS_PER_FRAME := 10       # cap allocations per tick
 # crater's QuadMesh tints the texture's white pixels with the dark scorch
 # colour (and emission for red-hot craters).
 static var _crater_textures: Array[Texture2D] = []
-# Single shared PlaneMesh — every crater scales its instance via the basis
-# instead of allocating a new mesh resource per shot.
-static var _shared_crater_mesh: PlaneMesh = null
+# Single shared circular disk mesh — every crater scales its instance via the
+# basis instead of allocating a new mesh resource per shot. Using real circular
+# geometry keeps the mark round even if texture filtering or edge clamps would
+# otherwise make a square alpha plane read as stretched.
+static var _shared_crater_mesh: Mesh = null
 # FIFO of live crater nodes — when full, the oldest is freed to make room.
 static var _crater_fifo: Array[Node] = []
 # Live counts updated via tree_exiting signals so we never over-spawn the
@@ -1109,10 +1111,36 @@ static var _blast_craters_active: int = 0
 static var _crater_frame_id: int = -1
 static var _craters_this_frame: int = 0
 
-static func _get_crater_mesh() -> PlaneMesh:
+static func _get_crater_mesh() -> Mesh:
 	if _shared_crater_mesh == null:
-		_shared_crater_mesh = PlaneMesh.new()
-		_shared_crater_mesh.size = Vector2.ONE
+		var mesh := ArrayMesh.new()
+		var verts := PackedVector3Array()
+		var normals := PackedVector3Array()
+		var uvs := PackedVector2Array()
+		var indices := PackedInt32Array()
+		var segments := 40
+		verts.append(Vector3.ZERO)
+		normals.append(Vector3.UP)
+		uvs.append(Vector2(0.5, 0.5))
+		for i in segments:
+			var a := TAU * float(i) / float(segments)
+			var x := cos(a) * 0.5
+			var z := sin(a) * 0.5
+			verts.append(Vector3(x, 0.0, z))
+			normals.append(Vector3.UP)
+			uvs.append(Vector2(0.5 + x, 0.5 + z))
+		for i in segments:
+			indices.append(0)
+			indices.append(i + 1)
+			indices.append(1 if i == segments - 1 else i + 2)
+		var arrays := []
+		arrays.resize(Mesh.ARRAY_MAX)
+		arrays[Mesh.ARRAY_VERTEX] = verts
+		arrays[Mesh.ARRAY_NORMAL] = normals
+		arrays[Mesh.ARRAY_TEX_UV] = uvs
+		arrays[Mesh.ARRAY_INDEX] = indices
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+		_shared_crater_mesh = mesh
 	return _shared_crater_mesh
 
 static func _can_spawn_crater_this_frame() -> bool:
@@ -1253,10 +1281,19 @@ static func _crater_surface_scale(pos: Vector3, right: Vector3, bitan: Vector3, 
 		)
 	if max_right == INF or max_bitan == INF:
 		return Vector2(size, size)
-	return Vector2(
-		maxf(0.035, minf(size, max_right * 2.0 * edge_pad)),
-		maxf(0.035, minf(size, max_bitan * 2.0 * edge_pad))
-	)
+	# Keep the texture circular. Near an edge, shrink uniformly to the tighter
+	# tangent bound instead of turning the scorch into an oval.
+	var uniform_size: float = minf(size, minf(max_right * 2.0 * edge_pad, max_bitan * 2.0 * edge_pad))
+	uniform_size = maxf(0.035, uniform_size)
+	return Vector2(uniform_size, uniform_size)
+
+
+static func _crater_basis(normal: Vector3, rotation: float = 0.0) -> Basis:
+	var n: Vector3 = normal.normalized() if normal.length_squared() > 0.001 else Vector3.UP
+	var helper: Vector3 = Vector3.UP if absf(n.dot(Vector3.UP)) < 0.99 else Vector3.RIGHT
+	var right: Vector3 = helper.cross(n).normalized()
+	var bitan: Vector3 = n.cross(right).normalized()
+	return Basis(right, n, bitan).rotated(n, rotation)
 
 
 static func spawn_crater(scene: Node, pos: Vector3, normal: Vector3, dmg_ratio: float, scale_f: float = 1.0, collider: Node = null) -> void:
@@ -1268,49 +1305,29 @@ static func spawn_crater(scene: Node, pos: Vector3, normal: Vector3, dmg_ratio: 
 	# This makes it much more obvious when a heavy round hits compared to a pistol.
 	var size: float = (0.08 + 0.14 * dmg) * scale_f
 
-	var splat := MeshInstance3D.new()
+	var splat := Decal.new()
 	splat.add_to_group("craters")
 	_enroll_crater(splat)
-
-	# PlaneMesh lies on the local XZ plane with its normal facing +Y, which
-	# matches our world surface normal naturally. Every crater scales its
-	# instance via the basis instead of allocating a new mesh resource.
-	splat.mesh = _get_crater_mesh()
-	splat.scale = Vector3(size, 1, size)
 
 	# Build the basis manually so the orientation is identical across every
 	# wall (look_at picks different up-vectors for axis-aligned normals,
 	# producing visibly inconsistent rotations — that's what was wrong).
 	var n: Vector3 = normal.normalized() if normal.length_squared() > 0.001 else Vector3.UP
-	var helper: Vector3 = Vector3.UP if absf(n.dot(Vector3.UP)) < 0.99 else Vector3.RIGHT
-	var right: Vector3 = helper.cross(n).normalized()
-	var bitan: Vector3 = n.cross(right).normalized()
-	# Columns are local X, Y, Z axes in world space. With Y = surface normal,
-	# the PlaneMesh's XZ plane sits flush on the wall. Right-handed basis.
-	# Uniform scale + pre-rotation avoids stretching even if the wall or
-	# root node is non-uniformly scaled.
 	var rot := randf_range(-PI, PI)
-	var b := Basis(right, n, bitan).rotated(n, rot)
+	var b := _crater_basis(n, rot)
 	var crater_scale := _crater_surface_scale(pos, b.x.normalized(), b.z.normalized(), size, collider)
-	b = b.scaled(Vector3(crater_scale.x, 1.0, crater_scale.y))
 	# Random jitter on the surface offset prevents Z-fighting when multiple 
 	# shots hit the exact same spot.
 	var offset_jitter: float = randf_range(-0.002, 0.002)
 	splat.global_transform = Transform3D(b, pos + n * (0.012 + offset_jitter))
-
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	# Ensure the base crater stays behind the additive glow layers.
-	mat.render_priority = 0
-	# Pick one of the 5 cached cloud textures.
-	# The texture's alpha shapes
-	# the silhouette; the material's albedo_color tints the dark scorch.
-	mat.albedo_texture = _crater_textures[randi() % _crater_textures.size()]
+	splat.size = Vector3(crater_scale.x, 0.08, crater_scale.y)
+	splat.texture_albedo = _crater_textures[randi() % _crater_textures.size()]
 	var darkness: float = randf_range(0.04, 0.10)
-	mat.albedo_color = Color(darkness, darkness, darkness, 1.0)
-	splat.material_override = mat
+	splat.modulate = Color(darkness, darkness, darkness, 1.0)
+	splat.albedo_mix = 1.0
+	splat.upper_fade = 0.0
+	splat.lower_fade = 0.0
+	splat.normal_fade = 0.35
 	scene.add_child(splat)
 
 	var hot: bool = dmg >= CRATER_RED_HOT_DMG
@@ -1373,7 +1390,7 @@ static func spawn_crater(scene: Node, pos: Vector3, normal: Vector3, dmg_ratio: 
 	# until round reset (or this fade completes), whichever comes first.
 	var fade_tw := splat.create_tween()
 	fade_tw.tween_interval(CRATER_LIFETIME * 0.6)
-	fade_tw.tween_property(mat, "albedo_color", Color(darkness, darkness, darkness, 0.0), CRATER_LIFETIME * 0.4)
+	fade_tw.tween_property(splat, "modulate", Color(darkness, darkness, darkness, 0.0), CRATER_LIFETIME * 0.4)
 	fade_tw.tween_callback(splat.queue_free)
 
 # Outer scorch ring left by an explosive bullet — diameter scales with the
@@ -1386,38 +1403,29 @@ static func spawn_blast_crater(scene: Node, pos: Vector3, normal: Vector3, blast
 	# Surface scorch is much narrower than the air blast.
 	var size: float = clampf(blast_radius * 0.45, 0.6, 3.5)
 
-	var splat := MeshInstance3D.new()
+	var splat := Decal.new()
 	splat.add_to_group("craters")
 	splat.tree_exiting.connect(func(): _blast_craters_active -= 1)
 
-	# Re-use shared mesh.
-	splat.mesh = _get_crater_mesh()
-
 	var n: Vector3 = normal.normalized() if normal.length_squared() > 0.001 else Vector3.UP
-	var helper: Vector3 = Vector3.UP if absf(n.dot(Vector3.UP)) < 0.99 else Vector3.RIGHT
-	var right: Vector3 = helper.cross(n).normalized()
-	var bitan: Vector3 = n.cross(right).normalized()
-	# Apply uniform scale + pre-rotation directly to basis.
-	var b := Basis(right, n, bitan).rotated(n, randf_range(-PI, PI))
+	var b := _crater_basis(n, randf_range(-PI, PI))
 	var crater_scale := _crater_surface_scale(pos, b.x.normalized(), b.z.normalized(), size, collider)
-	b = b.scaled(Vector3(crater_scale.x, 1.0, crater_scale.y))
 	# Sit slightly further off the surface than the central crater.
 	splat.global_transform = Transform3D(b, pos + n * 0.008)
-
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	mat.albedo_texture = _crater_textures[randi() % _crater_textures.size()]
+	splat.size = Vector3(crater_scale.x, 0.10, crater_scale.y)
+	splat.texture_albedo = _crater_textures[randi() % _crater_textures.size()]
 	# Lighter / greyer than the central crater — surface soot, not a hole.
 	var darkness: float = randf_range(0.10, 0.16)
-	mat.albedo_color = Color(darkness, darkness, darkness, 0.55)
-	splat.material_override = mat
+	splat.modulate = Color(darkness, darkness, darkness, 0.55)
+	splat.albedo_mix = 1.0
+	splat.upper_fade = 0.0
+	splat.lower_fade = 0.0
+	splat.normal_fade = 0.35
 	scene.add_child(splat)
 
 	var fade_tw := splat.create_tween()
 	fade_tw.tween_interval(CRATER_LIFETIME * 0.6)
-	fade_tw.tween_property(mat, "albedo_color", Color(darkness, darkness, darkness, 0.0), CRATER_LIFETIME * 0.4)
+	fade_tw.tween_property(splat, "modulate", Color(darkness, darkness, darkness, 0.0), CRATER_LIFETIME * 0.4)
 	fade_tw.tween_callback(splat.queue_free)
 
 # Cast cardinal-direction rays from an explosion center and drop a blast
