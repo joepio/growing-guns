@@ -26,6 +26,7 @@ var _lava_leak_duration := 20.0
 var _lava_floor_elapsed := 0.0
 var _lava_rise_height := 0.0
 var _lava_has_walls := false
+var _lava_floor_already_full := false
 var _lava_arena_half := 40.0
 var _lava_inset := 0.0
 var _lava_fronts: Array[MeshInstance3D] = []
@@ -58,6 +59,9 @@ func _process(delta: float) -> void:
 	_lava_floor_elapsed = maxf(0.0, _lava_leak_elapsed - wall_seconds)
 	var floor_duration := maxf(0.1, _lava_leak_duration - wall_seconds)
 	var floor_t := clampf(_lava_floor_elapsed / floor_duration, 0.0, 1.0)
+	if _lava_floor_already_full:
+		_lava_floor_elapsed = _lava_leak_duration
+		floor_t = 1.0
 	if _lava_has_walls and wall_t >= 1.0 and floor_t <= 0.0:
 		floor_t = 0.001
 	var eased_floor := floor_t * floor_t * (3.0 - 2.0 * floor_t)
@@ -81,6 +85,13 @@ func _on_regenerated(_stats: Dictionary) -> void:
 		generator.apply_palette_to_environment(world_env.environment, sun, fill_light)
 
 
+func is_all_floor_lava() -> bool:
+	if generator and generator.has_method("is_all_floor_lava"):
+		return bool(generator.is_all_floor_lava())
+	var stats: Dictionary = generator.get("last_stats") if generator else {}
+	return bool(stats.get("all_floor_lava", false))
+
+
 func start_lava_leak(spread_seconds: float = 20.0) -> void:
 	stop_lava_leak()
 	_lava_leak_duration = maxf(0.1, spread_seconds)
@@ -90,15 +101,17 @@ func start_lava_leak(spread_seconds: float = 20.0) -> void:
 	var arena_size: float = float(generator.get("arena_size")) if generator else 80.0
 	_lava_arena_half = arena_size * 0.5
 	var stats: Dictionary = generator.get("last_stats") if generator else {}
-	_lava_has_walls = not bool(stats.get("no_walls", false))
-	_lava_inset = 0.0
+	_lava_floor_already_full = bool(stats.get("all_floor_lava", false))
+	_lava_has_walls = (not _lava_floor_already_full) and not bool(stats.get("no_walls", false))
+	_lava_inset = _lava_arena_half if _lava_floor_already_full else 0.0
 	_build_lava_leak_nodes()
 	_lava_leak_active = true
-	_update_lava_leak_visuals(0.0, 0.0)
+	_update_lava_leak_visuals(1.0, 1.0 if _lava_floor_already_full else 0.0)
 
 
 func stop_lava_leak() -> void:
 	_lava_leak_active = false
+	_lava_floor_already_full = false
 	for n in _lava_fronts:
 		if n and is_instance_valid(n):
 			n.queue_free()
@@ -174,6 +187,10 @@ func _update_lava_leak_visuals(wall_t: float, floor_t: float) -> void:
 
 
 func _update_lava_front_visuals(floor_t: float) -> void:
+	if _lava_floor_already_full:
+		for front in _lava_fronts:
+			front.visible = false
+		return
 	var visible := floor_t > 0.0 or not _lava_has_walls
 	var h := _lava_arena_half
 	var i := clampf(maxf(_lava_inset, 0.08 if visible else 0.0), 0.0, h)
@@ -211,7 +228,8 @@ func _apply_lava_leak_damage(delta: float) -> void:
 			continue
 		var pid := int(p.get("player_id")) if p.get("player_id") != null else p.get_instance_id()
 		var p3 := p as Node3D
-		if p3.global_position.y > lava_y + 2.4:
+		var clearance := 1.15 if _lava_floor_already_full else 2.4
+		if p3.global_position.y > lava_y + clearance:
 			_lava_damage_accum_by_player.erase(pid)
 			continue
 		var pos_xz := Vector2(p3.global_position.x, p3.global_position.z)

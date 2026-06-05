@@ -676,6 +676,12 @@ func _physics_process(delta: float) -> void:
 			launching = false
 			if not is_bot:
 				SFX.landing(absf(pre_impact_y), global_position)
+		elif global_position.y < -30.0:
+			# If a spawn point is ever invalid, do not leave the player alive in
+			# launch state forever. Launch state gates shooting/movement, and
+			# environmental damage intentionally ignores it during valid descents.
+			launching = false
+			_handle_fell_off_map()
 		return
 
 	if frozen:
