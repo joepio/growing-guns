@@ -18,6 +18,16 @@ const VFX_TRANSIENT_LIGHTS := false
 const MINE_TRIGGER_RADIUS := 1.25
 const MINE_LIFETIME := 10.0        # mines quietly expire if nobody wanders in
 const SPEED_OF_SOUND := 343.0      # m/s — same constant as audio + visuals use
+const CLUSTER_POP_RADIUS := 3.5
+const CLUSTER_POP_DAMAGE := 35.0
+const FRAGMENT_COUNT := 7
+const FRAGMENT_RADIUS := 3.2
+const FRAGMENT_MAX_DAMAGE := 48.0
+const FRAGMENT_MIN_DAMAGE := 14.0
+const FRAGMENT_FUSE := 1.8
+const FRAGMENT_LAUNCH_SPEED := 13.0
+const FRAGMENT_LAUNCH_LIFT := 5.0
+const FRAGMENT_ARM_DELAY := 0.12
 
 # Static-cached shaders for the heat-distortion shell + shockwave ring. Each
 # explosion used to call Shader.new() with identical source, paying a fresh
@@ -112,6 +122,8 @@ static func warmup_shaders(scene: Node) -> void:
 
 @export var shooter_id: int = 1
 @export var is_mine: bool = false
+@export var is_cluster_parent: bool = false
+@export var is_fragment: bool = false
 @export var predicted_visual: bool = false
 
 var _age := 0.0
@@ -124,6 +136,60 @@ func _ready() -> void:
 		freeze = true
 		freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
 	body_entered.connect(_on_body_entered)
+	if is_fragment:
+		scale = Vector3(0.55, 0.55, 0.55)
+		_tint_mesh(Color(1.0, 0.42, 0.12))
+	elif is_cluster_parent:
+		scale = Vector3(1.22, 1.22, 1.22)
+		_tint_mesh(Color(1.0, 0.55, 0.15))
+
+
+func _tint_mesh(color: Color) -> void:
+	var mesh := get_node_or_null("Mesh") as MeshInstance3D
+	if mesh == null:
+		return
+	var mat := mesh.get_active_material(0)
+	if mat == null:
+		return
+	var dup := mat.duplicate() as StandardMaterial3D
+	dup.albedo_color = color
+	dup.emission = color.lerp(Color(1.0, 0.85, 0.35), 0.45)
+	dup.emission_energy_multiplier = 1.1
+	mesh.material_override = dup
+
+
+func _blast_radius() -> float:
+	if is_fragment:
+		return FRAGMENT_RADIUS
+	if is_cluster_parent:
+		return CLUSTER_POP_RADIUS
+	return RADIUS
+
+
+func _max_damage() -> float:
+	if is_fragment:
+		return FRAGMENT_MAX_DAMAGE
+	if is_cluster_parent:
+		return CLUSTER_POP_DAMAGE
+	return MAX_DAMAGE
+
+
+func _min_damage() -> float:
+	if is_fragment:
+		return FRAGMENT_MIN_DAMAGE
+	return MIN_DAMAGE
+
+
+func _arm_delay() -> float:
+	if is_fragment:
+		return FRAGMENT_ARM_DELAY
+	return ARM_DELAY
+
+
+func _fuse_time() -> float:
+	if is_fragment:
+		return FRAGMENT_FUSE
+	return FUSE
 
 func _physics_process(delta: float) -> void:
 	if _exploded:
@@ -136,14 +202,14 @@ func _physics_process(delta: float) -> void:
 			_disarm()
 		else:
 			_maybe_trigger_mine()
-	elif _age >= FUSE:
+	elif _age >= _fuse_time():
 		_explode()
 
 func _on_body_entered(_body: Node) -> void:
 	# Only the authoritative server triggers explosions; clients are passive visuals.
 	if not multiplayer.is_server() or _exploded:
 		return
-	if _age < ARM_DELAY:
+	if _age < _arm_delay():
 		return
 	if is_mine:
 		return
@@ -182,11 +248,15 @@ func _remove_quietly() -> void:
 
 func _explode() -> void:
 	_exploded = true
+	if is_cluster_parent:
+		_explode_cluster_parent()
+		return
+	var radius := _blast_radius()
 	Blast.apply(
 		get_tree().current_scene,
 		global_position,
-		RADIUS,
-		float(MAX_DAMAGE),
+		radius,
+		float(_max_damage()),
 		shooter_id,
 		MIN_FALLOFF,
 		0.4,
@@ -194,23 +264,106 @@ func _explode() -> void:
 		7.2,
 		Blast.LOS_CENTER,
 		false,
-		MIN_DAMAGE,
+		_min_damage(),
 		SPEED_OF_SOUND
 	)
 	_do_vfx.rpc()
 
+
+func _explode_cluster_parent() -> void:
+	var pos := global_position
+	var radius := CLUSTER_POP_RADIUS
+	Blast.apply(
+		get_tree().current_scene,
+		pos,
+		radius,
+		CLUSTER_POP_DAMAGE,
+		shooter_id,
+		MIN_FALLOFF,
+		0.35,
+		14.0,
+		5.5,
+		Blast.LOS_CENTER,
+		false,
+		12.0,
+		SPEED_OF_SOUND
+	)
+	_spawn_cluster_fragments.rpc(pos, shooter_id)
+	_do_cluster_pop_vfx.rpc(pos, radius)
+
+
+@rpc("authority", "call_local", "reliable")
+func _spawn_cluster_fragments(origin: Vector3, shooter: int) -> void:
+	var scene: PackedScene = load("res://scenes/grenade.tscn")
+	var cluster_id: int = hash([origin.x, origin.y, origin.z, shooter]) & 0x7fffffff
+	var rng := RandomNumberGenerator.new()
+	rng.seed = cluster_id
+	var golden := PI * (3.0 - sqrt(5.0))
+	for i in FRAGMENT_COUNT:
+		var g := scene.instantiate()
+		g.is_fragment = true
+		g.shooter_id = shooter
+		g.name = "CF_%d_%x_%d" % [shooter, cluster_id, i]
+		get_tree().current_scene.add_child(g)
+		g.global_position = origin + Vector3.UP * 0.15
+		var y := 1.0 - (float(i) + 0.5) / float(FRAGMENT_COUNT) * 2.0
+		var r := sqrt(maxf(0.0, 1.0 - y * y))
+		var theta := golden * float(i)
+		var dir := Vector3(cos(theta) * r, y, sin(theta) * r).normalized()
+		dir = dir.lerp(Vector3.UP, 0.18).normalized()
+		dir = dir.rotated(Vector3.UP, rng.randf_range(-0.35, 0.35))
+		g.linear_velocity = dir * (FRAGMENT_LAUNCH_SPEED + rng.randf_range(-1.5, 2.0)) \
+			+ Vector3(0.0, FRAGMENT_LAUNCH_LIFT + rng.randf_range(-0.5, 1.0), 0.0)
+
+
+@rpc("authority", "call_local", "reliable")
+func _do_cluster_pop_vfx(pos: Vector3, radius: float) -> void:
+	SFX.explosion(pos, radius)
+	var scene: Node = get_tree().current_scene
+	if scene and scene.has_method("trigger_explosion_sidechain"):
+		scene.trigger_explosion_sidechain(pos, radius, 0.85)
+	Violence.spawn_blast_scorches(scene, pos, radius)
+	var core := MeshInstance3D.new()
+	var core_mesh := SphereMesh.new()
+	core_mesh.radius = 0.45
+	core_mesh.height = 0.9
+	core.mesh = core_mesh
+	var core_mat := StandardMaterial3D.new()
+	core_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	core_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	core_mat.albedo_color = Color(1.0, 0.72, 0.22, 0.12)
+	core_mat.emission_enabled = true
+	core_mat.emission = Color(1.0, 0.55, 0.12)
+	core_mat.emission_energy_multiplier = 14.0
+	core_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	core.material_override = core_mat
+	core.global_position = pos
+	scene.add_child(core)
+	var tw := core.create_tween().set_parallel(true)
+	var dur := 0.14
+	var target_scale := Vector3.ONE * maxf(0.01, radius / core_mesh.radius)
+	tw.tween_property(core, "scale", target_scale, dur)
+	tw.tween_property(core_mat, "albedo_color", Color(1.0, 0.35, 0.05, 0.0), dur)
+	tw.tween_property(core_mat, "emission_energy_multiplier", 0.0, dur * 0.8)
+	tw.chain().tween_callback(core.queue_free)
+	var lp: Node = scene.get("local_player")
+	if lp and is_instance_valid(lp) and lp.has_method("apply_explosion_view_punch"):
+		lp.apply_explosion_view_punch(pos, radius, 0.9)
+	queue_free()
+
 @rpc("authority", "call_local", "reliable")
 func _do_vfx() -> void:
-	SFX.explosion(global_position, RADIUS)
+	var radius := _blast_radius()
+	SFX.explosion(global_position, radius)
 	var pos: Vector3 = global_position
 	var scene: Node = get_tree().current_scene
 	if scene and scene.has_method("trigger_explosion_sidechain"):
-		scene.trigger_explosion_sidechain(pos, RADIUS, 1.25)
-	_spawn_heat_distortion(scene, pos, RADIUS, 0.3, 0.055)
-	_spawn_shockwave_ring(scene, pos, RADIUS)
+		scene.trigger_explosion_sidechain(pos, radius, 1.25)
+	_spawn_heat_distortion(scene, pos, radius, 0.3, 0.055)
+	_spawn_shockwave_ring(scene, pos, radius)
 	# Surface scorch rings — same helper as explosive bullets, raycasts in
 	# the 6 cardinal directions and drops a soot crater on each surface hit.
-	Violence.spawn_blast_scorches(scene, pos, RADIUS)
+	Violence.spawn_blast_scorches(scene, pos, radius)
 
 	# --- Bright white-hot core flash (very short)
 	var core := MeshInstance3D.new()
@@ -231,7 +384,7 @@ func _do_vfx() -> void:
 	scene.add_child(core)
 	var ctw := core.create_tween().set_parallel(true)
 	var core_expand_time := 0.17
-	var core_target_scale := Vector3.ONE * maxf(0.01, RADIUS / core_mesh.radius)
+	var core_target_scale := Vector3.ONE * maxf(0.01, radius / core_mesh.radius)
 	ctw.tween_property(core, "scale", core_target_scale, core_expand_time)\
 		.set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_IN_OUT)
 	ctw.tween_property(core_mat, "albedo_color", Color(1.0, 0.6, 0.18, 0.36), core_expand_time * 0.5)\
@@ -265,8 +418,8 @@ func _do_vfx() -> void:
 	# Shockwave expands at the speed of sound (343 m/s) so the visual wave
 	# arrives at distant viewers at the same instant the audio does (which is
 	# delayed by distance/343 in SFX). Min 30 ms so tiny blasts stay visible.
-	var wave_expand_time := maxf(0.03, RADIUS / 343.0)
-	var wave_target_scale := Vector3.ONE * maxf(0.01, (RADIUS * 1.05) / wave_mesh.radius)
+	var wave_expand_time := maxf(0.03, radius / 343.0)
+	var wave_target_scale := Vector3.ONE * maxf(0.01, (radius * 1.05) / wave_mesh.radius)
 	wtw.tween_property(wave, "scale", wave_target_scale, wave_expand_time)\
 		.set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_IN_OUT)
 	wtw.tween_property(wave_mat, "albedo_color", Color(1.0, 0.42, 0.08, 0.14), wave_expand_time * 0.5)\
@@ -281,8 +434,8 @@ func _do_vfx() -> void:
 	# below, but only ~60 ms so it reads as the moment-of-detonation spike.
 	var flash := OmniLight3D.new()
 	flash.light_color = Color(1.0, 0.98, 0.92)
-	flash.light_energy = 100.0 + RADIUS * 14.0
-	flash.omni_range = maxf(40.0, RADIUS * 6.0)
+	flash.light_energy = 100.0 + radius * 14.0
+	flash.omni_range = maxf(40.0, radius * 6.0)
 	flash.position = pos
 	scene.add_child(flash)
 	var ftw := flash.create_tween()
@@ -295,8 +448,8 @@ func _do_vfx() -> void:
 	# evolves, distinct from the scene-wide initial spike.
 	var core_light := OmniLight3D.new()
 	core_light.light_color = Color(1.0, 0.95, 0.78)
-	core_light.light_energy = 60.0 + RADIUS * 8.0
-	core_light.omni_range = maxf(8.0, RADIUS * 1.4)
+	core_light.light_energy = 60.0 + radius * 8.0
+	core_light.omni_range = maxf(8.0, radius * 1.4)
 	core_light.position = pos
 	scene.add_child(core_light)
 	var ctlw := core_light.create_tween()
@@ -325,7 +478,7 @@ func _do_vfx() -> void:
 	# --- Local camera shake with distance falloff
 	var lp: Node = scene.get("local_player")
 	if lp and is_instance_valid(lp) and lp.has_method("apply_explosion_view_punch"):
-		lp.apply_explosion_view_punch(pos, RADIUS, 1.25)
+		lp.apply_explosion_view_punch(pos, radius, 1.25)
 
 	queue_free()
 

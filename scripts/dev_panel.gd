@@ -141,8 +141,6 @@ func _refresh() -> void:
 
 	_player_picker()
 	_pickup_spawner_section()
-	# Cards first — rare ones (uzi, bazooka, etc.) at the top so they're easy
-	# to spam-add for testing. Common cards follow.
 	_heading("— CARDS —", Color(1.0, 0.6, 0.9), 15)
 	if target and is_instance_valid(target):
 		var applied: Array = target.weapon.applied_cards
@@ -151,11 +149,6 @@ func _refresh() -> void:
 			counts[cid] = counts.get(cid, 0) + 1
 		var sorted_cards: Array = CardLibrary.all().duplicate()
 		sorted_cards.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-			# rare (0) before common (1); stable name order within each.
-			var ra: int = 0 if str(a.get("rarity", "common")) == "rare" else 1
-			var rb: int = 0 if str(b.get("rarity", "common")) == "rare" else 1
-			if ra != rb:
-				return ra < rb
 			return str(a.get("name", "")) < str(b.get("name", "")))
 		for card in sorted_cards:
 			_card_row(card, counts.get(card.id, 0))
