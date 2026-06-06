@@ -6,6 +6,8 @@ const DEV_PANEL_SCRIPT := preload("res://scripts/dev_panel.gd")
 const RENDER_PLAYER_SCRIPT := preload("res://scripts/render_player.gd")
 const SPLITSCREEN_MANAGER_SCRIPT := preload("res://scripts/splitscreen_manager.gd")
 const PICKUP_ITEM_SCRIPT := preload("res://scripts/pickup_item.gd")
+const WEAPON_NAME_SCRIPT := preload("res://scripts/weapon_name.gd")
+const ROUND_MODIFIERS_SCRIPT := preload("res://scripts/round_modifiers.gd")
 
 const PICKUP_SPAWN_MEAN := 20.0
 const PICKUP_SPAWN_JITTER := 7.0
@@ -149,6 +151,8 @@ var _network_status_hide_token: int = 0
 var _kill_feed: VBoxContainer = null
 var _pickup_toast: Label = null
 var _pickup_toast_timer: Timer = null
+var _modifier_toast: Label = null
+var _modifier_toast_timer: Timer = null
 var _splitscreen_hint: Label = null
 var _join_auto_submit_text: String = ""
 var _join_in_progress: bool = false
@@ -161,6 +165,12 @@ var _high_ping_warn_timer: float = 0.0
 var _tab_refresh_timer: float = 0.0
 var _explosion_flash_overlay: ColorRect = null
 var _arena_env: Environment = null
+var current_round_modifier: String = ""
+var _fog_base_saved: bool = false
+var _fog_base_mode: int = 0
+var _fog_base_density: float = 0.012
+var _fog_base_depth_begin: float = 0.0
+var _fog_base_depth_end: float = 0.0
 var _base_tonemap_exposure: float = 1.0
 var _exposure_duck: float = 0.0
 var _exposure_duck_vel: float = 0.0
@@ -1179,9 +1189,52 @@ func _maybe_start_match() -> void:
 			p.reset_weapon.rpc()
 	_start_round_now()
 
+func get_gravity_mult() -> float:
+	return ROUND_MODIFIERS_SCRIPT.gravity_mult(current_round_modifier)
+
+
+func get_bullet_drop_mult() -> float:
+	return ROUND_MODIFIERS_SCRIPT.bullet_drop_mult(current_round_modifier)
+
+
+func get_body_damage_mult() -> float:
+	return ROUND_MODIFIERS_SCRIPT.body_damage_mult(current_round_modifier)
+
+
+func get_pickup_spawn_mult() -> float:
+	return ROUND_MODIFIERS_SCRIPT.pickup_spawn_mult(current_round_modifier)
+
+
+func _apply_gun_swap(round_players: Array[Node]) -> void:
+	if round_players.size() < 2:
+		return
+	var card_sets: Array = []
+	for p in round_players:
+		card_sets.append(p.weapon.applied_cards.duplicate())
+	var order := _gun_swap_permutation(round_players.size())
+	for i in round_players.size():
+		round_players[i].apply_swapped_cards.rpc(card_sets[order[i]])
+
+
+func _gun_swap_permutation(n: int) -> Array[int]:
+	var order: Array[int] = []
+	for i in n:
+		order.append(i)
+	order.shuffle()
+	for i in n:
+		if order[i] != i:
+			return order
+	var rotated: Array[int] = []
+	for i in n:
+		rotated.append((i + 1) % n)
+	return rotated
+
+
 func _start_round_now() -> void:
 	_reset_round_tracking()
 	_round_damage_seen = false
+	if multiplayer.is_server():
+		_set_round_modifier.rpc(ROUND_MODIFIERS_SCRIPT.pick_for_round())
 	# Round opens at "low" — the track plays calmly until the first shot.
 	# Shooting bumps to mid, taking damage bumps to high.
 	_round_music_level = 1
@@ -1218,11 +1271,18 @@ func _start_round_now() -> void:
 	# The first pick anchors the height target so subsequent picks land near
 	# the same elevation.
 	var used: Array[Vector3] = []
+	var round_players: Array[Node] = []
 	for pid in NetworkManager.players:
 		var p := players_root.get_node_or_null(str(pid))
 		if not p:
 			continue
+		round_players.append(p)
 		p.rebuild_weapon_from_cards.rpc()
+	if multiplayer.is_server() and ROUND_MODIFIERS_SCRIPT.needs_gun_swap(current_round_modifier):
+		_apply_gun_swap(round_players)
+	for p in round_players:
+		if ROUND_MODIFIERS_SCRIPT.applies_weapon(current_round_modifier):
+			p.apply_round_modifier_weapon.rpc(current_round_modifier)
 		var pick := _pick_spawn(used)
 		used.append(pick["pos"])
 		p.set_ghost_mode.rpc(false)
@@ -1242,18 +1302,17 @@ func _start_round_now() -> void:
 	_clear_craters.rpc()
 	_clear_blood_splats.rpc()
 	_clear_pickups.rpc()
+	_show_round_modifier_on_screens.rpc()
+	_show_round_loadout_names.rpc()
+	if multiplayer.is_server() and ROUND_MODIFIERS_SCRIPT.lava_immediate(current_round_modifier):
+		_lava_leak_started = true
+		var arena_node := get_node_or_null("Arena")
+		if arena_node and arena_node.has_method("start_lava_leak"):
+			arena_node.start_lava_leak(LAVA_LEAK_SPREAD_SECONDS)
 	_hide_rematch_overlay.rpc()
-	# Warm shot + explosion synths for whichever weapons are in play this
-	# round (and a few common explosion radii) during the rocket-spawn window
-	# so the first bullet / first grenade doesn't pay 30-50ms of audio synth
-	# mid-fight. Yields one cache fill per frame; cache hits are instant.
 	_warmup_round_audio()
-	# Force the heat-distortion + shockwave shader pipelines to compile now
-	# while the camera is settling in, not on the first explosion.
 	if has_node("Arena"):
 		preload("res://scripts/grenade.gd").warmup_shaders($Arena)
-	# Clear any leftover round-end banner ("PICKING A CARD…", "WAITING FOR …",
-	# etc.) so it doesn't bleed into the new round.
 	_announce.rpc("", 0)
 
 func _update_lava_leak(delta: float) -> void:
@@ -1282,8 +1341,6 @@ func _stop_lava_leak() -> void:
 func _set_music_energy(level: int, immediate: bool = false, next_bar: bool = false) -> void:
 	if level > 0:
 		_round_music_level = level
-	# Slider at the bottom of its range = muted; skip pumping energy so the
-	# bus stays quiet between rounds.
 	if _music_db <= MUSIC_DB_MIN + 0.5:
 		ProceduralMusic.set_energy(0, true)
 		return
@@ -1292,7 +1349,6 @@ func _set_music_energy(level: int, immediate: bool = false, next_bar: bool = fal
 @rpc("authority", "call_local", "reliable")
 func _set_music_track(seed: int, round_index: int) -> void:
 	ProceduralMusic.generate_track(seed, round_index)
-
 
 @rpc("authority", "call_local", "reliable")
 func _rebake_music() -> void:
@@ -1447,6 +1503,8 @@ func _swap_arena(map_index: int, map_seed: int = 0) -> void:
 	if we and we.environment:
 		_arena_env = we.environment
 		_base_tonemap_exposure = _arena_env.tonemap_exposure
+	_fog_base_saved = false
+	_apply_round_modifier_environment()
 
 func _reset_round_tracking() -> void:
 	pending_picker_id = 0
@@ -1471,7 +1529,7 @@ func _update_pickup_spawner(delta: float) -> void:
 	_pickup_spawn_timer -= delta
 	if _pickup_spawn_timer > 0.0:
 		return
-	_pickup_spawn_timer = PICKUP_SPAWN_MEAN + randf_range(-PICKUP_SPAWN_JITTER, PICKUP_SPAWN_JITTER)
+	_pickup_spawn_timer = (PICKUP_SPAWN_MEAN + randf_range(-PICKUP_SPAWN_JITTER, PICKUP_SPAWN_JITTER)) / maxf(get_pickup_spawn_mult(), 0.1)
 	var kind: String = PICKUP_ITEM_SCRIPT.KINDS[randi() % PICKUP_ITEM_SCRIPT.KINDS.size()]
 	_spawn_pickup_item_with_fx.rpc(kind, _random_pickup_spawn_pos())
 
@@ -1541,6 +1599,104 @@ func _clear_pickups() -> void:
 	for node in get_tree().get_nodes_in_group("pickups"):
 		if is_instance_valid(node):
 			node.queue_free()
+
+@rpc("authority", "call_local", "reliable")
+func _set_round_modifier(mod_id: String) -> void:
+	current_round_modifier = mod_id if mod_id in ROUND_MODIFIERS_SCRIPT.IDS else ""
+	_apply_round_modifier_environment()
+
+func _apply_round_modifier_environment() -> void:
+	if _arena_env == null:
+		return
+	if current_round_modifier == "fog":
+		if not _fog_base_saved:
+			_fog_base_mode = _arena_env.fog_mode
+			_fog_base_density = _arena_env.fog_density
+			_fog_base_depth_begin = _arena_env.fog_depth_begin
+			_fog_base_depth_end = _arena_env.fog_depth_end
+			_fog_base_saved = true
+		_arena_env.fog_enabled = true
+		_arena_env.fog_mode = Environment.FOG_MODE_DEPTH
+		_arena_env.fog_depth_begin = 10.0
+		_arena_env.fog_depth_end = 35.0
+	elif _fog_base_saved:
+		_arena_env.fog_mode = _fog_base_mode as Environment.FogMode
+		_arena_env.fog_density = _fog_base_density
+		_arena_env.fog_depth_begin = _fog_base_depth_begin
+		_arena_env.fog_depth_end = _fog_base_depth_end
+		_fog_base_saved = false
+
+@rpc("authority", "call_local", "reliable")
+func _show_round_loadout_names() -> void:
+	var ids: Array[int] = []
+	if _splitscreen and _splitscreen.is_enabled() and _splitscreen.has_method("_local_player_ids"):
+		ids = _splitscreen._local_player_ids()
+	elif local_player and is_instance_valid(local_player):
+		ids = [int(local_player.get("player_id"))]
+	elif multiplayer.get_unique_id() > 0:
+		ids = [multiplayer.get_unique_id()]
+	var lines: PackedStringArray = PackedStringArray()
+	for pid in ids:
+		var p := players_root.get_node_or_null(str(pid))
+		if p == null or p.get("weapon") == null:
+			continue
+		if p.weapon.applied_cards.is_empty():
+			continue
+		var pname: String = str(NetworkManager.players.get(pid, "Player"))
+		lines.append("%s: %s" % [pname, WEAPON_NAME_SCRIPT.generate(p.weapon)])
+	if lines.is_empty():
+		return
+	_announce.rpc("\n".join(lines), 2.2, 22)
+
+
+@rpc("authority", "call_local", "reliable")
+func _show_round_modifier_on_screens() -> void:
+	if current_round_modifier.is_empty():
+		return
+	if _splitscreen and _splitscreen.is_enabled() and _splitscreen.has_method("show_round_modifier_for_all"):
+		_splitscreen.show_round_modifier_for_all(current_round_modifier)
+		return
+	_show_modifier_toast(current_round_modifier)
+
+
+func _build_modifier_toast() -> void:
+	if _modifier_toast != null:
+		return
+	_modifier_toast = Label.new()
+	_modifier_toast.name = "ModifierToast"
+	_modifier_toast.visible = false
+	_modifier_toast.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_modifier_toast.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_modifier_toast.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_modifier_toast.set_anchors_and_offsets_preset(Control.PRESET_CENTER_TOP)
+	_modifier_toast.offset_top = 56.0
+	_modifier_toast.offset_bottom = 156.0
+	_modifier_toast.offset_left = -240.0
+	_modifier_toast.offset_right = 240.0
+	_modifier_toast.add_theme_font_size_override("font_size", 32)
+	_modifier_toast.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.92))
+	_modifier_toast.add_theme_constant_override("outline_size", 6)
+	$HUD.add_child(_modifier_toast)
+
+	_modifier_toast_timer = Timer.new()
+	_modifier_toast_timer.name = "ModifierToastTimer"
+	_modifier_toast_timer.one_shot = true
+	_modifier_toast_timer.timeout.connect(func() -> void:
+		if _modifier_toast:
+			_modifier_toast.visible = false)
+	add_child(_modifier_toast_timer)
+
+
+func _show_modifier_toast(mod_id: String) -> void:
+	_build_modifier_toast()
+	var info: Dictionary = ROUND_MODIFIERS_SCRIPT.display_info(mod_id)
+	var subtitle: String = str(info.subtitle)
+	_modifier_toast.text = info.title if subtitle.is_empty() else "%s\n%s" % [info.title, subtitle]
+	_modifier_toast.add_theme_color_override("font_color", info.color)
+	_modifier_toast.visible = true
+	_modifier_toast_timer.wait_time = 2.5
+	_modifier_toast_timer.start()
+
 
 func report_kill(killer_id: int, victim_id: int) -> void:
 	# Called on the server by Player._report_death. In 3+ player rounds,
@@ -2520,13 +2676,13 @@ func _broadcast_scores(scores: Dictionary) -> void:
 	round_wins = scores
 	_update_scoreboard()
 
-func show_pickup_collected_for(player_id: int, kind: String) -> void:
+func show_pickup_collected_for(player_id: int, kind: String, subtitle_override: String = "") -> void:
 	if _splitscreen and _splitscreen.is_enabled() and _splitscreen.has_method("show_pickup_collected_for"):
-		if _splitscreen.show_pickup_collected_for(player_id, kind):
+		if _splitscreen.show_pickup_collected_for(player_id, kind, subtitle_override):
 			return
 	if not _is_local_human_player(player_id):
 		return
-	_show_pickup_toast(kind)
+	_show_pickup_toast(kind, subtitle_override)
 
 
 func _is_local_human_player(player_id: int) -> bool:
@@ -2565,10 +2721,11 @@ func _build_pickup_toast() -> void:
 	add_child(_pickup_toast_timer)
 
 
-func _show_pickup_toast(kind: String) -> void:
+func _show_pickup_toast(kind: String, subtitle_override: String = "") -> void:
 	_build_pickup_toast()
 	var info: Dictionary = PICKUP_ITEM_SCRIPT.display_info(kind)
-	_pickup_toast.text = info.title if str(info.subtitle).is_empty() else "%s\n%s" % [info.title, info.subtitle]
+	var subtitle: String = subtitle_override if not subtitle_override.is_empty() else str(info.subtitle)
+	_pickup_toast.text = info.title if subtitle.is_empty() else "%s\n%s" % [info.title, subtitle]
 	_pickup_toast.add_theme_color_override("font_color", info.color)
 	_pickup_toast.visible = true
 	_pickup_toast_timer.wait_time = 1.35
@@ -3532,8 +3689,14 @@ func _tab_player_row(id: int) -> Control:
 	ping_lbl.add_theme_color_override("font_color", _ping_color_for(id))
 	hbox.add_child(ping_lbl)
 	row.add_child(hbox)
-	# Cards as colored pills (empty for fresh players).
 	var p_node := players_root.get_node_or_null(str(id))
+	if p_node and p_node.get("weapon") != null and p_node.weapon.applied_cards.size() > 0:
+		var wname := Label.new()
+		wname.text = "    %s" % WEAPON_NAME_SCRIPT.generate(p_node.weapon)
+		wname.add_theme_font_size_override("font_size", 14)
+		wname.add_theme_color_override("font_color", Color(0.75, 0.9, 1.0))
+		row.add_child(wname)
+	# Cards as colored pills (empty for fresh players).
 	if p_node and p_node.get("weapon") != null:
 		var cards: Array = p_node.weapon.applied_cards
 		if cards.is_empty():

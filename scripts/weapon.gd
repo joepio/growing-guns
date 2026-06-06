@@ -36,6 +36,9 @@ const SPECIAL_SWORD := "sword"
 @export var mag_size_bonus: int = 0
 @export var extra_projectiles: int = 0         # bullets per trigger beyond the first
 @export var ricochet_count: int = 0            # wall bounces
+@export var body_ricochet_count: int = 0       # enemy bullets that bounce off your body
+@export var last_shot_damage_mult: float = 1.0 # multiplier on the final round in mag
+@export var silencer_stacks: int = 0           # hides shot visuals; −10% dmg per stack in apply
 
 # --- Behaviour knobs ---
 @export var spread: float = BASE_SPREAD        # radians; random yaw+pitch offset per shot
@@ -132,6 +135,9 @@ func reset() -> void:
 		mag_size_bonus = 0
 		extra_projectiles = 0
 		ricochet_count = 0
+		body_ricochet_count = 0
+		last_shot_damage_mult = 1.0
+		silencer_stacks = 0
 		spread = BASE_SPREAD
 		recoil_per_shot = BASE_RECOIL
 		lifesteal = 0.0
