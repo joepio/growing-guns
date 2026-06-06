@@ -32,7 +32,7 @@ static func all() -> Array:
 		{
 			"id": "steady_hands",
 			"name": "STEADY HANDS",
-			"desc": "",
+			"desc": "Tighter spread",
 			"color": Color(0.65, 0.9, 1.0),
 			"apply": func(w: Weapon) -> void:
 				w.spread *= 0.65,
@@ -493,6 +493,15 @@ static func all() -> Array:
 			"color": Color(0.8, 0.8, 0.9),
 			"apply": func(w: Weapon) -> void:
 				w.special = Weapon.SPECIAL_SWORD,
+		},
+		{
+			"id": "air_strike",
+			"name": "AIR STRIKE",
+			"desc": "RMB: call a rocket on your crosshair",
+			"rarity": "rare",
+			"color": Color(1.0, 0.28, 0.12),
+			"apply": func(w: Weapon) -> void:
+				w.special = Weapon.SPECIAL_AIR_STRIKE,
 		},
 		{
 			"id": "bazooka",

@@ -73,6 +73,8 @@ var hit_received_db: float = -12.0
 # spatial attenuation. Impact thump reuses SFX.landing() so it shares the
 # rest of the game's foot-impact tuning.
 var rocket_descent_db: float = -4.0
+var air_strike_inbound_db: float = -4.0
+var air_strike_inbound_distant_db: float = -18.0
 # Mine plant — short low-thud + electronic arm-beep cue when a player drops
 # a proximity mine. 3D so listeners can locate it.
 var mine_plant_db: float = -10.0
@@ -825,6 +827,25 @@ func rocket_descent() -> Node:
 	# the local player hears their own "cabin" loud regardless of where the
 	# fall is happening in world space.
 	return _play(_cached_samples("rocket_descent", Callable(self, "_synth_rocket_descent")), rocket_descent_db, NO_POS, "rocket_descent", -1.0, false, 130.0)
+
+
+func attach_air_strike_inbound(parent: Node3D, travel_seconds: float, distant: bool = false) -> AudioStreamPlayer3D:
+	if parent == null:
+		return null
+	var dur_bucket: float = snappedf(clampf(travel_seconds, 1.75, 6.5), 0.25)
+	var key := "air_strike_inbound:%0.2f:%d" % [dur_bucket, 1 if distant else 0]
+	var wav := _cached_wav(key, Callable(self, "_synth_air_strike_inbound").bind(dur_bucket, distant))
+	var p: AudioStreamPlayer3D = RaytracedAudioPlayer3D.new()
+	_configure_3d_player(p)
+	p.unit_size = 88.0 if distant else 58.0
+	p.stream = wav
+	p.volume_db = air_strike_inbound_distant_db if distant else air_strike_inbound_db
+	parent.add_child(p)
+	p.play()
+	var tail_db: float = (air_strike_inbound_distant_db if distant else air_strike_inbound_db) + big_tail_send_db + (-2.0 if distant else 0.0)
+	_big_tail_intensity = maxf(_big_tail_intensity, 0.28 if distant else 0.42)
+	_spawn_big_tail_send(wav, tail_db, parent.global_position, 1.0, "air_strike_inbound")
+	return p
 
 
 func mine_plant(at: Vector3 = NO_POS) -> void:
@@ -1632,6 +1653,33 @@ func _synth_card_flip(variant: int) -> PackedVector2Array:
 			var n_t: float = rng.randf_range(-1.0, 1.0)
 			tick_lp = lerpf(tick_lp, n_t, tick_hp_k)
 			s += (n_t - tick_lp) * exp(-dt * tick_decay) * 0.5
+		out[i] = Vector2(s, s)
+	return out
+
+func _synth_air_strike_inbound(travel_seconds: float, distant: bool = false) -> PackedVector2Array:
+	# Brown-noise missile whoosh that swells toward impact. Length matches the
+	# rocket flight so the synth envelope lines up with the visual approach.
+	var dur: float = clampf(travel_seconds, 1.75, 6.5)
+	var n: int = int(dur * MIX_RATE)
+	var out := PackedVector2Array()
+	out.resize(n)
+	var sample_dt: float = 1.0 / float(MIX_RATE)
+	var lp: float = 0.0
+	var lp2: float = 0.0
+	var brown: float = 0.0
+	var start_env: float = 0.52 if distant else 0.46
+	var start_cutoff: float = 45.0 if distant else 60.0
+	for i in range(n):
+		var t: float = float(i) / float(MIX_RATE)
+		var u: float = t / dur
+		var env: float = lerpf(start_env, 1.0, u * u)
+		var cutoff: float = lerpf(start_cutoff, 320.0, u)
+		var rc: float = 1.0 / (TAU * cutoff)
+		var alpha: float = sample_dt / (rc + sample_dt)
+		brown = brown * 0.998 + randf_range(-1.0, 1.0) * 0.04
+		lp = lp + alpha * (brown - lp)
+		lp2 = lp2 + alpha * (lp - lp2)
+		var s: float = tanh(lp2 * 6.5) * 0.62 * env
 		out[i] = Vector2(s, s)
 	return out
 

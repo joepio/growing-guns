@@ -8,10 +8,17 @@ const SPLITSCREEN_MANAGER_SCRIPT := preload("res://scripts/splitscreen_manager.g
 const PICKUP_ITEM_SCRIPT := preload("res://scripts/pickup_item.gd")
 const WEAPON_NAME_SCRIPT := preload("res://scripts/weapon_name.gd")
 const ROUND_MODIFIERS_SCRIPT := preload("res://scripts/round_modifiers.gd")
+const AIR_STRIKE_SCRIPT := preload("res://scripts/air_strike.gd")
 
 const PICKUP_SPAWN_MEAN := 20.0
 const PICKUP_SPAWN_JITTER := 7.0
 const PICKUP_MAX_ACTIVE := 4
+const AIR_STRIKE_INTERVAL := 4.0
+const AIR_STRIKE_INTERVAL_JITTER := 1.5
+const AIR_STRIKE_RADIUS := 34.0
+const AIR_STRIKE_DAMAGE := 165.0
+const AIR_STRIKE_SPAWN_HEIGHT := 263.0
+const AIR_STRIKE_SPAWN_HORIZ := 93.0
 const PICKUP_SPAWN_HEIGHT := 52.0
 
 # Maps that can be picked at the start of each round. Server picks an index
@@ -102,6 +109,10 @@ var _round_elapsed: float = 0.0
 var _lava_leak_started: bool = false
 var _pickups_root: Node3D = null
 var _pickup_spawn_timer: float = 0.0
+var _air_strike_timer: float = -1.0
+var _air_strike_cancel_gen: int = 0
+var _air_strikes_armed: bool = false
+var _air_strike_pending: bool = false
 # Music keeps the same track across rounds and only switches at a round
 # boundary once it has played at least this long — so short rounds don't
 # whiplash the soundtrack. 0 = no track started yet (force one on first round).
@@ -166,11 +177,16 @@ var _tab_refresh_timer: float = 0.0
 var _explosion_flash_overlay: ColorRect = null
 var _arena_env: Environment = null
 var current_round_modifier: String = ""
+var current_arena_size_min: float = -1.0
+var current_arena_size_max: float = -1.0
 var _fog_base_saved: bool = false
+var _fog_base_enabled: bool = true
 var _fog_base_mode: int = 0
 var _fog_base_density: float = 0.012
 var _fog_base_depth_begin: float = 0.0
 var _fog_base_depth_end: float = 0.0
+var _fog_base_depth_curve: float = 1.0
+var _fog_base_aerial_perspective: float = 0.0
 var _base_tonemap_exposure: float = 1.0
 var _exposure_duck: float = 0.0
 var _exposure_duck_vel: float = 0.0
@@ -506,6 +522,7 @@ func _process(delta: float) -> void:
 		_update_lava_leak(delta)
 		_update_round_music_phase()
 		_update_pickup_spawner(delta)
+		_update_air_strikes(delta)
 	if multiplayer.is_server():
 		_tick_card_pick_deadlines(delta)
 		_update_music_muffle_broadcast()
@@ -633,6 +650,9 @@ func _input(event: InputEvent) -> void:
 					_lava_leak_started = true
 					_start_lava_leak.rpc(LAVA_LEAK_SPREAD_SECONDS)
 					_announce.rpc("LAVA TRIGGERED", 1.0)
+			KEY_K:
+				if multiplayer.is_server():
+					dev_test_air_strike()
 			KEY_I:
 				if multiplayer.is_server():
 					dev_spawn_pickup()
@@ -742,7 +762,7 @@ func _request_spawn(pname: String) -> void:
 	# valid position that doesn't exist on their client → fall into lava.
 	# Targeting just the joiner via rpc_id keeps existing peers untouched.
 	if state != State.WAITING and current_map_index >= 0 and current_map_index < MAP_POOL.size():
-		_swap_arena.rpc_id(sender, current_map_index, current_map_seed)
+		_swap_arena.rpc_id(sender, current_map_index, current_map_seed, current_arena_size_min, current_arena_size_max)
 	_spawn_player(sender, pname)
 	for pid in NetworkManager.players:
 		if players_root.has_node(str(pid)) and pid != sender:
@@ -1233,6 +1253,7 @@ func _gun_swap_permutation(n: int) -> Array[int]:
 func _start_round_now() -> void:
 	_reset_round_tracking()
 	_round_damage_seen = false
+	_hide_round_win_on_screens.rpc()
 	if multiplayer.is_server():
 		_set_round_modifier.rpc(ROUND_MODIFIERS_SCRIPT.pick_for_round())
 	# Round opens at "low" — the track plays calmly until the first shot.
@@ -1265,7 +1286,8 @@ func _start_round_now() -> void:
 	if multiplayer.is_server() and MAP_POOL.size() >= 1:
 		# Always swap so the procedural arena gets a fresh seed each round
 		# (with a single-entry pool, the index is always 0).
-		_swap_arena.rpc(randi() % MAP_POOL.size(), randi())
+		var arena_size := ROUND_MODIFIERS_SCRIPT.arena_size_range(current_round_modifier)
+		_swap_arena.rpc(randi() % MAP_POOL.size(), randi(), arena_size.x, arena_size.y)
 	# Respawn everyone, reset HP + cooldowns, unfreeze, announce.
 	# Track already-assigned spawn positions so nobody lands on top of another.
 	# The first pick anchors the height target so subsequent picks land near
@@ -1301,7 +1323,12 @@ func _start_round_now() -> void:
 	_clear_projectiles.rpc()
 	_clear_craters.rpc()
 	_clear_blood_splats.rpc()
+	_clear_smoke_puffs.rpc()
 	_clear_pickups.rpc()
+	_clear_air_strike_markers.rpc()
+	if multiplayer.is_server() and ROUND_MODIFIERS_SCRIPT.spawn_starting_pickup(current_round_modifier):
+		var kind: String = PICKUP_ITEM_SCRIPT.KINDS[randi() % PICKUP_ITEM_SCRIPT.KINDS.size()]
+		_spawn_pickup_item_with_fx.rpc(kind, _random_pickup_spawn_pos())
 	_show_round_modifier_on_screens.rpc()
 	_show_round_loadout_names.rpc()
 	if multiplayer.is_server() and ROUND_MODIFIERS_SCRIPT.lava_immediate(current_round_modifier):
@@ -1314,6 +1341,142 @@ func _start_round_now() -> void:
 	if has_node("Arena"):
 		preload("res://scripts/grenade.gd").warmup_shaders($Arena)
 	_announce.rpc("", 0)
+	if multiplayer.is_server() and ROUND_MODIFIERS_SCRIPT.needs_air_strikes(current_round_modifier):
+		_air_strikes_armed = true
+		_air_strike_timer = randf_range(0.5, 1.25)
+
+func _update_air_strikes(delta: float) -> void:
+	if not _air_strikes_armed or not ROUND_MODIFIERS_SCRIPT.needs_air_strikes(current_round_modifier):
+		return
+	if _air_strike_pending:
+		return
+	_air_strike_timer -= delta
+	if _air_strike_timer > 0.0:
+		return
+	var target := _random_air_strike_target()
+	var sky_from := _air_strike_sky_from(target)
+	_begin_air_strike(sky_from, target)
+
+
+func _begin_air_strike(sky_from: Vector3, target: Vector3, shooter_id: int = 0) -> void:
+	if _air_strike_pending:
+		return
+	_air_strike_pending = true
+	_air_strike_launch.rpc(sky_from, target, shooter_id)
+
+
+func _air_strike_finished() -> void:
+	if not multiplayer.is_server():
+		return
+	_air_strike_pending = false
+	if not _air_strikes_armed or not ROUND_MODIFIERS_SCRIPT.needs_air_strikes(current_round_modifier):
+		return
+	_air_strike_timer = AIR_STRIKE_INTERVAL + randf_range(-AIR_STRIKE_INTERVAL_JITTER, AIR_STRIKE_INTERVAL_JITTER)
+
+
+func _random_air_strike_target() -> Vector3:
+	var origin := _random_pickup_spawn_pos()
+	var space := get_world_3d().direct_space_state
+	var top := origin + Vector3(0.0, 120.0, 0.0)
+	var bottom := origin + Vector3(0.0, -40.0, 0.0)
+	var query := PhysicsRayQueryParameters3D.create(top, bottom, 1)
+	var hit := space.intersect_ray(query)
+	if hit.is_empty():
+		return origin
+	return hit.get("position", origin) + Vector3.UP * 0.05
+
+
+func _air_strike_sky_from(target: Vector3) -> Vector3:
+	# Fixed spawn ring: same height + horizontal offset at each cardinal, pick
+	# the first direction with clear LOS to the target.
+	const CARDINALS: Array[Vector3] = [
+		Vector3(1.0, 0.0, 0.0),
+		Vector3(-1.0, 0.0, 0.0),
+		Vector3(0.0, 0.0, 1.0),
+		Vector3(0.0, 0.0, -1.0),
+		Vector3(0.7071068, 0.0, 0.7071068),
+		Vector3(-0.7071068, 0.0, 0.7071068),
+		Vector3(0.7071068, 0.0, -0.7071068),
+		Vector3(-0.7071068, 0.0, -0.7071068),
+	]
+	for dir in CARDINALS:
+		var sky := _air_strike_sky_candidate(target, dir)
+		if _air_strike_sky_path_clear(sky, target):
+			return sky
+	return _air_strike_sky_candidate(target, Vector3(0.0, 0.0, 1.0))
+
+
+func _air_strike_sky_candidate(target: Vector3, horiz_dir: Vector3) -> Vector3:
+	return target + horiz_dir * AIR_STRIKE_SPAWN_HORIZ + Vector3.UP * AIR_STRIKE_SPAWN_HEIGHT
+
+
+func _air_strike_sky_path_clear(sky_from: Vector3, target: Vector3) -> bool:
+	var space := get_world_3d().direct_space_state
+	if space == null:
+		return true
+	var aim := target + Vector3.UP * 0.25
+	if not _air_strike_ray_clear(space, sky_from, aim):
+		return false
+	# Second pass: offset rays so wide rocket body doesn't clip a ledge/corner.
+	var dir := (aim - sky_from).normalized()
+	if dir.length_squared() < 0.0001:
+		return true
+	var side := dir.cross(Vector3.UP)
+	if side.length_squared() < 0.0001:
+		side = Vector3.RIGHT
+	else:
+		side = side.normalized()
+	var offset := side * 0.45
+	return _air_strike_ray_clear(space, sky_from + offset, aim + offset * 0.35)
+
+
+func _air_strike_ray_clear(space: PhysicsDirectSpaceState3D, from: Vector3, to: Vector3) -> bool:
+	var query := PhysicsRayQueryParameters3D.create(from, to, 1)
+	var hit := space.intersect_ray(query)
+	if hit.is_empty():
+		return true
+	var hit_pos: Vector3 = hit.get("position", from)
+	return hit_pos.distance_to(to) < 2.5
+
+
+func _air_strike_fx_root() -> Node3D:
+	return _pickups_root if _pickups_root else self
+
+
+@rpc("authority", "call_local", "reliable")
+func _air_strike_launch(sky_from: Vector3, target: Vector3, shooter_id: int = 0) -> void:
+	if state != State.PLAYING:
+		return
+	var marker := AIR_STRIKE_SCRIPT.new()
+	marker.name = "AirStrikeMarker"
+	var fx_scene := get_tree().current_scene
+	_air_strike_fx_root().add_child(marker)
+	marker.setup(
+		fx_scene,
+		sky_from,
+		target,
+		shooter_id,
+		self,
+		multiplayer.is_server(),
+	)
+
+
+func _apply_environment_explosion(pos: Vector3, radius: float, damage: float, shooter_id: int = 0) -> void:
+	if players_root.get_child_count() == 0:
+		return
+	var anchor := players_root.get_child(0)
+	if anchor and anchor.has_method("_apply_air_strike_splash"):
+		anchor.call("_apply_air_strike_splash", pos + Vector3.UP * 0.1, radius, damage, shooter_id)
+
+
+@rpc("authority", "call_local", "reliable")
+func _clear_air_strike_markers() -> void:
+	for node in get_tree().get_nodes_in_group("air_strike_markers"):
+		if is_instance_valid(node):
+			node.queue_free()
+	for node in get_tree().get_nodes_in_group("air_strike_rockets"):
+		if is_instance_valid(node):
+			node.queue_free()
 
 func _update_lava_leak(delta: float) -> void:
 	if _lava_leak_started:
@@ -1471,13 +1634,17 @@ func _clear_blood_splats() -> void:
 	# into the new map.
 	Violence.clear_blood_splats(self)
 
+@rpc("authority", "call_local", "reliable")
+func _clear_smoke_puffs() -> void:
+	Violence.clear_smoke_puffs(self)
+
 # Replace the current "Arena" child with the map at MAP_POOL[map_index].
 # Called from _start_round_now via RPC — server picks the index, every peer
 # (including the server thanks to call_local) swaps in lockstep.
 # remove_child happens synchronously so the OLD spawnpoints leave the tree
 # before _pick_spawn() runs; the deferred queue_free does the actual delete.
 @rpc("authority", "call_local", "reliable")
-func _swap_arena(map_index: int, map_seed: int = 0) -> void:
+func _swap_arena(map_index: int, map_seed: int = 0, arena_size_min: float = -1.0, arena_size_max: float = -1.0) -> void:
 	if map_index < 0 or map_index >= MAP_POOL.size():
 		return
 	var existing := get_node_or_null("Arena")
@@ -1493,9 +1660,11 @@ func _swap_arena(map_index: int, map_seed: int = 0) -> void:
 	# same geometry. Synchronous: spawnpoints are in the tree before
 	# _pick_spawn() runs in _start_round_now().
 	if new_arena.has_method("apply_seed"):
-		new_arena.apply_seed(map_seed)
+		new_arena.apply_seed(map_seed, arena_size_min, arena_size_max)
 	current_map_index = map_index
 	current_map_seed = map_seed
+	current_arena_size_min = arena_size_min
+	current_arena_size_max = arena_size_max
 	_refresh_pause_seed_label()
 	# Re-grab WorldEnvironment so explosion-tonemap-duck logic (_arena_env in
 	# _process) keeps working against the new arena's environment resource.
@@ -1516,6 +1685,10 @@ func _reset_round_tracking() -> void:
 	round_winner_id = 0
 	_round_elapsed = 0.0
 	_lava_leak_started = false
+	_air_strike_cancel_gen += 1
+	_air_strike_timer = -1.0
+	_air_strikes_armed = false
+	_air_strike_pending = false
 	_reset_pickup_spawner()
 
 func _reset_pickup_spawner() -> void:
@@ -1539,6 +1712,39 @@ func dev_spawn_pickup(kind: String = "") -> void:
 	if kind.is_empty() or kind not in PICKUP_ITEM_SCRIPT.KINDS:
 		kind = PICKUP_ITEM_SCRIPT.KINDS[randi() % PICKUP_ITEM_SCRIPT.KINDS.size()]
 	_spawn_pickup_item_with_fx.rpc(kind, _dev_pickup_spawn_pos())
+
+func begin_player_air_strike(target: Vector3, shooter_id: int = 0) -> void:
+	if not multiplayer.is_server():
+		return
+	if state != State.PLAYING:
+		return
+	if _air_strike_pending:
+		return
+	var sky_from := _air_strike_sky_from(target)
+	_begin_air_strike(sky_from, target, shooter_id)
+
+
+func dev_test_air_strike() -> void:
+	if not multiplayer.is_server():
+		return
+	_clear_air_strike_markers.rpc()
+	_air_strike_cancel_gen += 1
+	_air_strike_pending = false
+	if not ROUND_MODIFIERS_SCRIPT.needs_air_strikes(current_round_modifier):
+		_set_round_modifier.rpc("air_strikes")
+		_apply_round_modifier_environment()
+		_show_round_modifier_on_screens.rpc()
+	_air_strikes_armed = true
+	var target := _dev_air_strike_target()
+	begin_player_air_strike(target)
+	_announce.rpc("AIR STRIKE INCOMING", 1.2)
+
+func _dev_air_strike_target() -> Vector3:
+	if _dev_panel != null and _dev_panel.has_method("get_target"):
+		var target: Node = _dev_panel.get_target()
+		if target and is_instance_valid(target):
+			return _player_look_aim_point(target) + Vector3.UP * 0.05
+	return _random_air_strike_target()
 
 func _dev_pickup_spawn_pos() -> Vector3:
 	if _dev_panel != null and _dev_panel.has_method("get_target"):
@@ -1610,20 +1816,23 @@ func _apply_round_modifier_environment() -> void:
 		return
 	if current_round_modifier == "fog":
 		if not _fog_base_saved:
+			_fog_base_enabled = _arena_env.fog_enabled
 			_fog_base_mode = _arena_env.fog_mode
 			_fog_base_density = _arena_env.fog_density
 			_fog_base_depth_begin = _arena_env.fog_depth_begin
 			_fog_base_depth_end = _arena_env.fog_depth_end
+			_fog_base_depth_curve = _arena_env.fog_depth_curve
+			_fog_base_aerial_perspective = _arena_env.fog_aerial_perspective
 			_fog_base_saved = true
-		_arena_env.fog_enabled = true
-		_arena_env.fog_mode = Environment.FOG_MODE_DEPTH
-		_arena_env.fog_depth_begin = 10.0
-		_arena_env.fog_depth_end = 35.0
+		ROUND_MODIFIERS_SCRIPT.apply_fog_environment(_arena_env)
 	elif _fog_base_saved:
+		_arena_env.fog_enabled = _fog_base_enabled
 		_arena_env.fog_mode = _fog_base_mode as Environment.FogMode
 		_arena_env.fog_density = _fog_base_density
 		_arena_env.fog_depth_begin = _fog_base_depth_begin
 		_arena_env.fog_depth_end = _fog_base_depth_end
+		_arena_env.fog_depth_curve = _fog_base_depth_curve
+		_arena_env.fog_aerial_perspective = _fog_base_aerial_perspective
 		_fog_base_saved = false
 
 @rpc("authority", "call_local", "reliable")
@@ -1765,7 +1974,7 @@ func _end_round(winner_id: int) -> void:
 		var winner_name: String = NetworkManager.players.get(winner_id, "Player")
 		var is_final: bool = int(round_wins[winner_id]) >= rounds_to_win
 		if not is_final:
-			_announce.rpc("%s WINS THE ROUND" % winner_name, 1.6)
+			_show_round_win_on_screens.rpc(winner_id)
 	# Match over?
 	if winner_id != 0 and int(round_wins[winner_id]) >= rounds_to_win:
 		state = State.MATCH_OVER
@@ -1934,18 +2143,14 @@ func _peer_for_player(pid: int) -> int:
 @rpc("authority", "call_local", "reliable")
 func _show_spectating(text: String = "SPECTATING…") -> void:
 	_hide_card_pick()
-	round_banner.text = text
-	round_banner.visible = true
-	banner_timer.stop()
+	_set_local_round_win_strip(text)
 	_sync_mouse_mode()
 
 @rpc("authority", "call_local", "reliable")
 func _show_round_winner_wait(winner_id: int, picker_names: PackedStringArray = PackedStringArray()) -> void:
-	if multiplayer.get_unique_id() != winner_id:
+	if winner_id not in _local_view_player_ids():
 		return
-	round_banner.text = _waiting_for_pickers_label(picker_names)
-	round_banner.visible = true
-	banner_timer.stop()
+	_set_local_round_win_strip(_waiting_for_pickers_label(picker_names))
 
 
 func _waiting_for_pickers_label(picker_names: PackedStringArray) -> String:
@@ -2087,10 +2292,46 @@ func _set_banner(text: String, duration: float, font_size: int = -1) -> void:
 		banner_timer.start()
 
 
+func _local_view_player_ids() -> Array[int]:
+	if _splitscreen and _splitscreen.is_enabled() and _splitscreen.has_method("_local_player_ids"):
+		return _splitscreen._local_player_ids()
+	if local_player and is_instance_valid(local_player):
+		return [int(local_player.get("player_id"))]
+	return [multiplayer.get_unique_id()]
+
+
+func _set_local_round_win_strip(text: String) -> void:
+	for pid in _local_view_player_ids():
+		var renderer := _render_players.get(pid) as RenderPlayer
+		if renderer == null:
+			continue
+		if text.is_empty():
+			renderer.hide_round_win()
+		else:
+			renderer.show_round_win(text)
+
+
+@rpc("authority", "call_local", "reliable")
+func _show_round_win_on_screens(winner_id: int) -> void:
+	var winner_name: String = NetworkManager.players.get(winner_id, "Player")
+	if _splitscreen and _splitscreen.is_enabled() and _splitscreen.has_method("show_round_win_for_all"):
+		_splitscreen.show_round_win_for_all(winner_id, winner_name)
+		return
+	var text := "YOU WIN THE ROUND" if winner_id in _local_view_player_ids() else "%s WINS THE ROUND" % winner_name
+	_set_local_round_win_strip(text)
+
+
+@rpc("authority", "call_local", "reliable")
+func _hide_round_win_on_screens() -> void:
+	if _splitscreen and _splitscreen.is_enabled() and _splitscreen.has_method("hide_round_win_for_all"):
+		_splitscreen.hide_round_win_for_all()
+	_set_local_round_win_strip("")
+
 
 @rpc("authority", "call_local", "reliable")
 func _match_over(winner_id: int) -> void:
 	_hide_card_pick() # Ensure picker is gone
+	_hide_round_win_on_screens()
 	var winner_name: String = NetworkManager.players.get(winner_id, "Player")
 	var is_me := winner_id == multiplayer.get_unique_id()
 	round_banner.text = "YOU'RE THE WINNER" if is_me else "%s WINS THE MATCH" % winner_name

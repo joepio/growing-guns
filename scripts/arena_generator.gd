@@ -5,7 +5,7 @@ extends Node3D
 # Procedural closed-arena map generator — the only map type in MAP_POOL.
 #
 # Layout: 80m x 80m floor, walled in 12m tall, optional center tower, mirrored
-# pairs of tall buildings (with side ledges + accent strips), pillars, cover
+# pairs of tall buildings (with side ledges), pillars, cover
 # blocks, and floating platforms. Every placed feature has a 180° rotational
 # mirror at (-x, -z) so the map is symmetric and plays fair from any spawn.
 #
@@ -214,8 +214,6 @@ var _mat_floor: StandardMaterial3D
 var _mat_wall: StandardMaterial3D
 var _mat_building: StandardMaterial3D
 var _mat_dark: StandardMaterial3D
-var _mat_accent_red: StandardMaterial3D
-var _mat_accent_yellow: StandardMaterial3D
 var _mat_spawn: StandardMaterial3D
 
 # Each entry: [Vector2 center_xz, float radius]. Used for collision-free
@@ -355,7 +353,7 @@ func regenerate() -> void:
 		# Empty center — keep a small reserved disc so cover doesn't all clump there.
 		_placed.append([Vector2.ZERO, 2.0])
 
-	# Buildings (with ledges + lights). The bigger the footprint, the further
+	# Buildings (with ledges + roof lights). The bigger the footprint, the further
 	# from center — keeps the inside fightable.
 	var buildings_built: int = 0
 	# Primary-half building info, used later for bridges. Each entry:
@@ -380,12 +378,11 @@ func regenerate() -> void:
 			if not _try_place(pos, radius):
 				continue
 			# Pre-pick the random visual params so the mirror copy renders the
-			# same accent face / colors / light tint as the primary.
+			# same accent face / light tint as the primary.
 			var accent_face: int = rng.randi() % 4
-			var strip_color: StandardMaterial3D = _mat_accent_red if rng.randf() < 0.5 else _mat_accent_yellow
 			var light_color: Color = Color(1, 0.35, 0.2, 1) if rng.randf() < 0.5 else Color(1, 0.7, 0.2, 1)
-			_build_building(pos, Vector3(w, h, d), rot, accent_face, strip_color, light_color)
-			_build_building(_mirror(pos), Vector3(w, h, d), rot + PI, accent_face, strip_color, light_color)
+			_build_building(pos, Vector3(w, h, d), rot, accent_face, light_color)
+			_build_building(_mirror(pos), Vector3(w, h, d), rot + PI, accent_face, light_color)
 			# Rooftop spawn (1m above so the player stands on it).
 			_spawn_positions.append(Vector3(pos.x, h + 1.0, pos.z))
 			_spawn_positions.append(_mirror(Vector3(pos.x, h + 1.0, pos.z)))
@@ -640,8 +637,6 @@ func _ensure_materials() -> void:
 	_mat_wall = _make_mat(palette["wall"], 0.82)
 	_mat_building = _make_mat(palette["building"], 0.68)
 	_mat_dark = _make_mat(palette["dark"], 0.78)
-	_mat_accent_red = _make_emissive(palette["accent_a"], 2.6)
-	_mat_accent_yellow = _make_emissive(palette["accent_b"], 2.8)
 	_mat_spawn = _make_emissive(COLOR_SPAWN, 1.5)
 
 
@@ -1165,14 +1160,6 @@ func _build_lava_jump_platform(center: Vector3, radius: float, height: float) ->
 func _build_center_tower(h: float) -> void:
 	var size: float = 5.0
 	_add_static_box(Vector3(0, h * 0.5, 0), Vector3(size, h, size), _mat_building)
-	# Accent strips on each face, alternating red/yellow.
-	for i in 4:
-		var ang: float = i * PI * 0.5
-		var off: float = size * 0.5 + 0.15
-		var px: float = cos(ang) * off
-		var pz: float = sin(ang) * off
-		var mat: StandardMaterial3D = _mat_accent_yellow if i % 2 == 0 else _mat_accent_red
-		_add_static_box(Vector3(px, h * 0.5, pz), Vector3(0.3, h * 0.95, 0.3), mat, ang, false)
 	# Light at the top.
 	var light := OmniLight3D.new()
 	light.position = Vector3(0, h + 2.0, 0)
@@ -1185,16 +1172,9 @@ func _build_center_tower(h: float) -> void:
 		light.owner = lava_owner
 
 
-func _build_building(pos: Vector3, size: Vector3, rotation_y: float, accent_face: int, strip_color: StandardMaterial3D, light_color: Color) -> void:
+func _build_building(pos: Vector3, size: Vector3, rotation_y: float, accent_face: int, light_color: Color) -> void:
 	# Main body.
 	_add_static_box(pos, size, _mat_building, rotation_y)
-	# Vertical accent strip on the chosen face. Computed in the building's
-	# local frame, then rotated into world.
-	var local_ang_a: float = accent_face * PI * 0.5
-	var world_ang_a: float = rotation_y + local_ang_a
-	var off_a: float = (size.x if accent_face % 2 == 0 else size.z) * 0.5 + 0.15
-	var strip_pos: Vector3 = pos + Vector3(cos(world_ang_a) * off_a, 0, sin(world_ang_a) * off_a)
-	_add_static_box(strip_pos, Vector3(0.3, size.y * 0.92, 0.3), strip_color, rotation_y, false)
 	# Ledge on the opposite face — a wall-jump target halfway up.
 	var ledge_face: int = (accent_face + 2) % 4
 	var local_ang_l: float = ledge_face * PI * 0.5
@@ -1246,10 +1226,6 @@ func _build_tunnel(center: Vector3, length: float, width: float, height: float, 
 	_add_static_box(lw_pos, Vector3(length, height, t), _mat_dark, rotation_y)
 	_add_static_box(rw_pos, Vector3(length, height, t), _mat_dark, rotation_y)
 	_add_static_box(top_pos, Vector3(length, t, width + 2 * t), _mat_dark, rotation_y)
-	# Accent strip running along the inside of the roof, for visibility.
-	var strip_local := Vector3(0, height - 0.05, 0)
-	var strip_pos: Vector3 = center + strip_local.rotated(rot_v, rotation_y)
-	_add_static_box(strip_pos, Vector3(length * 0.85, 0.08, 0.3), _mat_accent_red, rotation_y, false)
 
 
 func _build_pillar(pos: Vector3, w: float, h: float) -> void:

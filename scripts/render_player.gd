@@ -464,6 +464,22 @@ func _build() -> void:
 	_modifier_toast_timer.timeout.connect(func() -> void: modifier_toast.visible = false)
 	root.add_child(_modifier_toast_timer)
 
+	var round_win := Label.new()
+	round_win.name = "RoundWinStrip"
+	round_win.visible = false
+	round_win.z_index = 20
+	round_win.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	round_win.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	round_win.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	round_win.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
+	round_win.offset_top = 8.0
+	round_win.offset_bottom = 56.0
+	round_win.add_theme_font_size_override("font_size", 28)
+	round_win.add_theme_color_override("font_color", Color(1.0, 0.92, 0.42))
+	round_win.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
+	round_win.add_theme_constant_override("outline_size", 7)
+	root.add_child(round_win)
+
 	var retro_layer := CanvasLayer.new()
 	retro_layer.layer = 100
 	viewport.add_child(retro_layer)
@@ -492,6 +508,7 @@ func _build() -> void:
 		"card_title": card_overlay.title,
 		"pickup_toast": pickup_toast,
 		"modifier_toast": modifier_toast,
+		"round_win": round_win,
 		"retro_layer": retro_layer,
 	}
 
@@ -522,6 +539,22 @@ func show_round_modifier(mod_id: String) -> void:
 	if _modifier_toast_timer:
 		_modifier_toast_timer.wait_time = 2.5
 		_modifier_toast_timer.start()
+
+
+func show_round_win(text: String) -> void:
+	var label: Label = _hud.get("round_win") as Label
+	if label == null:
+		return
+	label.text = text
+	label.visible = true
+	if label.get_parent():
+		label.get_parent().move_child(label, -1)
+
+
+func hide_round_win() -> void:
+	var label: Label = _hud.get("round_win") as Label
+	if label:
+		label.visible = false
 
 
 # Bottom-row HUD panels. Each one is a plain Control with named children
@@ -988,6 +1021,16 @@ func _card_stat_diff(card_id: String) -> Array[String]:
 		out.append("%+d Bounces" % (next_w.ricochet_count - base_w.ricochet_count))
 	if abs(base_w.move_speed_mult - next_w.move_speed_mult) > 0.001:
 		out.append("%+d%% Move Speed" % int(round((next_w.move_speed_mult / base_w.move_speed_mult - 1.0) * 100.0)))
+	if abs(base_w.spread - next_w.spread) > 0.00001:
+		var acc_pct: int = int(round((1.0 - next_w.spread / maxf(base_w.spread, 0.00001)) * 100.0))
+		if acc_pct != 0:
+			out.append("%+d%% Accuracy" % acc_pct)
+	if abs(base_w.recoil_per_shot - next_w.recoil_per_shot) > 0.00001:
+		var stab_pct: int = int(round((1.0 - next_w.recoil_per_shot / maxf(base_w.recoil_per_shot, 0.00001)) * 100.0))
+		if stab_pct != 0:
+			out.append("%+d%% Stability" % stab_pct)
+	if abs(base_w.bullet_speed_mult - next_w.bullet_speed_mult) > 0.001:
+		out.append("%+d%% Bullet Speed" % int(round((next_w.bullet_speed_mult / base_w.bullet_speed_mult - 1.0) * 100.0)))
 	if next_w.explosive_radius > base_w.explosive_radius:
 		out.append("Explosive Payload")
 	if base_w.max_hp_bonus != next_w.max_hp_bonus:

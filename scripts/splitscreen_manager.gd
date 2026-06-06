@@ -166,6 +166,20 @@ func show_round_modifier_for_all(mod_id: String) -> void:
 		(renderer as RenderPlayer).show_round_modifier(mod_id)
 
 
+func show_round_win_for_all(winner_id: int, winner_name: String) -> void:
+	for viewer_id in _local_player_ids():
+		var renderer := _renderers_by_player.get(viewer_id) as RenderPlayer
+		if renderer == null:
+			continue
+		var text := "YOU WIN THE ROUND" if int(viewer_id) == winner_id else "%s WINS THE ROUND" % winner_name
+		renderer.show_round_win(text)
+
+
+func hide_round_win_for_all() -> void:
+	for renderer in _renderers_by_player.values():
+		(renderer as RenderPlayer).hide_round_win()
+
+
 func show_damage_direction_for(player_id: int, from_pos: Vector3) -> bool:
 	var renderer := _renderers_by_player.get(player_id) as RenderPlayer
 	if renderer == null:
