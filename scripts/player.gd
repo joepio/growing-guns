@@ -2804,8 +2804,13 @@ func rebuild_weapon_from_cards() -> void:
 	_update_body_scale()
 
 
-@rpc("authority", "call_local", "reliable")
+@rpc("any_peer", "call_local", "reliable")
 func apply_swapped_cards(cards: Array) -> void:
+	# Round-start loadout shuffle — server picks the permutation and broadcasts
+	# to every peer (same pattern as rebuild_weapon_from_cards / apply_card).
+	var sender := multiplayer.get_remote_sender_id()
+	if sender != 1 and sender != 0:
+		return
 	weapon.reset()
 	for card_id in cards:
 		var card := CardLibrary.by_id(str(card_id))

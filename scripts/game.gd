@@ -310,7 +310,10 @@ func _ready() -> void:
 	# loud, blocking error AND fall back to a local solo session so the game is
 	# still playable. --offline forces that same local path up front.
 	var offline := "--offline" in OS.get_cmdline_args()
-	if not offline and (multiplayer.multiplayer_peer == null \
+	if NetworkManager.is_iroh_join_in_progress():
+		NetworkManager.ensure_iroh_client_peer()
+	if not offline and not NetworkManager.is_iroh_join_in_progress() \
+			and (multiplayer.multiplayer_peer == null \
 			or multiplayer.multiplayer_peer is OfflineMultiplayerPeer):
 		var hosted_id := NetworkManager.host_game_iroh(_player_name)
 		if hosted_id.is_empty():
@@ -368,6 +371,14 @@ func _ready() -> void:
 	else:
 		# Instantly show the client state — makes it obvious when you thought
 		# you were solo but actually joined an orphan on port 27015.
+		if NetworkManager.is_iroh_join_in_progress() \
+				and (multiplayer.multiplayer_peer == null or multiplayer.is_server()):
+			var join_err := "Join setup failed after reload — could not restore client connection."
+			push_error(join_err)
+			NetworkManager.clear_iroh_join_state()
+			NetworkManager.set_meta("network_notice", join_err)
+			get_tree().change_scene_to_file("res://scenes/game.tscn")
+			return
 		round_banner.text = "CONNECTING TO HOST…"
 		round_banner.visible = true
 		banner_timer.stop()
@@ -3958,11 +3969,8 @@ func _pause_join() -> void:
 	# branches into the `else` arm of _ready (multiplayer.is_server() == false)
 	# which waits for connected_to_server before requesting a spawn.
 	get_tree().paused = false
-	if multiplayer.multiplayer_peer:
-		multiplayer.multiplayer_peer.close()
-		multiplayer.multiplayer_peer = null
-	NetworkManager.players.clear()
-	if not NetworkManager.join_game_iroh(game_id, "Player_%d" % (randi() % 1000)):
+	NetworkManager.leave_game()
+	if not NetworkManager.join_game_iroh(game_id, _player_name if not _player_name.is_empty() else "Player_%d" % (randi() % 1000)):
 		_join_in_progress = false
 		_update_join_form()
 		if not NetworkManager.last_network_error.is_empty():

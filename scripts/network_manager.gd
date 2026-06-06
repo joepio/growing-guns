@@ -20,6 +20,10 @@ var last_network_error: String = ""
 # Empty when not hosting via iroh — e.g. when this peer is an iroh client.
 var current_iroh_game_id: String = ""
 
+# Held across game.tscn reloads while joining — change_scene_to_file resets the
+# SceneTree's multiplayer peer to OfflineMultiplayerPeer unless we restore it.
+var _iroh_join_client: MultiplayerPeer = null
+
 
 # ── Iroh (internet P2P, no port forwarding) ────────────────────────────────
 # Uses the godot-iroh GDExtension (addons/godot_iroh). Two peers connect via
@@ -65,6 +69,8 @@ func join_game_iroh(game_id: String, player_name: String) -> bool:
 	if client == null:
 		_fail("Could not start the iroh client. Check the match ID, firewall, and whether the game folder was fully extracted.")
 		return false
+	_iroh_join_client = client
+	set_meta("iroh_join_in_progress", true)
 	multiplayer.multiplayer_peer = client
 	_connect_client_signals_once()
 	current_iroh_game_id = ""  # we're a client; we don't have our own game ID to share
@@ -79,7 +85,27 @@ func leave_game() -> void:
 	players.clear()
 	current_iroh_game_id = ""
 	last_network_error = ""
+	clear_iroh_join_state()
 	player_list_changed.emit()
+
+
+func is_iroh_join_in_progress() -> bool:
+	return has_meta("iroh_join_in_progress") and get_meta("iroh_join_in_progress") == true
+
+
+func ensure_iroh_client_peer() -> void:
+	if _iroh_join_client == null:
+		return
+	var peer := multiplayer.multiplayer_peer
+	if peer == null or peer is OfflineMultiplayerPeer:
+		multiplayer.multiplayer_peer = _iroh_join_client
+		_connect_client_signals_once()
+
+
+func clear_iroh_join_state() -> void:
+	_iroh_join_client = null
+	if has_meta("iroh_join_in_progress"):
+		remove_meta("iroh_join_in_progress")
 
 
 # ── Signal wiring (idempotent) ─────────────────────────────────────────────
@@ -123,6 +149,9 @@ func _on_connected_to_server() -> void:
 	players[my_id] = local_player_name
 	_register_player.rpc(my_id, local_player_name)
 	player_list_changed.emit()
+	_iroh_join_client = null
+	if has_meta("iroh_join_in_progress"):
+		remove_meta("iroh_join_in_progress")
 	_emit_status("Connected to host.", false)
 
 
@@ -132,6 +161,7 @@ func _on_connection_failed() -> void:
 	multiplayer.multiplayer_peer = null
 	players.clear()
 	current_iroh_game_id = ""
+	clear_iroh_join_state()
 	set_meta("network_notice", message)
 	player_list_changed.emit()
 	get_tree().change_scene_to_file("res://scenes/game.tscn")
@@ -141,6 +171,7 @@ func _on_server_disconnected() -> void:
 	players.clear()
 	current_iroh_game_id = ""
 	multiplayer.multiplayer_peer = null
+	clear_iroh_join_state()
 	var message := "Disconnected from host. Returning to solo play."
 	_fail(message)
 	set_meta("network_notice", message)
