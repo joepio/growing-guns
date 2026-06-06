@@ -301,6 +301,7 @@ func _pickup_spawner_section() -> void:
 		{"id": "bomb", "label": "Bomb"},
 		{"id": "plus_one", "label": "+1"},
 		{"id": "laser", "label": "Laser"},
+		{"id": "dice", "label": "Dice"},
 	]
 	for entry in kinds:
 		var btn := Button.new()

@@ -153,12 +153,17 @@ func show_hitmarker_for(player_id: int, kind: String) -> bool:
 	return true
 
 
-func show_pickup_collected_for(player_id: int, kind: String) -> bool:
+func show_pickup_collected_for(player_id: int, kind: String, subtitle_override: String = "") -> bool:
 	var renderer := _renderers_by_player.get(player_id) as RenderPlayer
 	if renderer == null:
 		return false
-	renderer.show_pickup_toast(kind)
+	renderer.show_pickup_toast(kind, subtitle_override)
 	return true
+
+
+func show_round_modifier_for_all(mod_id: String) -> void:
+	for renderer in _renderers_by_player.values():
+		(renderer as RenderPlayer).show_round_modifier(mod_id)
 
 
 func show_damage_direction_for(player_id: int, from_pos: Vector3) -> bool:

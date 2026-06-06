@@ -552,7 +552,7 @@ func _hitmarker_cache_key(kind: String, dmg: int) -> String:
 
 # -------------------- sounds --------------------
 
-func shot(w: Weapon = null, at: Vector3 = NO_POS, is_self: bool = false) -> void:
+func shot(w: Weapon = null, at: Vector3 = NO_POS, is_self: bool = false, silenced: bool = false) -> void:
 	# Use a random real-gun sample when available; fall back to the synth.
 	# Higher-damage weapons pitch down (heavier report) AND get louder.
 	# Self-shots play 2D at their own volume so the local BANG can be tuned
@@ -569,6 +569,10 @@ func shot(w: Weapon = null, at: Vector3 = NO_POS, is_self: bool = false) -> void
 	# Self vs world base levels (knobs let the audio lab tune them live).
 	var self_base: float = shot_self_db + randf_range(-1.5, 1.5)
 	var world_base: float = shot_world_db + randf_range(-1.5, 1.5)
+	if silenced:
+		self_base -= 10.0
+		world_base -= 12.0
+		pitch *= 1.08
 	# unit_size for shots — past this, treble rolls off and volume drops with
 	# inverse-distance. 6 m gives noticeable close/mid/far distinction in a
 	# typical arena while still carrying audibly to the far walls.

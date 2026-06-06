@@ -96,6 +96,34 @@ static func all() -> Array:
 				w.ricochet_count += 2,
 		},
 		{
+			"id": "bouncy_castle",
+			"name": "BOUNCY CASTLE",
+			"desc": "Bullets ricochet off your body",
+			"color": Color(1.0, 0.45, 0.85),
+			"apply": func(w: Weapon) -> void:
+				w.body_ricochet_count += 1
+				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.55, 0.95), 0.35),
+		},
+		{
+			"id": "last_bullet",
+			"name": "LAST BULLET",
+			"desc": "Final round in mag deals 5× damage",
+			"color": Color(1.0, 0.82, 0.25),
+			"apply": func(w: Weapon) -> void:
+				w.last_shot_damage_mult *= 5.0
+				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.75, 0.15), 0.4),
+		},
+		{
+			"id": "silencer",
+			"name": "SILENCER",
+			"desc": "No flash or tracers; −10% damage",
+			"color": Color(0.55, 0.58, 0.62),
+			"apply": func(w: Weapon) -> void:
+				w.silencer_stacks += 1
+				w.damage_mult *= 0.9
+				w.bullet_color = w.bullet_color.lerp(Color(0.45, 0.48, 0.52), 0.55),
+		},
+		{
 				"id": "shotgun",
 				"name": "SHOTGUN",
 				"desc": "Multi-projectile burst",

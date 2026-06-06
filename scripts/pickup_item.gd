@@ -3,7 +3,7 @@ extends Node3D
 # Sky-drop power-up. Server spawns via Game._spawn_pickup_item; all peers run
 # the same fall physics, server alone handles collection.
 
-const KINDS: PackedStringArray = ["heart", "mushroom", "bomb", "plus_one", "laser"]
+const KINDS: PackedStringArray = ["heart", "mushroom", "bomb", "plus_one", "laser", "dice"]
 
 const FALL_GRAVITY := 28.0
 const MAX_FALL_SPEED := 55.0
@@ -57,6 +57,8 @@ static func display_info(p_kind: String) -> Dictionary:
 			return {"title": "+1 UP", "subtitle": "Revive once this round", "color": beam_color(p_kind)}
 		"laser":
 			return {"title": "LASER RIFLE", "subtitle": "A lot of crazy fast pew pews", "color": beam_color(p_kind)}
+		"dice":
+			return {"title": "DICE", "subtitle": "Random stat ×2 and ×½", "color": Color(0.95, 0.85, 1.0)}
 		_:
 			return {"title": "PICKUP", "subtitle": "", "color": beam_color(p_kind)}
 
@@ -236,6 +238,9 @@ func _build_visual() -> void:
 		"laser":
 			_add_cylinder(_visual, 0.08, 0.08, 0.36, Color(0.2, 0.95, 1.0), 5.0)
 			_add_sphere(_visual, 0.05, Color(1.0, 0.2, 0.2), 6.0, Vector3(0.0, 0.0, -0.22))
+		"dice":
+			_add_box(_visual, Vector3(0.34, 0.34, 0.34), Color(0.95, 0.92, 1.0), 4.5)
+			_add_sphere(_visual, 0.05, Color(0.15, 0.15, 0.2), 3.0, Vector3(0.1, 0.12, 0.18))
 		_:
 			_add_sphere(_visual, 0.25, Color.WHITE, 2.0)
 

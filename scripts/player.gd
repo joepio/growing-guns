@@ -37,6 +37,7 @@ const TILT_SPEED := 6.0
 
 # --- Combat ---
 const MAX_HEALTH := 100
+const ROUND_MODIFIERS_SCRIPT := preload("res://scripts/round_modifiers.gd")
 const RIFLE_RANGE := 200.0
 const RIFLE_RECOIL_PITCH := 0.018         # radians added to camera pitch per shot
 const RIFLE_RECOIL_KICK := 0.08           # muzzle pushed back (meters) per shot
@@ -817,7 +818,7 @@ func _physics_process(delta: float) -> void:
 	) + _view_punch_pos # Apply hit punch offset
 	# --- Gravity ---
 	if not is_on_floor():
-		velocity.y -= GRAVITY * delta
+		velocity.y -= GRAVITY * _gravity_mult() * delta
 	else:
 		# Detect landing
 		if not _was_on_floor:
@@ -1159,16 +1160,14 @@ func _fire_rifle() -> void:
 	var shots: int = weapon.get_shots_per_trigger()
 	var cam_right: Vector3 = camera.global_transform.basis.x
 	var cam_up: Vector3 = camera.global_transform.basis.y
+	var last_in_mag := mag <= 0
 	for i in shots:
 		var dir := base_dir
 		if spread > 0.0:
-			# Radial spread, density biased toward the centre. Uniform angle
-			# around the crosshair plus an r drawn from randf()² gives a
-			# pleasing centre-heavy circular pattern (instead of a flat square).
 			var theta: float = randf() * TAU
 			var r: float = spread * randf() * randf()
 			dir = base_dir.rotated(cam_up, r * cos(theta)).rotated(cam_right, r * sin(theta)).normalized()
-		_rifle_fired.rpc(origin, dir, player_id)
+		_rifle_fired.rpc(origin, dir, player_id, last_in_mag)
 	# Barrel overheating — pump in heat per shot, scaled by damage. Cooldown
 	# happens passively in procedural_gun._process. Heavy / fast builds
 	# steady-state into a red glow; the base gun stays under the threshold.
@@ -1191,6 +1190,7 @@ func _rifle_fired(
 	origin: Vector3,
 	dir: Vector3,
 	shooter_id: int,
+	last_in_mag: bool = false,
 ) -> void:
 	# Music: jump to high intensity the moment anyone fires this round.
 	# call_local means this RPC fires on every peer, but only the server
@@ -1204,11 +1204,12 @@ func _rifle_fired(
 	# `is_self` = the local human is the shooter. Their copy plays a 2D
 	# variant with its own volume curve (no 3D bus reverb / distance shaping).
 	var is_self: bool = shooter_id == multiplayer.get_unique_id()
+	var silenced: bool = w.silencer_stacks > 0
 	var spawn_shot_fx := true
 	if shooter_node and shooter_node.has_method("_consume_shot_fx_budget"):
 		spawn_shot_fx = bool(shooter_node.call("_consume_shot_fx_budget"))
 	if spawn_shot_fx:
-		SFX.shot(w, origin, is_self)
+		SFX.shot(w, origin, is_self, silenced)
 
 	# Bench A/B: skip bullet spawning entirely (one static bool branch out
 	# of bench mode). See scripts/bench_flags.gd.
@@ -1218,7 +1219,7 @@ func _rifle_fired(
 	var bullet := Node3D.new()
 	bullet.set_script(bullet_script)
 	get_tree().current_scene.add_child(bullet)
-	bullet.setup(origin, dir, shooter_id, w)
+	bullet.setup(origin, dir, shooter_id, w, last_in_mag)
 	BenchFlags.inc("bullets_spawned")
 
 	# Muzzle flash scales with bullet size — get_bullet_scale already folds
@@ -1227,7 +1228,7 @@ func _rifle_fired(
 	var visual_anchor := muzzle if local_first_person else _third_person_gun
 	if visual_anchor == null:
 		visual_anchor = muzzle
-	if spawn_shot_fx:
+	if spawn_shot_fx and not silenced:
 		var dmg_ratio := w.get_damage() / Weapon.BASE_DAMAGE
 		var flash_brightness := clampf(pow(dmg_ratio, 0.88) * 1.5, 0.85, 8.0)
 		_spawn_muzzle_flash(w.bullet_color, w.get_bullet_scale(), visual_anchor, local_first_person, flash_brightness)
@@ -2533,6 +2534,7 @@ func heal(amount: int) -> void:
 func apply_round_pickup(kind: String) -> void:
 	if not is_multiplayer_authority():
 		return
+	var dice_detail := ""
 	match kind:
 		"heart":
 			health += 50
@@ -2557,6 +2559,8 @@ func apply_round_pickup(kind: String) -> void:
 			weapon.mag_size_bonus += max(0, mag_before * 9)
 			weapon.damage_mult *= 0.1
 			weapon.bullet_color = weapon.bullet_color.lerp(Color(0.35, 1.0, 1.0), 0.75)
+		"dice":
+			dice_detail = _apply_dice_roll()
 		_:
 			return
 	mag = min(weapon.get_mag_size(), max(mag, weapon.get_mag_size()))
@@ -2564,7 +2568,7 @@ func apply_round_pickup(kind: String) -> void:
 		SFX.pling(1.15)
 		var g := get_tree().current_scene
 		if g and g.has_method("show_pickup_collected_for"):
-			g.show_pickup_collected_for(player_id, kind)
+			g.show_pickup_collected_for(player_id, kind, dice_detail)
 	_update_gun_visuals()
 	_update_body_scale()
 
@@ -2575,6 +2579,54 @@ func _apply_explosive_pickup_stack() -> void:
 		weapon.explosive_radius += 2.5
 	weapon.explosive_damage += 25.0
 	weapon.bullet_color = weapon.bullet_color.lerp(Color(1.0, 0.45, 0.08), 0.45)
+
+
+func _apply_dice_roll() -> String:
+	var pool: Array[String] = [
+		"damage_mult", "fire_rate_mult", "move_speed_mult", "bullet_speed_mult", "reload_mult", "spread",
+	]
+	pool.shuffle()
+	var up_key: String = pool[0]
+	var down_key: String = pool[1]
+	_dice_mult_stat(up_key, 2.0)
+	_dice_mult_stat(down_key, 0.5)
+	return "%s ×2, %s ×½" % [_dice_stat_label(up_key), _dice_stat_label(down_key)]
+
+
+func _dice_mult_stat(key: String, factor: float) -> void:
+	match key:
+		"damage_mult":
+			weapon.damage_mult *= factor
+		"fire_rate_mult":
+			weapon.fire_rate_mult *= factor
+		"move_speed_mult":
+			weapon.move_speed_mult *= factor
+		"bullet_speed_mult":
+			weapon.bullet_speed_mult *= factor
+		"reload_mult":
+			weapon.reload_mult *= factor
+		"spread":
+			weapon.spread *= factor
+		_:
+			pass
+
+
+func _dice_stat_label(key: String) -> String:
+	match key:
+		"damage_mult":
+			return "Damage"
+		"fire_rate_mult":
+			return "Fire rate"
+		"move_speed_mult":
+			return "Speed"
+		"bullet_speed_mult":
+			return "Bullet speed"
+		"reload_mult":
+			return "Reload"
+		"spread":
+			return "Spread"
+		_:
+			return key
 
 # -------------------- CARDS (ROUNDS-style) --------------------
 
@@ -2611,6 +2663,37 @@ func rebuild_weapon_from_cards() -> void:
 	mag = weapon.get_mag_size()
 	_update_gun_visuals()
 	_update_body_scale()
+
+
+@rpc("authority", "call_local", "reliable")
+func apply_swapped_cards(cards: Array) -> void:
+	weapon.reset()
+	for card_id in cards:
+		var card := CardLibrary.by_id(str(card_id))
+		if card.is_empty():
+			continue
+		card.apply.call(weapon)
+		weapon.applied_cards.append(str(card_id))
+	mag = weapon.get_mag_size()
+	_update_gun_visuals()
+	_update_body_scale()
+
+
+@rpc("any_peer", "call_local", "reliable")
+func apply_round_modifier_weapon(mod_id: String) -> void:
+	if multiplayer.get_remote_sender_id() != 1 and multiplayer.get_remote_sender_id() != 0:
+		return
+	ROUND_MODIFIERS_SCRIPT.apply_weapon(weapon, mod_id)
+	mag = min(weapon.get_mag_size(), max(mag, weapon.get_mag_size()))
+	_update_gun_visuals()
+
+
+func _gravity_mult() -> float:
+	var game := get_tree().current_scene
+	if game and game.has_method("get_gravity_mult"):
+		return game.get_gravity_mult()
+	return 1.0
+
 
 @rpc("any_peer", "call_local", "reliable")
 func reset_weapon() -> void:
@@ -2735,7 +2818,7 @@ func _bot_physics(delta: float) -> void:
 	var game_scene: Node = get_tree().current_scene
 	if game_scene and game_scene.get("bots_hold_fire") == true:
 		if not is_on_floor():
-			velocity.y -= GRAVITY * delta
+			velocity.y -= GRAVITY * _gravity_mult() * delta
 		else:
 			velocity.y = 0.0
 		velocity.x = move_toward(velocity.x, 0.0, BOT_MOVE_SPEED * 3.0 * delta)
@@ -2763,7 +2846,7 @@ func _bot_physics(delta: float) -> void:
 
 	# Gravity
 	if not is_on_floor():
-		velocity.y -= GRAVITY * delta
+		velocity.y -= GRAVITY * _gravity_mult() * delta
 	else:
 		jumps_left = 2 + weapon.extra_jumps
 
@@ -2967,6 +3050,7 @@ func _bot_shoot() -> bool:
 		_start_reload()
 		return false
 	mag -= 1
+	var last_in_mag := mag <= 0
 	var from := global_position + Vector3.UP * 0.7
 	var to: Vector3 = _bot_target.global_position + Vector3.UP * 0.4
 	var dist := from.distance_to(to)
@@ -3009,7 +3093,7 @@ func _bot_shoot() -> bool:
 		var yaw := randf_range(-spread, spread)
 		var pitch := randf_range(-spread, spread)
 		shot_dir = shot_dir.rotated(Vector3.UP, yaw).rotated(right, pitch)
-		_rifle_fired.rpc(from, shot_dir.normalized(), player_id)
+		_rifle_fired.rpc(from, shot_dir.normalized(), player_id, last_in_mag)
 	if mag <= 0:
 		_start_reload()
 	return true

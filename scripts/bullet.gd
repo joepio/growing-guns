@@ -15,6 +15,9 @@ var distance_traveled: float = 0.0
 var ricochet_left: int = 0
 var world_pierce_left: int = 0
 var ricochet_hits: int = 0
+var body_ricochets_done: int = 0
+var last_in_mag: bool = false
+var silenced: bool = false
 var excluded_rids: Array[RID] = []
 
 # Per-bullet ray query — allocated once in setup() and re-used every physics
@@ -36,11 +39,13 @@ var _max_trail_length: float = 2.0
 
 const HITSCAN_THRESHOLD := 550.0
 
-func setup(origin: Vector3, dir: Vector3, shooter: int, w: Weapon) -> void:
+func setup(origin: Vector3, dir: Vector3, shooter: int, w: Weapon, p_last_in_mag: bool = false) -> void:
 	global_position = origin
 	direction = dir.normalized()
 	shooter_id = shooter
 	weapon_stats = w
+	last_in_mag = p_last_in_mag
+	silenced = w.silencer_stacks > 0
 	add_to_group("projectiles")
 	speed = w.get_bullet_speed()
 	velocity = direction * speed
@@ -62,6 +67,9 @@ func setup(origin: Vector3, dir: Vector3, shooter: int, w: Weapon) -> void:
 	# lifecycle. We perform an immediate raycast and queue for deletion.
 	if speed >= HITSCAN_THRESHOLD:
 		call_deferred("_do_hitscan")
+		return
+
+	if silenced:
 		return
 
 	look_at(global_position + direction)
@@ -101,7 +109,11 @@ func _physics_process(delta: float) -> void:
 
 	# Bullet drop — steady downward acceleration on the velocity vector.
 	if weapon_stats.bullet_drop > 0.0:
-		velocity.y -= weapon_stats.bullet_drop * delta
+		var drop: float = weapon_stats.bullet_drop
+		var game := get_tree().current_scene
+		if game and game.has_method("get_bullet_drop_mult"):
+			drop *= game.get_bullet_drop_mult()
+		velocity.y -= drop * delta
 
 	# Homing: steer toward the closest target in front of us, capped at
 	# `weapon_stats.homing` degrees-per-second. Cheap — one pass over players
@@ -173,13 +185,15 @@ func _do_hitscan() -> void:
 	# Visual laser tracer
 	var players_root: Node = get_tree().current_scene.get_node_or_null("Players")
 	var shooter_node: Node3D = players_root.get_node_or_null(str(shooter_id)) if players_root else null
-	if shooter_node and shooter_node.has_method("_spawn_laser_tracer"):
+	if not silenced and shooter_node and shooter_node.has_method("_spawn_laser_tracer"):
 		shooter_node.call("_spawn_laser_tracer", start_pos, hit_pos)
 	
 	queue_free()
 
 func _current_damage() -> float:
 	var dmg := weapon_stats.get_damage()
+	if last_in_mag and weapon_stats.last_shot_damage_mult > 1.0:
+		dmg *= weapon_stats.last_shot_damage_mult
 	if weapon_stats.grow_damage_per_meter > 0.0:
 		dmg *= 1.0 + distance_traveled * weapon_stats.grow_damage_per_meter
 	if ricochet_hits > 0 and weapon_stats.ricochet_damage_mult > 1.0:
@@ -299,6 +313,19 @@ func _handle_collision(result: Dictionary) -> void:
 			_ray_query.exclude = excluded_rids
 		return # Continue through ghosts
 
+	if hit_player:
+		var is_head: bool = bool(shooter_node.call("_is_head_hit", collider))
+		if not is_head:
+			var victim_weapon: Weapon = hit_player.get("weapon") as Weapon
+			var body_bounces: int = victim_weapon.body_ricochet_count if victim_weapon else 0
+			if body_bounces > body_ricochets_done:
+				body_ricochets_done += 1
+				velocity = velocity.bounce(normal)
+				direction = velocity.normalized() if velocity.length_squared() > 0.0001 else direction
+				look_at(global_position + direction)
+				global_position += direction * 0.05
+				return
+
 	# Visuals on all peers
 	if hit_player:
 		shooter_node.call("_spawn_blood", hit_pos, direction, dmg_ratio)
@@ -314,6 +341,10 @@ func _handle_collision(result: Dictionary) -> void:
 		if hit_player:
 			var is_head: bool = shooter_node.call("_is_head_hit", collider)
 			var dmg: int = int(bullet_damage * (weapon_stats.get_headshot_mult() if is_head else 1.0))
+			if not is_head:
+				var game := get_tree().current_scene
+				if game and game.has_method("get_body_damage_mult"):
+					dmg = int(float(dmg) * game.get_body_damage_mult())
 			var poison_total_damage := 0
 			var direct_damage := dmg
 			if weapon_stats.damage_over_time > 0.0:
