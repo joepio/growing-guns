@@ -98,6 +98,14 @@ func is_all_floor_lava() -> bool:
 	return bool(stats.get("all_floor_lava", false))
 
 
+func get_lava_surface_world_y() -> float:
+	if generator and generator.has_method("get_lava_surface_world_y"):
+		return float(generator.get_lava_surface_world_y())
+	if _lava_leak_active or _lava_rise_height > 0.001:
+		return global_position.y + LAVA_FLOOR_Y + _lava_rise_height
+	return global_position.y + ArenaGenerator.LAVA_POOL_Y
+
+
 func is_lava_spawn_safe(world_pos: Vector3) -> bool:
 	if generator and generator.has_method("is_lava_spawn_safe"):
 		return bool(generator.is_lava_spawn_safe(world_pos))

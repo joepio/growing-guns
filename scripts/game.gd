@@ -206,6 +206,10 @@ var _flash_alpha_vel: float = 0.0
 # tears visibly with vsync off (a single frame jumping 0 -> 0.8 splits the
 # screen). Ramping over a couple frames keeps per-frame change small.
 var _flash_alpha_target: float = 0.0
+var _flash_adsr_active: bool = false
+var _flash_adsr_peak: float = 0.0
+var _flash_adsr_sustain_end_ms: int = 0
+var _flash_adsr_release_end_ms: int = 0
 var _phoenix_fade_overlay: ColorRect = null
 var _phoenix_fade_alpha: float = 0.0
 var _phoenix_fade_out_per_s: float = 0.0
@@ -3006,7 +3010,9 @@ func _on_network_status_changed(message: String, is_error: bool) -> void:
 		if token == _network_status_hide_token and is_instance_valid(_network_status_panel):
 			_network_status_panel.visible = false
 
-func trigger_explosion_sidechain(pos: Vector3, radius: float, peak: float = 1.0) -> void:
+func trigger_explosion_sidechain(
+	pos: Vector3, radius: float, peak: float = 1.0, sustain_sec: float = -1.0, release_sec: float = -1.0,
+) -> void:
 	if local_player == null or not is_instance_valid(local_player):
 		return
 	var dist := pos.distance_to(local_player.global_position)
@@ -3015,20 +3021,24 @@ func trigger_explosion_sidechain(pos: Vector3, radius: float, peak: float = 1.0)
 	var affect_radius := maxf(radius * 6.0, 12.0)
 	if dist > affect_radius:
 		return
-	# Upper bound 3.0 so big bazookas (peak 3) at point-blank get the full
-	# blinding duck instead of being capped at "regular grenade" intensity.
-	var amount := clampf((1.0 - dist / affect_radius) * peak, 0.0, 3.0)
+	# Upper bound scales with peak so ion cannon (peak > 3) can flash harder than grenades.
+	var amount_cap: float = maxf(3.0, peak)
+	var amount := clampf((1.0 - dist / affect_radius) * peak, 0.0, amount_cap)
 	if amount <= 0.0:
 		return
-	# Exposure duck sells the "camera iris clamps down" effect while the white
-	# veil provides the immediate retinal blast.
-	_exposure_duck = maxf(_exposure_duck, amount * 0.95)
+	_exposure_duck = maxf(_exposure_duck, amount * 1.05)
 	_exposure_duck_vel = maxf(_exposure_duck_vel, 4.6 + amount * 2.8)
-	# Flash target capped at 0.92 so the white veil doesn't fully cover the HUD.
-	# Alpha lerps to this target over a few frames in _update_explosion_sidechain
-	# so the rise doesn't tear with vsync off.
-	_flash_alpha_target = maxf(_flash_alpha_target, minf(amount * 0.55, 0.92))
-	_flash_alpha_vel = maxf(_flash_alpha_vel, 7.0 + amount * 4.0)
+	var alpha_peak := minf(amount * 0.62, 0.96)
+	if sustain_sec >= 0.0 and release_sec > 0.0:
+		var now_ms := Time.get_ticks_msec()
+		_flash_adsr_peak = maxf(_flash_adsr_peak if _flash_adsr_active else 0.0, alpha_peak)
+		_flash_alpha = _flash_adsr_peak
+		_flash_adsr_sustain_end_ms = now_ms + int(sustain_sec * 1000.0)
+		_flash_adsr_release_end_ms = _flash_adsr_sustain_end_ms + int(release_sec * 1000.0)
+		_flash_adsr_active = true
+	else:
+		_flash_alpha_target = maxf(_flash_alpha_target, alpha_peak)
+		_flash_alpha_vel = maxf(_flash_alpha_vel, 7.0 + amount * 4.0)
 
 func _update_explosion_sidechain(delta: float) -> void:
 	if _arena_env:
@@ -3036,14 +3046,27 @@ func _update_explosion_sidechain(delta: float) -> void:
 		# as full black). 0.05 = ~4 stops below base — still very dark.
 		var target_exposure := maxf(0.05, _base_tonemap_exposure - _exposure_duck * 0.75)
 		_arena_env.tonemap_exposure = lerpf(_arena_env.tonemap_exposure, target_exposure, clampf(delta * 20.0, 0.0, 1.0))
-	# Lerp alpha toward the target on the rise (smooth attack so any tearing
-	# shows minimal per-frame contrast), then move_toward 0 on the decay as
-	# the target also decays. Attack rate ~25 reaches 80% of target in ~60 ms.
-	_flash_alpha = lerpf(_flash_alpha, _flash_alpha_target, clampf(delta * 25.0, 0.0, 1.0))
+	if _flash_adsr_active:
+		var now_ms := Time.get_ticks_msec()
+		if now_ms < _flash_adsr_sustain_end_ms:
+			_flash_alpha = _flash_adsr_peak
+		elif now_ms < _flash_adsr_release_end_ms:
+			var release_ms := maxf(1, _flash_adsr_release_end_ms - _flash_adsr_sustain_end_ms)
+			var t := float(now_ms - _flash_adsr_sustain_end_ms) / float(release_ms)
+			_flash_alpha = lerpf(_flash_adsr_peak, 0.0, clampf(t, 0.0, 1.0))
+		else:
+			_flash_alpha = 0.0
+			_flash_adsr_active = false
+			_flash_adsr_peak = 0.0
+	elif _flash_alpha_target > 0.0 or _flash_alpha > 0.001:
+		# Lerp alpha toward the target on the rise (smooth attack so any tearing
+		# shows minimal per-frame contrast), then move_toward 0 on the decay as
+		# the target also decays. Attack rate ~25 reaches 80% of target in ~60 ms.
+		_flash_alpha = lerpf(_flash_alpha, _flash_alpha_target, clampf(delta * 25.0, 0.0, 1.0))
+		_flash_alpha_target = move_toward(_flash_alpha_target, 0.0, _flash_alpha_vel * delta)
 	if _explosion_flash_overlay:
 		_explosion_flash_overlay.color.a = _flash_alpha
 	_exposure_duck = move_toward(_exposure_duck, 0.0, _exposure_duck_vel * delta)
-	_flash_alpha_target = move_toward(_flash_alpha_target, 0.0, _flash_alpha_vel * delta)
 
 func show_death_effect_for(player_id: int, show: bool) -> void:
 	if _splitscreen and _splitscreen.is_enabled() and _splitscreen.has_method("show_death_effect_for"):
