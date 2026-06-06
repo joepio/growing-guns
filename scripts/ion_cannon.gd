@@ -12,14 +12,85 @@ const END_RADIUS := 1.5
 const BLAST_RADIUS := 38.0
 const BLAST_DAMAGE := 175.0
 
+# Nested shells read as a volumetric column without FogVolume setup.
+const COLUMN_LAYERS := [
+	{
+		"radius_scale": 0.08,
+		"alpha_start": 0.035,
+		"alpha_end": 1.0,
+		"emission_start": 5.0,
+		"emission_end": 5200.0,
+		"emission": Color(0.42, 0.72, 0.96),
+	},
+	{
+		"radius_scale": 0.15,
+		"alpha_start": 0.028,
+		"alpha_end": 0.92,
+		"emission_start": 4.0,
+		"emission_end": 3400.0,
+		"emission": Color(0.46, 0.76, 0.98),
+	},
+	{
+		"radius_scale": 0.25,
+		"alpha_start": 0.022,
+		"alpha_end": 0.78,
+		"emission_start": 3.2,
+		"emission_end": 2100.0,
+		"emission": Color(0.40, 0.74, 0.98),
+	},
+	{
+		"radius_scale": 0.38,
+		"alpha_start": 0.018,
+		"alpha_end": 0.58,
+		"emission_start": 2.6,
+		"emission_end": 1200.0,
+		"emission": Color(0.36, 0.70, 0.98),
+	},
+	{
+		"radius_scale": 0.52,
+		"alpha_start": 0.014,
+		"alpha_end": 0.42,
+		"emission_start": 2.0,
+		"emission_end": 680.0,
+		"emission": Color(0.32, 0.66, 0.96),
+	},
+	{
+		"radius_scale": 0.68,
+		"alpha_start": 0.010,
+		"alpha_end": 0.28,
+		"emission_start": 1.5,
+		"emission_end": 360.0,
+		"emission": Color(0.28, 0.62, 0.94),
+	},
+	{
+		"radius_scale": 0.84,
+		"alpha_start": 0.008,
+		"alpha_end": 0.18,
+		"emission_start": 1.1,
+		"emission_end": 190.0,
+		"emission": Color(0.24, 0.58, 0.90),
+	},
+	{
+		"radius_scale": 1.0,
+		"alpha_start": 0.006,
+		"alpha_end": 0.12,
+		"emission_start": 0.8,
+		"emission_end": 95.0,
+		"emission": Color(0.20, 0.54, 0.86),
+	},
+]
+
 var target_pos: Vector3 = Vector3.ZERO
 
 var _fx_scene: Node = null
-var _cylinder: MeshInstance3D = null
-var _cyl_mesh: CylinderMesh = null
-var _cyl_mat: StandardMaterial3D = null
+var _column_root: Node3D = null
+var _column_layers: Array[MeshInstance3D] = []
+var _column_meshes: Array[CylinderMesh] = []
+var _column_mats: Array[StandardMaterial3D] = []
 var _core_light: OmniLight3D = null
+var _mid_light: OmniLight3D = null
 var _ground_light: OmniLight3D = null
+var _charge_audio: AudioStreamPlayer3D = null
 var _charge_elapsed: float = 0.0
 var _mote_tick: float = 0.0
 var _pulse: float = 0.0
@@ -44,7 +115,8 @@ func setup(
 	add_to_group("ion_cannon_markers")
 	_spawn_column()
 	_spawn_lights()
-	SFX.mine_plant(target_pos)
+	if _column_root:
+		_charge_audio = SFX.attach_ion_cannon_charge(_column_root, CHARGE_SECONDS)
 
 
 func _column_layout() -> Dictionary:
@@ -58,31 +130,49 @@ func _column_layout() -> Dictionary:
 	}
 
 
+func _make_column_material(layer: Dictionary) -> StandardMaterial3D:
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mat.disable_fog = true
+	mat.no_depth_test = false
+	mat.emission_enabled = true
+	mat.emission = layer.get("emission", ION_CORE)
+	mat.albedo_color = Color(
+		layer.emission.r,
+		layer.emission.g,
+		layer.emission.b,
+		layer.get("alpha_start", 0.1),
+	)
+	mat.emission_energy_multiplier = float(layer.get("emission_start", 20.0))
+	return mat
+
+
 func _spawn_column() -> void:
 	if _fx_scene == null:
 		return
-	_cylinder = MeshInstance3D.new()
-	_cylinder.name = "IonColumn"
-	_cyl_mesh = CylinderMesh.new()
-	_cyl_mesh.height = SKY_HEIGHT
-	_cyl_mesh.top_radius = START_RADIUS
-	_cyl_mesh.bottom_radius = START_RADIUS * 1.06
-	_cyl_mesh.radial_segments = 36
-	_cylinder.mesh = _cyl_mesh
-	_cyl_mat = StandardMaterial3D.new()
-	_cyl_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	_cyl_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	_cyl_mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
-	_cyl_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	_cyl_mat.albedo_color = Color(ION_COLOR.r, ION_COLOR.g, ION_COLOR.b, 0.09)
-	_cyl_mat.emission_enabled = true
-	_cyl_mat.emission = ION_CORE
-	_cyl_mat.emission_energy_multiplier = 28.0
-	_cylinder.material_override = _cyl_mat
-	_fx_scene.add_child(_cylinder)
+	_column_root = Node3D.new()
+	_column_root.name = "IonColumnRoot"
+	_fx_scene.add_child(_column_root)
 	var layout := _column_layout()
-	_cyl_mesh.height = layout.height
-	_cylinder.global_position = Vector3(target_pos.x, layout.center_y, target_pos.z)
+	_column_root.global_position = Vector3(target_pos.x, layout.center_y, target_pos.z)
+	for i in COLUMN_LAYERS.size():
+		var layer: Dictionary = COLUMN_LAYERS[i]
+		var mesh := CylinderMesh.new()
+		mesh.height = layout.height
+		mesh.top_radius = START_RADIUS * float(layer.get("radius_scale", 1.0))
+		mesh.bottom_radius = mesh.top_radius * 1.03
+		mesh.radial_segments = 44 if i <= 1 else 36 if i <= 4 else 28
+		var shell := MeshInstance3D.new()
+		shell.name = "IonShell%d" % i
+		shell.mesh = mesh
+		shell.material_override = _make_column_material(layer)
+		_column_root.add_child(shell)
+		_column_meshes.append(mesh)
+		_column_mats.append(shell.material_override as StandardMaterial3D)
+		_column_layers.append(shell)
 
 
 func _spawn_lights() -> void:
@@ -91,16 +181,24 @@ func _spawn_lights() -> void:
 	_core_light = OmniLight3D.new()
 	_core_light.name = "IonCoreLight"
 	_core_light.light_color = ION_CORE
-	_core_light.light_energy = 22.0
-	_core_light.omni_range = 110.0
+	_core_light.light_energy = 6.0
+	_core_light.omni_range = 120.0
 	_fx_scene.add_child(_core_light)
-	_core_light.global_position = target_pos + Vector3.UP * (SKY_HEIGHT * 0.55)
+	_core_light.global_position = target_pos + Vector3.UP * (SKY_HEIGHT * 0.58)
+
+	_mid_light = OmniLight3D.new()
+	_mid_light.name = "IonMidLight"
+	_mid_light.light_color = ION_COLOR.lerp(ION_CORE, 0.45)
+	_mid_light.light_energy = 4.0
+	_mid_light.omni_range = 82.0
+	_fx_scene.add_child(_mid_light)
+	_mid_light.global_position = target_pos + Vector3.UP * (SKY_HEIGHT * 0.22)
 
 	_ground_light = OmniLight3D.new()
 	_ground_light.name = "IonGroundLight"
 	_ground_light.light_color = ION_COLOR
-	_ground_light.light_energy = 14.0
-	_ground_light.omni_range = 28.0
+	_ground_light.light_energy = 3.0
+	_ground_light.omni_range = 30.0
 	_fx_scene.add_child(_ground_light)
 	_ground_light.global_position = target_pos + Vector3.UP * 0.4
 
@@ -123,6 +221,7 @@ func _spawn_ascending_mote(radius: float) -> void:
 	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
 	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mat.disable_fog = true
 	mat.albedo_color = Color(0.72, 0.9, 1.0, 0.0)
 	mat.emission_enabled = true
 	mat.emission = Color(0.82, 0.94, 1.0)
@@ -152,45 +251,100 @@ func _spawn_ascending_mote(radius: float) -> void:
 	atw.tween_callback(mote.queue_free)
 
 
-func _update_column(u: float, pulse: float) -> void:
+func _charge_curves(u: float) -> Dictionary:
+	# Keep the first second ghostly; snap to white HDR only in the final stretch.
 	var focus := u * u
-	var glow := u * u * u
+	var vis := pow(u, 4.2)
+	var power := pow(u, 2.35)
+	var ignite := smoothstep(0.48, 0.985, u)
+	return {
+		"focus": focus,
+		"vis": vis,
+		"power": power,
+		"ignite": ignite,
+	}
+
+
+func _update_column(u: float, pulse: float) -> void:
+	var curves := _charge_curves(u)
+	var focus: float = curves.focus
+	var vis: float = curves.vis
+	var power: float = curves.power
+	var ignite: float = curves.ignite
 	var radius := lerpf(START_RADIUS, END_RADIUS, focus)
 	var layout := _column_layout()
 	var height: float = layout.height
 	var center_y: float = layout.center_y
 	var sky_top: float = layout.sky_top
-	if _cyl_mesh:
-		_cyl_mesh.top_radius = radius
-		_cyl_mesh.bottom_radius = radius * 1.04
-		_cyl_mesh.height = height
-	if _cylinder:
-		_cylinder.global_position = Vector3(target_pos.x, center_y, target_pos.z)
-	if _cyl_mat:
-		_cyl_mat.emission_energy_multiplier = lerpf(28.0, 420.0, glow) + pulse * 14.0 * glow
-		_cyl_mat.albedo_color = Color(
-			ION_COLOR.r,
-			ION_COLOR.g,
-			ION_COLOR.b,
-			lerpf(0.08, 0.92, glow),
-		)
+	if _column_root:
+		_column_root.global_position = Vector3(target_pos.x, center_y, target_pos.z)
+	for i in _column_meshes.size():
+		var layer: Dictionary = COLUMN_LAYERS[i]
+		var mesh := _column_meshes[i]
+		var mat := _column_mats[i]
+		var shell_radius := radius * float(layer.get("radius_scale", 1.0))
+		mesh.height = height
+		mesh.top_radius = shell_radius
+		mesh.bottom_radius = shell_radius * 1.03
+		if mat:
+			var base_col: Color = layer.get("emission", ION_CORE)
+			var emission_col := base_col.lerp(Color(1.0, 1.0, 1.0), ignite)
+			var alpha := lerpf(
+				float(layer.get("alpha_start", 0.1)),
+				float(layer.get("alpha_end", 0.5)),
+				vis,
+			)
+			mat.albedo_color = Color(emission_col.r, emission_col.g, emission_col.b, alpha)
+			mat.emission = emission_col
+			mat.emission_energy_multiplier = lerpf(
+				float(layer.get("emission_start", 20.0)),
+				float(layer.get("emission_end", 200.0)),
+				power,
+			) + pulse * 14.0 * power * (1.0 - float(i) * 0.1)
 	if _core_light:
 		_core_light.global_position = Vector3(
 			target_pos.x,
 			target_pos.y + sky_top * 0.58,
 			target_pos.z,
 		)
-		_core_light.light_energy = lerpf(22.0, 420.0, glow) + pulse * 28.0 * glow
-		_core_light.omni_range = lerpf(110.0, 48.0, focus)
+		_core_light.light_color = ION_CORE.lerp(Color(1.0, 1.0, 1.0), ignite)
+		_core_light.light_energy = lerpf(6.0, 760.0, power) + pulse * 36.0 * power
+		_core_light.omni_range = lerpf(120.0, 68.0, focus)
+	if _mid_light:
+		_mid_light.global_position = Vector3(
+			target_pos.x,
+			target_pos.y + sky_top * 0.24,
+			target_pos.z,
+		)
+		_mid_light.light_color = ION_COLOR.lerp(Color(1.0, 1.0, 1.0), ignite * 0.92)
+		_mid_light.light_energy = lerpf(4.0, 480.0, power) + pulse * 24.0 * power
+		_mid_light.omni_range = lerpf(82.0, 48.0, focus)
 	if _ground_light:
-		_ground_light.light_energy = lerpf(14.0, 180.0, glow) + pulse * 10.0 * glow
-		_ground_light.omni_range = lerpf(28.0, 20.0, focus)
+		_ground_light.light_color = ION_COLOR.lerp(Color(1.0, 1.0, 1.0), ignite * 0.75)
+		_ground_light.light_energy = lerpf(3.0, 240.0, power) + pulse * 10.0 * power
+		_ground_light.omni_range = lerpf(30.0, 22.0, focus)
+	if _charge_audio and is_instance_valid(_charge_audio):
+		var swell := lerpf(0.48, 1.0, power)
+		_charge_audio.volume_db = SFX.ion_cannon_charge_db + linear_to_db(swell)
+
+
+func _free_column() -> void:
+	if is_instance_valid(_column_root):
+		_column_root.queue_free()
+	_column_root = null
+	_column_layers.clear()
+	_column_meshes.clear()
+	_column_mats.clear()
 
 
 func _detonate() -> void:
 	if _detonated:
 		return
 	_detonated = true
+	if is_instance_valid(_charge_audio):
+		_charge_audio.stop()
+		_charge_audio = null
+	SFX.ion_cannon_detonate(target_pos, BLAST_RADIUS)
 	var blast_color := Color(0.68, 0.9, 1.0)
 	var scene := _fx_scene if is_instance_valid(_fx_scene) else get_tree().current_scene
 	var local_player: Node = null
@@ -204,12 +358,16 @@ func _detonate() -> void:
 
 
 func _finish() -> void:
-	if is_instance_valid(_cylinder):
-		_cylinder.queue_free()
-		_cylinder = null
+	_free_column()
+	if is_instance_valid(_charge_audio):
+		_charge_audio.stop()
+		_charge_audio = null
 	if is_instance_valid(_core_light):
 		_core_light.queue_free()
 		_core_light = null
+	if is_instance_valid(_mid_light):
+		_mid_light.queue_free()
+		_mid_light = null
 	if is_instance_valid(_ground_light):
 		_ground_light.queue_free()
 		_ground_light = null
@@ -219,10 +377,14 @@ func _finish() -> void:
 
 
 func _exit_tree() -> void:
-	if is_instance_valid(_cylinder):
-		_cylinder.queue_free()
+	_free_column()
+	if is_instance_valid(_charge_audio):
+		_charge_audio.stop()
+		_charge_audio = null
 	if is_instance_valid(_core_light):
 		_core_light.queue_free()
+	if is_instance_valid(_mid_light):
+		_mid_light.queue_free()
 	if is_instance_valid(_ground_light):
 		_ground_light.queue_free()
 
@@ -238,11 +400,12 @@ func _process(delta: float) -> void:
 	_mote_tick += delta
 	if _mote_tick >= 0.065:
 		_mote_tick = 0.0
-		var focus := u * u
-		var glow := u * u * u
-		if glow >= 0.08:
+		var curves := _charge_curves(u)
+		var focus: float = curves.focus
+		var power: float = curves.power
+		if power >= 0.12:
 			var radius := lerpf(START_RADIUS, END_RADIUS, focus)
-			var mote_count := 1 if glow < 0.35 else 2
+			var mote_count := 1 if power < 0.42 else 2 if power < 0.78 else 3
 			for _i in mote_count:
 				_spawn_ascending_mote(radius)
 	if _charge_elapsed >= CHARGE_SECONDS:

@@ -75,6 +75,8 @@ var hit_received_db: float = -12.0
 var rocket_descent_db: float = -4.0
 var air_strike_inbound_db: float = -4.0
 var air_strike_inbound_distant_db: float = -18.0
+var ion_cannon_charge_db: float = -14.0
+var ion_cannon_burst_db: float = -2.0
 # Mine plant — short low-thud + electronic arm-beep cue when a player drops
 # a proximity mine. 3D so listeners can locate it.
 var mine_plant_db: float = -10.0
@@ -846,6 +848,42 @@ func attach_air_strike_inbound(parent: Node3D, travel_seconds: float, distant: b
 	_big_tail_intensity = maxf(_big_tail_intensity, 0.28 if distant else 0.42)
 	_spawn_big_tail_send(wav, tail_db, parent.global_position, 1.0, "air_strike_inbound")
 	return p
+
+
+func attach_ion_cannon_charge(parent: Node3D, charge_seconds: float) -> AudioStreamPlayer3D:
+	if parent == null:
+		return null
+	var dur_bucket: float = snappedf(clampf(charge_seconds, 2.5, 6.5), 0.1)
+	var key := "ion_cannon_charge:%0.2f" % dur_bucket
+	var wav := _cached_wav(key, Callable(self, "_synth_ion_cannon_charge").bind(dur_bucket))
+	var p: AudioStreamPlayer3D = RaytracedAudioPlayer3D.new()
+	_configure_3d_player(p)
+	p.unit_size = 140.0
+	p.stream = wav
+	p.volume_db = ion_cannon_charge_db
+	parent.add_child(p)
+	p.play()
+	var pos := parent.global_position
+	var tail_db: float = ion_cannon_charge_db + big_tail_send_db + 10.0
+	_big_tail_intensity = maxf(_big_tail_intensity, 0.52)
+	_spawn_big_tail_send(wav, tail_db, pos, 1.0, "ion_cannon_charge")
+	_play_stream(wav, ion_cannon_charge_db + explosion_wet_db + 6.0, pos, 1.0, "_ion_cannon_charge", 140.0, false, 118.0)
+	return p
+
+
+func ion_cannon_detonate(at: Vector3 = NO_POS, radius: float = 38.0) -> void:
+	# Base boom + a custom phased-square zap layered on top.
+	var r_bucket: int = int(round(clampf(radius, 8.0, 48.0)))
+	var variant: int = randi() % 3
+	explosion(at, radius)
+	var burst_key := "ion_cannon_burst:%d:%d" % [r_bucket, variant]
+	var burst_wav := _cached_wav(burst_key, Callable(self, "_synth_ion_cannon_burst").bind(float(r_bucket), variant))
+	var ex_spl: float = 168.0 + log(maxf(1.0, radius / 6.0)) / log(2.0) * 4.0
+	var burst_dist: float = clampf(radius * 1.6, 16.0, 72.0)
+	_big_tail_intensity = maxf(_big_tail_intensity, 0.62)
+	_play_stream(burst_wav, ion_cannon_burst_db, at, 1.0, "ion_cannon_burst", burst_dist, false, ex_spl)
+	_play_stream(burst_wav, ion_cannon_burst_db + explosion_wet_db + 4.0, at, 1.0, "_ion_cannon_burst", burst_dist, false, ex_spl)
+	_spawn_big_tail_send(burst_wav, ion_cannon_burst_db + big_tail_send_db + 6.0, at, 1.0, "ion_cannon_burst")
 
 
 func mine_plant(at: Vector3 = NO_POS) -> void:
@@ -1682,6 +1720,96 @@ func _synth_air_strike_inbound(travel_seconds: float, distant: bool = false) -> 
 		var s: float = tanh(lp2 * 6.5) * 0.62 * env
 		out[i] = Vector2(s, s)
 	return out
+
+
+func _synth_ion_cannon_charge(charge_seconds: float) -> PackedVector2Array:
+	# Ambient Am7-ish pad that swells from a ghostly whisper into full charge.
+	# Layered sines + soft harmonics + filtered noise bed; length matches the beam.
+	var dur: float = clampf(charge_seconds, 2.5, 6.5)
+	var n: int = int(dur * MIX_RATE)
+	var out := PackedVector2Array()
+	out.resize(n)
+	var freqs: Array[float] = [220.0, 261.63, 329.63, 392.0, 440.0, 554.37]
+	var gains: Array[float] = [0.34, 0.28, 0.24, 0.20, 0.18, 0.12]
+	var detune: Array[float] = [1.0, 1.002, 0.998, 1.004, 0.996, 1.001]
+	var phases: Array[float] = []
+	phases.resize(freqs.size())
+	for j in freqs.size():
+		phases[j] = randf() * TAU
+	var noise_lp: float = 0.0
+	for i in range(n):
+		var t: float = float(i) / float(MIX_RATE)
+		var u: float = t / dur
+		var swell: float = pow(u, 3.4)
+		var bloom: float = smoothstep(0.42, 1.0, u)
+		var pulse: float = 1.0 + sin(t * 8.6) * 0.035 * bloom
+		var chord: float = 0.0
+		for j in freqs.size():
+			var hz: float = freqs[j] * detune[j]
+			phases[j] += TAU * hz / MIX_RATE
+			chord += sin(phases[j]) * gains[j]
+			chord += sin(phases[j] * 2.0) * gains[j] * 0.07 * bloom
+			chord += sin(phases[j] * 3.0) * gains[j] * 0.03 * bloom * bloom
+		var noise: float = randf_range(-1.0, 1.0)
+		noise_lp = lerpf(noise_lp, noise, 0.014)
+		var bed: float = noise_lp * lerpf(0.05, 0.18, swell)
+		var env: float = lerpf(0.10, 1.0, swell)
+		var s: float = tanh((chord * 0.22 + bed) * env * pulse) * 0.68
+		out[i] = Vector2(s, s * 0.98)
+	return out
+
+
+func _soft_square(phase: float, drive: float = 3.8) -> float:
+	return tanh(sin(phase) * drive)
+
+
+func _synth_ion_cannon_burst(radius: float, variant: int) -> PackedVector2Array:
+	# Layered phased soft-square zap on top of the regular explosion bang.
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash([radius, variant, "ion_burst"])
+	var r_norm: float = clampf(radius / 38.0, 0.6, 1.4)
+	var dur: float = clampf(lerpf(0.42, 0.72, r_norm) * lerpf(0.92, 1.08, rng.randf()), 0.38, 0.82)
+	var n: int = int(dur * MIX_RATE)
+	var out := PackedVector2Array()
+	out.resize(n)
+	var base_freqs: Array[float] = [92.0, 138.0, 184.0, 276.0]
+	var freqs: Array[float] = []
+	for base_hz in base_freqs:
+		freqs.append(base_hz * lerpf(0.96, 1.04, rng.randf()) * r_norm)
+	var phase_rates: Array[float] = [
+		lerpf(0.985, 1.015, rng.randf()),
+		lerpf(0.975, 1.025, rng.randf()),
+		lerpf(0.965, 1.035, rng.randf()),
+		lerpf(0.955, 1.045, rng.randf()),
+	]
+	var layer_gains: Array[float] = [0.34, 0.28, 0.22, 0.16]
+	var phases: Array[float] = []
+	phases.resize(freqs.size())
+	for j in freqs.size():
+		phases[j] = rng.randf() * TAU
+	var drives: Array[float] = []
+	for _j in freqs.size():
+		drives.append(lerpf(3.2, 4.6, rng.randf()))
+	var sq_lp: float = 0.0
+	var sq_lp2: float = 0.0
+	var crack_lp: float = 0.0
+	for i in range(n):
+		var t: float = float(i) / MIX_RATE
+		var u: float = t / dur
+		var env: float = exp(-t * lerpf(5.0, 3.4, r_norm)) * pow(1.0 - u, 0.42)
+		var squares: float = 0.0
+		for j in freqs.size():
+			phases[j] += TAU * freqs[j] * phase_rates[j] / MIX_RATE
+			squares += _soft_square(phases[j], drives[j]) * layer_gains[j]
+		sq_lp = lerpf(sq_lp, squares, 0.16)
+		sq_lp2 = lerpf(sq_lp2, sq_lp, 0.12)
+		var crack: float = rng.randf_range(-1.0, 1.0)
+		crack_lp = lerpf(crack_lp, crack, 0.28)
+		var zap: float = (sq_lp2 * 0.82 + crack_lp * 0.08) * env
+		var s: float = tanh(zap * lerpf(1.5, 2.0, r_norm)) * 0.62
+		out[i] = Vector2(s, s * 0.97)
+	return out
+
 
 func _synth_rocket_descent() -> PackedVector2Array:
 	# ~0.85s heavy rumble that swells as the rocket nears impact. Brown-ish
