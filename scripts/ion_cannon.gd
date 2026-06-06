@@ -3,13 +3,13 @@ extends Node3D
 const ION_COLOR := Color(0.38, 0.78, 1.0)
 const ION_CORE := Color(0.92, 0.97, 1.0)
 const CHARGE_SECONDS := 3.8
-const SKY_HEIGHT := 220.0
+const SKY_HEIGHT := 2200.0
 const BOTTOM_DEPTH := 55.0
 const START_RADIUS := 30.0
 const END_RADIUS := 1.5
 const BLAST_RADIUS := 38.0
 const BLAST_DAMAGE := 175.0
-const DETONATION_CYLINDER_UP := 88.0
+const DETONATION_CYLINDER_UP := 880.0
 const DETONATION_DEPTH_BELOW_LAVA := 20.0
 const DETONATION_LINE_COUNT := 40
 const DETONATION_LINE_MIN_SPEED := 70.0
@@ -380,8 +380,8 @@ func _detonate() -> void:
 	var local_player: Node = null
 	if _game and is_instance_valid(_game) and _game.get("local_player"):
 		local_player = _game.local_player
-	if _notify_server and _game and is_instance_valid(_game) and _game.has_method("_apply_environment_explosion"):
-		_game.call("_apply_environment_explosion", target_pos, BLAST_RADIUS, BLAST_DAMAGE, shooter_id)
+	if _notify_server and _game and is_instance_valid(_game) and _game.has_method("_apply_ion_cannon_explosion"):
+		_game.call("_apply_ion_cannon_explosion", target_pos, BLAST_RADIUS, BLAST_DAMAGE, shooter_id)
 	if scene:
 		var sidechain_peak := 5.5
 		if scene.has_method("trigger_explosion_sidechain"):
@@ -450,8 +450,15 @@ func _spawn_ion_rise_line(parent: Node3D, radius: float, _cyl_height: float, rng
 	tw.chain().tween_callback(line.queue_free)
 
 
-func _lava_surface_world_y(scene: Node, strike_pos: Vector3) -> float:
-	var arena: Node = scene.get_node_or_null("Arena")
+static func damage_column_bounds(scene: Node, strike_pos: Vector3) -> Dictionary:
+	var lava_y := _lava_surface_world_y_for_scene(scene, strike_pos)
+	var bottom_y := lava_y - DETONATION_DEPTH_BELOW_LAVA
+	var top_y := strike_pos.y + DETONATION_CYLINDER_UP
+	return {"bottom_y": bottom_y, "top_y": top_y}
+
+
+static func _lava_surface_world_y_for_scene(scene: Node, strike_pos: Vector3) -> float:
+	var arena: Node = scene.get_node_or_null("Arena") if scene else null
 	if arena and arena.has_method("get_lava_surface_world_y"):
 		return float(arena.get_lava_surface_world_y())
 	if arena:
@@ -460,7 +467,7 @@ func _lava_surface_world_y(scene: Node, strike_pos: Vector3) -> float:
 
 
 func _detonation_column_layout(scene: Node, strike_pos: Vector3) -> Dictionary:
-	var lava_y := _lava_surface_world_y(scene, strike_pos)
+	var lava_y := _lava_surface_world_y_for_scene(scene, strike_pos)
 	var bottom_y := lava_y - DETONATION_DEPTH_BELOW_LAVA
 	var top_y := strike_pos.y + DETONATION_CYLINDER_UP
 	var height := maxf(12.0, top_y - bottom_y)

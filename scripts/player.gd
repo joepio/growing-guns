@@ -53,7 +53,7 @@ const HIGH_RATE_REMOTE_CASING_BPS := 90.0
 const HIGH_RATE_REMOTE_CASING_INTERVAL_MS := 90
 const GRENADE_RELOAD := 3.0
 const CLUSTER_GRENADE_RELOAD := 4.0
-const AIR_STRIKE_RELOAD := 12.0
+const AIR_STRIKE_RELOAD := 9.5
 const ION_CANNON_RELOAD := 14.0
 const AIR_STRIKE_AIM_RANGE := 800.0
 const GRENADE_LAUNCH_SPEED := 22.0
@@ -1553,13 +1553,37 @@ func _apply_bullet_splash(pos: Vector3, radius: float, damage: float, shooter_id
 
 
 func _apply_air_strike_splash(pos: Vector3, radius: float, damage: float, shooter_id: int) -> void:
-	# Artillery-style blast: horizontal reach, no world LoS check (low cover
-	# doesn't block a sky strike). Bullet/bazooka splash still raycasts.
+	_apply_bullet_splash(pos, radius, damage, shooter_id)
+
+
+func _apply_ion_cannon_splash(
+	pos: Vector3,
+	radius: float,
+	damage: float,
+	shooter_id: int,
+	bottom_y: float,
+	top_y: float,
+) -> void:
+	# Sky beam: vertical cylinder at the strike point — cover does not block it.
+	_apply_artillery_splash(pos, radius, damage, shooter_id, bottom_y, top_y)
+
+
+func _apply_artillery_splash(
+	pos: Vector3,
+	radius: float,
+	damage: float,
+	shooter_id: int,
+	bottom_y: float,
+	top_y: float,
+) -> void:
 	var shooter := get_parent().get_node_or_null(str(shooter_id))
 	for p: Node3D in get_tree().get_nodes_in_group("players"):
 		if not is_instance_valid(p):
 			continue
 		if p.get("ghost_mode") == true:
+			continue
+		var player_y := p.global_position.y
+		if player_y < bottom_y or player_y > top_y:
 			continue
 		var flat_dist: float = Vector2(
 			p.global_position.x - pos.x,
