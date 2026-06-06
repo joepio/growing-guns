@@ -668,6 +668,17 @@ static var _heat_shader: Shader = null
 static var _shock_mesh: SphereMesh = null
 static var _shock_shader: Shader = null
 
+# -------------------- world-space VFX attach --------------------
+
+# Callers pass world positions; parent may be Arena (non-zero transform).
+static func _attach_world_3d(scene: Node, node: Node3D, world_pos: Vector3) -> void:
+	scene.add_child(node)
+	if scene is Node3D:
+		node.global_position = world_pos
+	else:
+		node.position = world_pos
+
+
 # Bigger blasts expand further, hold a hotter core, and pump a brighter
 # point light — stacked EXPLOSIVE ROUNDS cards should feel earth-shaking.
 # `local_player` (optional) is the local human's player; if provided, gets a
@@ -707,8 +718,7 @@ static func spawn_bullet_blast(scene: Node, pos: Vector3, radius: float, color: 
 	cmat.emission_energy_multiplier = 14.0
 	cmat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	core.material_override = cmat
-	core.position = pos
-	scene.add_child(core)
+	_attach_world_3d(scene, core, pos)
 	var ctw := core.create_tween().set_parallel(true)
 	var core_target_scale := Vector3.ONE * maxf(0.01, radius / cm.radius)
 	ctw.tween_property(core, "scale", core_target_scale, expand_time)\
@@ -739,8 +749,7 @@ static func spawn_bullet_blast(scene: Node, pos: Vector3, radius: float, color: 
 	mat.emission_energy_multiplier = 4.0
 	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	wave.material_override = mat
-	wave.position = pos
-	scene.add_child(wave)
+	_attach_world_3d(scene, wave, pos)
 	var tw := wave.create_tween().set_parallel(true)
 	var wave_target_scale := Vector3.ONE * maxf(0.01, (radius * 1.08) / wm.radius)
 	# Shockwave expands at the speed of sound (343 m/s) so visual + audio
@@ -763,8 +772,7 @@ static func spawn_bullet_blast(scene: Node, pos: Vector3, radius: float, color: 
 	flash.light_color = Color(1.0, 0.98, 0.92)
 	flash.light_energy = 100.0 + radius * 14.0
 	flash.omni_range = maxf(40.0, radius * 6.0)
-	flash.position = pos
-	scene.add_child(flash)
+	_attach_world_3d(scene, flash, pos)
 	var ftw := flash.create_tween()
 	ftw.tween_property(flash, "light_energy", 0.0, 0.06)\
 		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
@@ -777,8 +785,7 @@ static func spawn_bullet_blast(scene: Node, pos: Vector3, radius: float, color: 
 	core_light.light_color = color.lerp(Color(1.0, 0.95, 0.78), 0.7)
 	core_light.light_energy = 60.0 + radius * 8.0
 	core_light.omni_range = maxf(8.0, radius * 1.4)
-	core_light.position = pos
-	scene.add_child(core_light)
+	_attach_world_3d(scene, core_light, pos)
 	var ctlw := core_light.create_tween()
 	ctlw.tween_property(core_light, "light_color", color.lerp(Color(1.0, 0.55, 0.18), 0.5), 0.12)\
 		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
@@ -794,8 +801,7 @@ static func spawn_bullet_blast(scene: Node, pos: Vector3, radius: float, color: 
 	light.light_color = hot_color
 	light.light_energy = clampf(20.0 + radius * 4.5, 20.0, 48.0)
 	light.omni_range = radius * 4.2
-	light.position = pos
-	scene.add_child(light)
+	_attach_world_3d(scene, light, pos)
 	var light_dur := clampf(0.1 + radius * 0.012, 0.1, 0.22)
 	var ltw := light.create_tween()
 	ltw.set_parallel(true)
@@ -979,8 +985,7 @@ static func spawn_heat_distortion(scene: Node, pos: Vector3, radius: float, dura
 	mat.set_shader_parameter("zoom_strength", strength * 0.9)
 	mat.set_shader_parameter("opacity", 0.34)
 	shell.material_override = mat
-	shell.position = pos
-	scene.add_child(shell)
+	_attach_world_3d(scene, shell, pos)
 
 	var target_scale := Vector3.ONE * maxf(0.01, (radius * 1.85) / _heat_mesh.radius)
 	var tw := shell.create_tween().set_parallel(true)
@@ -1048,8 +1053,7 @@ static func spawn_shockwave_ring(scene: Node, pos: Vector3, radius: float) -> vo
 	mat.set_shader_parameter("ring_thickness", 7.0)
 	mat.set_shader_parameter("opacity", 0.9)
 	shell.material_override = mat
-	shell.position = pos
-	scene.add_child(shell)
+	_attach_world_3d(scene, shell, pos)
 	# Sound-speed expansion (matches audio delay) with 30 ms minimum so
 	# tiny blasts remain visible.
 	var dur: float = maxf(0.03, radius / 343.0)

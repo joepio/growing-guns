@@ -196,6 +196,13 @@ func show_death_effect_for(player_id: int, show: bool) -> bool:
 	return true
 
 
+func flash_impact_all(world_pos: Vector3, intensity: float = 1.0) -> void:
+	for renderer in _renderers_by_player.values():
+		var rp := renderer as RenderPlayer
+		if rp:
+			rp.flash_impact(world_pos, intensity)
+
+
 func update_views() -> void:
 	if not _grid:
 		return

@@ -21,6 +21,7 @@ var _body_mat: StandardMaterial3D = null
 var _engine_mat: StandardMaterial3D = null
 var _plume_mat: StandardMaterial3D = null
 var _plume: MeshInstance3D = null
+var _core_plume_mat: StandardMaterial3D = null
 var _engine_light: OmniLight3D = null
 var _core_light: OmniLight3D = null
 var _woosh: AudioStreamPlayer3D = null
@@ -33,6 +34,11 @@ var _notify_server: bool = false
 var shooter_id: int = 0
 
 
+func _report_error(step: String, detail: String) -> void:
+	push_error("AirStrike.%s: %s" % [step, detail])
+	print_stack()
+
+
 func setup(
 	fx_scene: Node,
 	p_sky_from: Vector3,
@@ -41,6 +47,10 @@ func setup(
 	game: Node = null,
 	notify_server: bool = false,
 ) -> void:
+	if fx_scene == null or not is_instance_valid(fx_scene):
+		_report_error("setup", "fx_scene is null/invalid — laser, audio, and blast VFX cannot spawn")
+		queue_free()
+		return
 	_fx_scene = fx_scene
 	sky_from = p_sky_from
 	target_pos = p_target
@@ -49,8 +59,10 @@ func setup(
 	_notify_server = notify_server
 	add_to_group("air_strike_markers")
 	_travel_seconds = ROCKET_TRAVEL_SECONDS
-	_spawn_beam()
-	_spawn_target_light()
+	if not _spawn_beam():
+		_report_error("setup", "targeting beam failed to spawn")
+	if not _spawn_target_light():
+		_report_error("setup", "target marker light failed to spawn")
 	SFX.mine_plant(target_pos)
 	begin_flight(fx_scene, game, notify_server)
 
@@ -68,9 +80,17 @@ func begin_flight(fx_scene: Node, game: Node, notify_server: bool = false) -> vo
 	_smoke_tick = 0.0
 
 	_rocket = _build_rocket_visual()
+	if _rocket == null:
+		_report_error("begin_flight", "rocket visual failed to build")
+		_inbound = false
+		return
 	add_child(_rocket)
 	_rocket.global_position = sky_from
 	_orient_rocket_nose_first(_rocket, sky_from, target_pos)
+	var flare_start_dist := maxf(sky_from.distance_to(target_pos), 1.0)
+	_rocket.set_meta("flare_target_pos", target_pos)
+	_rocket.set_meta("flare_start_dist", flare_start_dist)
+	_rocket.set_meta("flare_intensity", 0.0)
 
 	_woosh = SFX.attach_air_strike_inbound(_rocket, _travel_seconds, false)
 	if _flight_tween and _flight_tween.is_valid():
@@ -90,9 +110,13 @@ func _set_rocket_along_path(t: float) -> void:
 
 func _on_rocket_impact() -> void:
 	if not _inbound:
+		_report_error("impact", "callback fired while not inbound — explosion skipped")
 		return
 	_inbound = false
 	var blast_color := Color(1.0, 0.45, 0.08)
+	var impact_intensity := 1.0
+	if is_instance_valid(_rocket):
+		impact_intensity = clampf(float(_rocket.get_meta("flare_intensity", 1.0)), 0.85, 1.0)
 	var scene := _fx_scene if is_instance_valid(_fx_scene) else get_tree().current_scene
 	var local_player: Node = null
 	if _game and is_instance_valid(_game) and _game.get("local_player"):
@@ -101,10 +125,18 @@ func _on_rocket_impact() -> void:
 		_game.call("_apply_environment_explosion", target_pos, BLAST_RADIUS, BLAST_DAMAGE, shooter_id)
 	if scene:
 		Violence.spawn_bullet_blast(scene, target_pos, BLAST_RADIUS, blast_color, local_player)
+	else:
+		_report_error("impact", "no fx scene — explosion VFX/audio skipped")
+	_spawn_impact_flare(impact_intensity)
 	if is_instance_valid(_rocket):
 		_rocket.queue_free()
 		_rocket = null
 	_finish_strike()
+
+
+func _spawn_impact_flare(intensity: float) -> void:
+	if _game and is_instance_valid(_game) and _game.has_method("flash_air_strike_impact"):
+		_game.call("flash_air_strike_impact", target_pos + Vector3.UP * 0.35, intensity)
 
 
 func _finish_strike() -> void:
@@ -144,9 +176,9 @@ func _cleanup_fx() -> void:
 		_rocket = null
 
 
-func _spawn_beam() -> void:
+func _spawn_beam() -> bool:
 	if _fx_scene == null:
-		return
+		return false
 	var dist := maxf(sky_from.distance_to(target_pos), 0.5)
 	_beam = MeshInstance3D.new()
 	_beam.name = "StrikeBeam"
@@ -164,11 +196,13 @@ func _spawn_beam() -> void:
 	_fx_scene.add_child(_beam)
 	_beam.global_position = sky_from.lerp(target_pos, 0.5)
 	_orient_along_path(_beam, sky_from, target_pos)
+	_beam.visible = true
+	return is_instance_valid(_beam) and _beam.is_inside_tree()
 
 
-func _spawn_target_light() -> void:
+func _spawn_target_light() -> bool:
 	if _fx_scene == null:
-		return
+		return false
 	_target_light = OmniLight3D.new()
 	_target_light.name = "StrikeTargetLight"
 	_target_light.light_color = MARKER_COLOR
@@ -176,6 +210,7 @@ func _spawn_target_light() -> void:
 	_target_light.omni_range = 7.0
 	_fx_scene.add_child(_target_light)
 	_target_light.global_position = target_pos + Vector3.UP * 0.35
+	return true
 
 
 func _orient_along_path(node: Node3D, from: Vector3, to: Vector3) -> void:
@@ -247,45 +282,89 @@ func _build_rocket_visual() -> Node3D:
 	_engine_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	_engine_mat.albedo_color = Color(1.0, 0.82, 0.28)
 	_engine_mat.emission_enabled = true
-	_engine_mat.emission = Color(1.0, 0.72, 0.14)
-	_engine_mat.emission_energy_multiplier = 90.0
+	_engine_mat.emission = Color(1.0, 0.82, 0.35)
+	_engine_mat.emission_energy_multiplier = 75.0
+	_engine_mat.disable_fog = true
 	engine.material_override = _engine_mat
 	root.add_child(engine)
 
 	var plume := MeshInstance3D.new()
 	plume.name = "EnginePlume"
 	var plume_mesh := CylinderMesh.new()
-	plume_mesh.top_radius = 0.65
-	plume_mesh.bottom_radius = 0.14
-	plume_mesh.height = 4.2
+	plume_mesh.top_radius = 0.82
+	plume_mesh.bottom_radius = 0.18
+	plume_mesh.height = 6.8
 	plume.mesh = plume_mesh
-	plume.position = Vector3(0.0, -4.6, 0.0)
+	plume.position = Vector3(0.0, -6.2, 0.0)
 	_plume_mat = StandardMaterial3D.new()
 	_plume_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	_plume_mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
-	_plume_mat.albedo_color = Color(1.0, 0.55, 0.08, 0.85)
+	_plume_mat.albedo_color = Color(1.0, 0.62, 0.12, 0.72)
 	_plume_mat.emission_enabled = true
-	_plume_mat.emission = Color(1.0, 0.45, 0.04)
-	_plume_mat.emission_energy_multiplier = 120.0
+	_plume_mat.emission = Color(1.0, 0.58, 0.12)
+	_plume_mat.emission_energy_multiplier = 110.0
 	_plume_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	_plume_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_plume_mat.disable_fog = true
 	plume.material_override = _plume_mat
 	root.add_child(plume)
 	_plume = plume
 
+	var core_plume := MeshInstance3D.new()
+	core_plume.name = "EngineCorePlume"
+	var core_plume_mesh := CylinderMesh.new()
+	core_plume_mesh.top_radius = 0.34
+	core_plume_mesh.bottom_radius = 0.06
+	core_plume_mesh.height = 4.8
+	core_plume.mesh = core_plume_mesh
+	core_plume.position = Vector3(0.0, -4.6, 0.0)
+	_core_plume_mat = StandardMaterial3D.new()
+	_core_plume_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_core_plume_mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	_core_plume_mat.albedo_color = Color(1.0, 0.96, 0.82, 0.82)
+	_core_plume_mat.emission_enabled = true
+	_core_plume_mat.emission = Color(1.0, 0.94, 0.78)
+	_core_plume_mat.emission_energy_multiplier = 180.0
+	_core_plume_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_core_plume_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_core_plume_mat.disable_fog = true
+	core_plume.material_override = _core_plume_mat
+	root.add_child(core_plume)
+
+	var halo_plume := MeshInstance3D.new()
+	halo_plume.name = "EngineHaloPlume"
+	var halo_mesh := CylinderMesh.new()
+	halo_mesh.top_radius = 1.35
+	halo_mesh.bottom_radius = 0.28
+	halo_mesh.height = 9.0
+	halo_plume.mesh = halo_mesh
+	halo_plume.position = Vector3(0.0, -7.0, 0.0)
+	var halo_mat := StandardMaterial3D.new()
+	halo_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	halo_mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	halo_mat.albedo_color = Color(1.0, 0.48, 0.08, 0.14)
+	halo_mat.emission_enabled = true
+	halo_mat.emission = Color(1.0, 0.42, 0.06)
+	halo_mat.emission_energy_multiplier = 70.0
+	halo_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	halo_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	halo_mat.disable_fog = true
+	halo_plume.material_override = halo_mat
+	root.add_child(halo_plume)
+
 	_core_light = OmniLight3D.new()
 	_core_light.name = "EngineCoreLight"
-	_core_light.light_color = Color(1.0, 0.72, 0.28)
-	_core_light.light_energy = 120.0
-	_core_light.omni_range = 55.0
+	_core_light.light_color = Color(1.0, 0.82, 0.42)
+	_core_light.light_energy = 70.0
+	_core_light.omni_range = 85.0
 	_core_light.position = Vector3(0.0, -2.0, 0.0)
 	root.add_child(_core_light)
 
 	_engine_light = OmniLight3D.new()
 	_engine_light.name = "EngineLight"
-	_engine_light.light_color = Color(1.0, 0.55, 0.12)
-	_engine_light.light_energy = 180.0
-	_engine_light.omni_range = 130.0
+	_engine_light.light_color = Color(1.0, 0.62, 0.16)
+	_engine_light.light_energy = 95.0
+	_engine_light.omni_range = 180.0
 	_engine_light.position = Vector3(0.0, -3.0, 0.0)
 	root.add_child(_engine_light)
 
@@ -293,31 +372,44 @@ func _build_rocket_visual() -> Node3D:
 
 
 func _process(delta: float) -> void:
+	_pulse += delta
+	var pulse := sin(_pulse * (14.0 if _inbound else 6.2))
+	if _beam_mat:
+		var beam_energy := (10.0 + pulse * 3.0) if _inbound else (8.0 + pulse * 2.0)
+		_beam_mat.emission_energy_multiplier = beam_energy
+	if _target_light and not _inbound:
+		_target_light.light_energy = 5.0 + pulse * 1.5
 	if not _inbound:
-		_pulse += delta
-		var pulse := sin(_pulse * 6.2)
-		if _beam_mat:
-			_beam_mat.emission_energy_multiplier = 8.0 + pulse * 2.0
-		if _target_light:
-			_target_light.light_energy = 5.0 + pulse * 1.5
 		return
 
-	_pulse += delta
 	_travel_elapsed += delta
-	var pulse := sin(_pulse * 14.0)
 	var u := clampf(_travel_elapsed / maxf(_travel_seconds, 0.001), 0.0, 1.0)
 	var approach := u * u
 	if _engine_mat:
-		_engine_mat.emission_energy_multiplier = lerpf(90.0, 210.0, approach) + pulse * 18.0
+		_engine_mat.emission_energy_multiplier = lerpf(75.0, 165.0, approach) + pulse * 12.0
+	var dist_boost := _engine_distance_boost()
 	if _plume_mat:
-		_plume_mat.emission_energy_multiplier = lerpf(120.0, 320.0, approach) + pulse * 24.0
-		_plume_mat.albedo_color = Color(1.0, 0.55, 0.08, lerpf(0.55, 0.95, approach))
+		_plume_mat.emission_energy_multiplier = (lerpf(110.0, 240.0, approach) + pulse * 16.0) * dist_boost
+		_plume_mat.albedo_color = Color(1.0, 0.62, 0.12, lerpf(0.55, 0.82, approach))
+	if _core_plume_mat:
+		_core_plume_mat.emission_energy_multiplier = (lerpf(180.0, 360.0, approach) + pulse * 20.0) * dist_boost
 	if _plume:
-		_plume.scale = Vector3(1.0, lerpf(0.75, 2.4, approach), 1.0)
+		_plume.scale = Vector3(1.0, lerpf(0.85, 2.4, approach), 1.0)
+	var light_boost := lerpf(1.0, 1.22, clampf(dist_boost - 1.0, 0.0, 1.0))
 	if _core_light:
-		_core_light.light_energy = lerpf(90.0, 180.0, approach) + pulse * 25.0
+		_core_light.light_energy = (lerpf(70.0, 145.0, approach) + pulse * 14.0) * light_boost
 	if _engine_light:
-		_engine_light.light_energy = lerpf(120.0, 220.0, approach) + pulse * 30.0
+		_engine_light.light_energy = (lerpf(95.0, 195.0, approach) + pulse * 16.0) * light_boost
+	if is_instance_valid(_rocket):
+		var start_dist: float = maxf(float(_rocket.get_meta("flare_start_dist", sky_from.distance_to(target_pos))), 1.0)
+		var remaining: float = _rocket.global_position.distance_to(target_pos)
+		var closeness := 1.0 - clampf(remaining / start_dist, 0.0, 1.0)
+		var intensity := closeness * closeness
+		_rocket.set_meta("flare_intensity", intensity)
+		var flight_dir := (target_pos - sky_from).normalized()
+		_rocket.set_meta("flare_flight_dir", flight_dir)
+		var tail := _rocket.global_position - flight_dir * 5.2
+		_rocket.set_meta("flare_world_pos", tail)
 	if is_instance_valid(_rocket) and _fx_scene:
 		_smoke_tick += delta
 		if _smoke_tick >= 0.016:
@@ -340,3 +432,30 @@ func _process(delta: float) -> void:
 	if _woosh:
 		var swell := lerpf(0.62, 1.0, u * u)
 		_woosh.volume_db = SFX.air_strike_inbound_db + linear_to_db(swell)
+	# Safety net if the flight tween callback is dropped (tree pause, early free, etc.).
+	if _travel_elapsed >= _travel_seconds + 0.05:
+		_on_rocket_impact()
+
+
+func _viewer_camera() -> Camera3D:
+	if _game and is_instance_valid(_game):
+		var local_player: Node = _game.get("local_player")
+		if local_player and is_instance_valid(local_player):
+			var cam := local_player.get_node_or_null("Camera") as Camera3D
+			if cam:
+				return cam
+	var vp := get_viewport()
+	if vp:
+		return vp.get_camera_3d()
+	return null
+
+
+func _engine_distance_boost() -> float:
+	if not is_instance_valid(_rocket):
+		return 1.0
+	var dist_to_cam := 280.0
+	var cam := _viewer_camera()
+	if cam:
+		dist_to_cam = cam.global_position.distance_to(_rocket.global_position)
+	# Brighten when far, but never inflate mesh size into obvious shapes.
+	return clampf(dist_to_cam / 180.0, 1.0, 1.45)

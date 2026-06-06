@@ -1418,15 +1418,41 @@ func _ion_cannon_finished() -> void:
 
 
 func _random_air_strike_target() -> Vector3:
-	var origin := _random_pickup_spawn_pos()
+	# Pick random arena XZ, then raycast from the sky — not pickup height (~52 m).
+	const RAY_TOP := 320.0
+	const RAY_DEPTH := 420.0
+	const MAX_TRIES := 14
 	var space := get_world_3d().direct_space_state
-	var top := origin + Vector3(0.0, 120.0, 0.0)
-	var bottom := origin + Vector3(0.0, -40.0, 0.0)
-	var query := PhysicsRayQueryParameters3D.create(top, bottom, 1)
-	var hit := space.intersect_ray(query)
-	if hit.is_empty():
-		return origin
-	return hit.get("position", origin) + Vector3.UP * 0.05
+	if space == null:
+		return _random_arena_xz() + Vector3.UP * 0.05
+	for _i in MAX_TRIES:
+		var base := _random_arena_xz()
+		var top := base + Vector3.UP * RAY_TOP
+		var bottom := base - Vector3.UP * RAY_DEPTH
+		var query := PhysicsRayQueryParameters3D.create(top, bottom, 1)
+		var hit := space.intersect_ray(query)
+		if hit.is_empty():
+			continue
+		var normal: Vector3 = hit.get("normal", Vector3.UP)
+		if normal.dot(Vector3.UP) < 0.55:
+			continue
+		return hit.get("position", base) + Vector3.UP * 0.05
+	return _random_arena_xz() + Vector3.UP * 0.05
+
+
+func _random_arena_xz() -> Vector3:
+	var origin := ARENA_OFFSET
+	var half := 32.0
+	var arena: Node = get_node_or_null("Arena")
+	if arena:
+		origin = (arena as Node3D).global_position
+		var gen: Node = arena.get_node_or_null("Generator")
+		if gen:
+			half = maxf(14.0, float(gen.get("arena_size")) * 0.5 - 6.0)
+	var margin := 4.0
+	var x := randf_range(-half + margin, half - margin)
+	var z := randf_range(-half + margin, half - margin)
+	return origin + Vector3(x, 0.0, z)
 
 
 func _air_strike_sky_from(target: Vector3) -> Vector3:
@@ -1489,11 +1515,24 @@ func _air_strike_fx_root() -> Node3D:
 @rpc("authority", "call_local", "reliable")
 func _air_strike_launch(sky_from: Vector3, target: Vector3, shooter_id: int = 0) -> void:
 	if state != State.PLAYING:
+		push_warning("AirStrike: launch ignored — game state is %d (expected PLAYING)" % int(state))
+		if multiplayer.is_server():
+			_air_strike_pending = false
+		return
+	var fx_scene := $Arena if has_node("Arena") else self
+	if fx_scene == null or not is_instance_valid(fx_scene):
+		push_error("AirStrike: fx root is null/invalid — cannot spawn laser or blast FX")
+		if multiplayer.is_server():
+			_air_strike_pending = false
 		return
 	var marker := AIR_STRIKE_SCRIPT.new()
+	if marker == null:
+		push_error("AirStrike: failed to instantiate AirStrikeMarker")
+		if multiplayer.is_server():
+			_air_strike_pending = false
+		return
 	marker.name = "AirStrikeMarker"
-	var fx_scene := get_tree().current_scene
-	_air_strike_fx_root().add_child(marker)
+	fx_scene.add_child(marker)
 	marker.setup(
 		fx_scene,
 		sky_from,
@@ -1502,6 +1541,10 @@ func _air_strike_launch(sky_from: Vector3, target: Vector3, shooter_id: int = 0)
 		self,
 		multiplayer.is_server(),
 	)
+	if not is_instance_valid(marker) or not marker.is_inside_tree():
+		push_error("AirStrike: marker removed itself during setup — see prior AirStrike.* errors")
+		if multiplayer.is_server():
+			_air_strike_pending = false
 
 
 func _apply_environment_explosion(pos: Vector3, radius: float, damage: float, shooter_id: int = 0) -> void:
@@ -1781,6 +1824,16 @@ func dev_spawn_pickup(kind: String = "") -> void:
 		kind = PICKUP_ITEM_SCRIPT.KINDS[randi() % PICKUP_ITEM_SCRIPT.KINDS.size()]
 	_spawn_pickup_item_with_fx.rpc(kind, _dev_pickup_spawn_pos())
 
+func flash_air_strike_impact(world_pos: Vector3, intensity: float = 1.0) -> void:
+	if _splitscreen and _splitscreen.is_enabled() and _splitscreen.has_method("flash_impact_all"):
+		_splitscreen.flash_impact_all(world_pos, intensity)
+		return
+	for renderer in _render_players.values():
+		var rp := renderer as RenderPlayer
+		if rp:
+			rp.flash_impact(world_pos, intensity)
+
+
 func begin_player_air_strike(target: Vector3, shooter_id: int = 0) -> void:
 	if not multiplayer.is_server():
 		return
@@ -1835,6 +1888,8 @@ func dev_test_ion_cannon() -> void:
 	_announce.rpc("ION CANNON INCOMING", 1.2)
 
 func _dev_air_strike_target() -> Vector3:
+	if local_player and is_instance_valid(local_player) and local_player.has_method("_air_strike_target"):
+		return local_player._air_strike_target()
 	if _dev_panel != null and _dev_panel.has_method("get_target"):
 		var target: Node = _dev_panel.get_target()
 		if target and is_instance_valid(target):
@@ -1868,18 +1923,7 @@ func _player_look_aim_point(player: Node) -> Vector3:
 	return hit.get("position", cam_origin + cam_dir * aim_dist)
 
 func _random_pickup_spawn_pos() -> Vector3:
-	var origin := ARENA_OFFSET
-	var half := 32.0
-	var arena: Node = get_node_or_null("Arena")
-	if arena:
-		origin = (arena as Node3D).global_position
-		var gen: Node = arena.get_node_or_null("Generator")
-		if gen:
-			half = maxf(14.0, float(gen.get("arena_size")) * 0.5 - 6.0)
-	var margin := 4.0
-	var x := randf_range(-half + margin, half - margin)
-	var z := randf_range(-half + margin, half - margin)
-	return origin + Vector3(x, PICKUP_SPAWN_HEIGHT, z)
+	return _random_arena_xz() + Vector3.UP * PICKUP_SPAWN_HEIGHT
 
 @rpc("authority", "call_local", "reliable")
 func _spawn_pickup_item_with_fx(kind: String, world_pos: Vector3) -> void:

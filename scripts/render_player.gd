@@ -6,6 +6,7 @@ signal card_selected(player_id: int, card_id: String)
 const CROSSHAIR_SCRIPT := preload("res://scripts/crosshair.gd")
 const HIT_MARKER_SCRIPT := preload("res://scripts/hit_marker.gd")
 const DAMAGE_INDICATOR_SCRIPT := preload("res://scripts/damage_indicator.gd")
+const LENS_FLARE_OVERLAY_SCRIPT := preload("res://scripts/lens_flare_overlay.gd")
 const HUD_ICON_SCRIPT := preload("res://scripts/hud_icon.gd")
 const PICKUP_ITEM_SCRIPT := preload("res://scripts/pickup_item.gd")
 const ROUND_MODIFIERS_SCRIPT := preload("res://scripts/round_modifiers.gd")
@@ -25,6 +26,7 @@ var input_device: int = -1
 
 var viewport: SubViewport = null
 var camera: Camera3D = null
+var _flare_overlay: Control = null
 var _hud: Dictionary = {}
 var _card_ids: Array = []
 var _card_selected_index: int = 0
@@ -56,6 +58,8 @@ func _process(_delta: float) -> void:
 	if source:
 		camera.global_transform = source.global_transform
 		camera.fov = source.fov
+	if _flare_overlay and viewport:
+		_flare_overlay.camera = camera
 	_update_hud(player)
 
 
@@ -96,6 +100,11 @@ func handle_input(event: InputEvent) -> bool:
 	return false
 
 
+func flash_impact(world_pos: Vector3, intensity: float = 1.0) -> void:
+	if _flare_overlay:
+		_flare_overlay.trigger_impact_flash(world_pos, intensity)
+
+
 func show_card_pick(card_ids: Array) -> void:
 	_blend_death_into_card_pick()
 	_card_ids = card_ids.duplicate()
@@ -126,6 +135,9 @@ func show_card_pick(card_ids: Array) -> void:
 			if old_title_tw and old_title_tw.is_valid():
 				old_title_tw.kill()
 	_hud.card_overlay.visible = true
+	_hud.crosshair.visible = false
+	if size.x > 1.0 and size.y > 1.0:
+		layout_for_size(size)
 	# Block the mouse on cards belonging to controller-using players, so the
 	# global cursor can't steal their selection while they navigate with
 	# DPAD/stick. Mouse-using players (incl. a kbd+mouse player who joined
@@ -156,6 +168,7 @@ func _clear_card_pick_now() -> void:
 	_card_pick_locked = false
 	_card_stick_x_engaged = false
 	_card_exit_animating = false
+	_hud.crosshair.visible = true
 	var bg: ColorRect = _hud.card_bg
 	if bg.has_meta("tween"):
 		var old_tw: Tween = bg.get_meta("tween")
@@ -395,23 +408,34 @@ func _build() -> void:
 	root.add_child(special_panel)
 	var dash_panel := _build_dash_panel()
 	root.add_child(dash_panel)
+	for panel in [hp_panel, ammo_panel, special_panel, dash_panel]:
+		panel.z_index = 10
+
+	_flare_overlay = LENS_FLARE_OVERLAY_SCRIPT.new()
+	_flare_overlay.name = "LensFlareOverlay"
+	_flare_overlay.z_index = 1
+	root.add_child(_flare_overlay)
 
 	var crosshair := Control.new()
 	crosshair.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	crosshair.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	crosshair.z_index = 10
 	crosshair.set_script(CROSSHAIR_SCRIPT)
 	root.add_child(crosshair)
 	var hitmarker := Control.new()
 	hitmarker.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	hitmarker.z_index = 10
 	hitmarker.set_script(HIT_MARKER_SCRIPT)
 	root.add_child(hitmarker)
 	var damage := Control.new()
 	damage.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	damage.z_index = 10
 	damage.set_script(DAMAGE_INDICATOR_SCRIPT)
 	root.add_child(damage)
 	var death := ColorRect.new()
 	death.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	death.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	death.z_index = 25
 	death.color = Color(0.8, 0.0, 0.0, 0.0)
 	root.add_child(death)
 	var ghost := ColorRect.new()
@@ -658,6 +682,7 @@ func _build_card_overlay(root: Control) -> Dictionary:
 	var overlay := Control.new()
 	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	overlay.z_index = 30
 	overlay.visible = false
 	overlay.process_mode = Node.PROCESS_MODE_ALWAYS
 	root.add_child(overlay)
