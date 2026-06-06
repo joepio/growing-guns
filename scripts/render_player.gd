@@ -901,6 +901,10 @@ func _card_stat_diff(card_id: String) -> Array[String]:
 		out.append("%+d Ammo Capacity" % (next_w.mag_size_bonus - base_w.mag_size_bonus))
 	if abs(base_w.reload_mult - next_w.reload_mult) > 0.001:
 		out.append("%+d%% Reload Speed" % int(round((next_w.reload_mult / base_w.reload_mult - 1.0) * 100.0)))
+	if abs(base_w.special_cooldown_mult - next_w.special_cooldown_mult) > 0.001:
+		var recharge_pct: int = int(round((1.0 - next_w.special_cooldown_mult / maxf(0.001, base_w.special_cooldown_mult)) * 100.0))
+		if recharge_pct != 0:
+			out.append("%+d%% RMB Recharge" % recharge_pct)
 	if base_w.extra_projectiles != next_w.extra_projectiles:
 		out.append("%+d Projectiles" % (next_w.extra_projectiles - base_w.extra_projectiles))
 	if base_w.ricochet_count != next_w.ricochet_count:
