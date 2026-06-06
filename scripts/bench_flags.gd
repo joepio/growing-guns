@@ -13,6 +13,10 @@ extends RefCounted
 static var active: bool = false
 static var no_casings: bool = false
 static var no_bullets: bool = false
+static var no_bullet_visuals: bool = false
+static var no_bullet_zips: bool = false
+static var no_shot_audio: bool = false
+static var no_muzzle_flash: bool = false
 static var no_explosion_visuals: bool = false
 static var no_explosion_audio: bool = false
 
