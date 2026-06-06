@@ -263,8 +263,6 @@ const BOT_AIR_STRIKE_PANIC_RADIUS := 22.0
 const BOT_GAP_JUMP_MIN_LANDING := 4.5
 const BOT_GAP_JUMP_MAX_LANDING := 12.0
 const EXPLOSION_EDGE_FALLOFF := 0.2
-const EXPLOSION_PUSH := 9.0
-const EXPLOSION_UPWARD_PUSH := 1.6
 
 var _bot_target: Node3D = null
 var _bot_shoot_cooldown: float = 0.0
@@ -1543,6 +1541,10 @@ func _consume_shot_fx_budget() -> bool:
 	return true
 
 func _apply_bullet_splash(pos: Vector3, radius: float, damage: float, shooter_id: int) -> void:
+	var kb_mult := 1.0
+	var shooter := get_parent().get_node_or_null(str(shooter_id))
+	if shooter and shooter.get("weapon") != null:
+		kb_mult = shooter.weapon.knockback_mult
 	Blast.apply(
 		get_tree().current_scene,
 		pos,
@@ -1551,8 +1553,8 @@ func _apply_bullet_splash(pos: Vector3, radius: float, damage: float, shooter_id
 		shooter_id,
 		EXPLOSION_EDGE_FALLOFF,
 		0.5,
-		EXPLOSION_PUSH,
-		EXPLOSION_UPWARD_PUSH,
+		kb_mult,
+		0.25,
 		Blast.LOS_TORSO,
 		true
 	)
@@ -1607,7 +1609,8 @@ func _apply_artillery_splash(
 			dir = dir.normalized()
 		else:
 			dir = Vector3.UP
-		var impulse: Vector3 = (dir * EXPLOSION_PUSH * 1.35 + Vector3.UP * EXPLOSION_UPWARD_PUSH * 1.2) * falloff
+		var kb := Weapon.knockback_from_damage(float(dmg), 1.0, true)
+		var impulse: Vector3 = dir * kb + Vector3.UP * kb * 0.25
 		if dmg > 0:
 			p.take_damage.rpc_id(
 				p.get_multiplayer_authority(),
@@ -2574,18 +2577,18 @@ func _melee_swung(origin: Vector3, dir: Vector3, attacker_id: int, damage_mult: 
 			if backstab:
 				base *= 2.0
 			dmg = int(base)
-		var melee_force: float = w.knockback if w.knockback > 0.0 else w.get_melee_damage() * 0.06
+		var kb_mag := w.get_knockback_force(float(dmg))
 		target.take_damage.rpc_id(
 			target.get_multiplayer_authority(),
 			dmg,
 			attacker_id,
 			hit_pos,
 			dir_n,
-			melee_force,
+			kb_mag,
 			0.0
 		)
-		if w.knockback > 0.0:
-			var melee_impulse: Vector3 = dir_n * w.knockback + Vector3.UP * w.knockback * 0.25
+		if kb_mag > 0.0:
+			var melee_impulse: Vector3 = dir_n * kb_mag + Vector3.UP * kb_mag * 0.25
 			target.apply_knockback.rpc_id(target.get_multiplayer_authority(), melee_impulse)
 		if shooter_node:
 			_hit_confirm.rpc_id(shooter_node.get_multiplayer_authority(), backstab, dmg, hit_pos)
@@ -2756,7 +2759,13 @@ func _apply_damage(
 			_bot_shoot_cooldown = 999.0
 			velocity = Vector3.ZERO
 		var push: Vector3 = Vector3.UP
-		var ctx_force: float = maxf(gib_force, 0.0)
+		var kb_mag := gib_force
+		if kb_mag <= 0.0:
+			var kb_damage := float(amount)
+			if is_head:
+				kb_damage /= Weapon.BASE_HEADSHOT_MULT
+			kb_mag = Weapon.knockback_from_damage(kb_damage)
+		var launch := clampf(kb_mag / Weapon.REFERENCE_KNOCKBACK, 0.15, 8.0)
 		if hit_dir.length_squared() > 0.001:
 			push = hit_dir.normalized()
 			if push.y < 0.15:
@@ -2764,33 +2773,22 @@ func _apply_damage(
 		var killer := get_parent().get_node_or_null(str(from_id))
 		if killer and killer is Node3D and hit_dir.length_squared() <= 0.001:
 			push = (global_position - killer.global_position).normalized() + Vector3.UP * 0.6
-			# Scale ragdoll impulse by the killer's knockback stat — HAYMAKER
-			# launches the corpse across the map, default push just topples.
-			var kb: float = Weapon.BASE_KNOCKBACK
-			if killer.get("weapon") != null:
-				kb = killer.weapon.knockback
-			ctx_force = maxf(ctx_force, kb)
-		var kb_scale_max := 8.0
+		var launch_max := 8.0
 		var upward_bias := 0.25
 		var upward_scale := 0.12
 		if blast_radius > 0.0:
-			kb_scale_max = 4.0
+			launch_max = 4.0
 			upward_bias = 0.16
 			upward_scale = 0.06
-		# Killing-blow damage scales the launch: a 1hp poison tick lands like a
-		# nudge, a 50-damage shotgun blast hurls. 25 ≈ a "normal" rifle hit and
-		# preserves the previous knockback feel for that case.
-		var damage_factor: float = clampf(float(amount) / 25.0, 0.05, 2.5)
-		var kb_scale := clampf((ctx_force if ctx_force > 0.0 else push.length()) / Weapon.BASE_KNOCKBACK, 1.0, kb_scale_max)
-		kb_scale = clampf(kb_scale * damage_factor, 0.1, kb_scale_max)
-		push = push.normalized() * kb_scale + Vector3.UP * (upward_bias + upward_scale * kb_scale)
+		launch = clampf(launch, 0.15, launch_max)
+		push = push.normalized() * launch + Vector3.UP * (upward_bias + upward_scale * launch)
 		if suppress_death_ragdoll:
 			_burn_death.rpc()
 		else:
 			_ragdoll.rpc(
 				push,
 				force_origin,
-				ctx_force,
+				kb_mag,
 				blast_radius,
 				blast_severity,
 				is_head,

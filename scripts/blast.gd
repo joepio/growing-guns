@@ -14,8 +14,8 @@ static func apply(
 	shooter_id: int,
 	min_falloff: float = 0.2,
 	self_damage_mult: float = 0.5,
-	knockback: float = 9.0,
-	upward_knockback: float = 1.6,
+	knockback_mult: float = 1.0,
+	upward_ratio: float = 0.25,
 	los_mode: int = LOS_TORSO,
 	sqrt_damage_falloff: bool = true,
 	min_damage: int = 0,
@@ -55,7 +55,8 @@ static func apply(
 			dir = dir.normalized()
 		else:
 			dir = Vector3.UP
-		var impulse: Vector3 = (dir * knockback + Vector3.UP * upward_knockback) * falloff
+		var kb := Weapon.knockback_from_damage(float(dmg), knockback_mult, true)
+		var impulse: Vector3 = dir * kb + Vector3.UP * kb * upward_ratio
 		_apply_to_player(
 			scene,
 			p,
