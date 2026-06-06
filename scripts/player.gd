@@ -227,6 +227,11 @@ const BOT_MISS_CHANCE := 0.45            # fraction of shots that get huge extra
 const BOT_JUMP_CHANCE := 0.025           # per physics tick, when on floor
 const BOT_DASH_CHANCE := 0.018           # per physics tick, when charge available
 const BOT_EDGE_PROBE_DIST := 1.8
+const BOT_LAVA_EDGE_PROBE_DIST := 3.0
+const BOT_LAVA_MISTAKE_CHANCE := 0.07
+const BOT_LAVA_JUMP_CHANCE := 0.004
+const BOT_AIR_STRIKE_FLEE_RADIUS := 40.0
+const BOT_AIR_STRIKE_PANIC_RADIUS := 22.0
 const BOT_GAP_JUMP_MIN_LANDING := 4.5
 const BOT_GAP_JUMP_MAX_LANDING := 12.0
 const EXPLOSION_EDGE_FALLOFF := 0.2
@@ -2980,8 +2985,21 @@ func _bot_physics(delta: float) -> void:
 	if move_dir.length() > 1.0:
 		move_dir = move_dir.normalized()
 
+	var strike_dist := _bot_nearest_air_strike_flat_dist()
+	var flee_dir := Vector3.ZERO
+	if strike_dist < BOT_AIR_STRIKE_FLEE_RADIUS:
+		flee_dir = _bot_air_strike_flee_dir()
+		if flee_dir.length_squared() > 0.01:
+			move_dir = flee_dir
+			chase = 0.0
+			_bot_approach = 0.0
+			_bot_strafe_side = 0.0
+	elif _bot_on_lava_map() and not _bot_may_take_lava_risk():
+		move_dir = _bot_lava_safe_move_dir(move_dir)
+
+	var edge_probe := _bot_edge_probe_dist()
 	var gap_jump_started := false
-	if is_on_floor() and move_dir.length_squared() > 0.01 and not _bot_has_floor_ahead(move_dir, BOT_EDGE_PROBE_DIST):
+	if is_on_floor() and move_dir.length_squared() > 0.01 and not _bot_has_floor_ahead(move_dir, edge_probe):
 		var landing_dist := _bot_gap_landing_distance(move_dir)
 		if landing_dist > 0.0:
 			velocity.y = JUMP_VELOCITY
@@ -3001,7 +3019,7 @@ func _bot_physics(delta: float) -> void:
 			move_dir = Vector3.ZERO
 			_bot_strafe_timer = 0.0
 	elif not is_on_floor() and velocity.y < 1.0 and jumps_left > 0 and move_dir.length_squared() > 0.01:
-		if not _bot_has_floor_ahead(move_dir, BOT_EDGE_PROBE_DIST) and _bot_gap_landing_distance(move_dir) > 0.0:
+		if not _bot_has_floor_ahead(move_dir, edge_probe) and _bot_gap_landing_distance(move_dir) > 0.0:
 			velocity.y = DOUBLE_JUMP_VELOCITY
 			jumps_left -= 1
 			gap_jump_started = true
@@ -3009,15 +3027,22 @@ func _bot_physics(delta: float) -> void:
 				SFX.jump(global_position)
 
 	# Occasional hop — keeps the bot moving vertically, harder to track.
-	if not gap_jump_started and is_on_floor() and _bot_jump_cooldown <= 0.0 and randf() < BOT_JUMP_CHANCE:
+	var hop_chance := BOT_LAVA_JUMP_CHANCE if _bot_on_lava_map() else BOT_JUMP_CHANCE
+	if not gap_jump_started and is_on_floor() and _bot_jump_cooldown <= 0.0 and randf() < hop_chance:
 		velocity.y = JUMP_VELOCITY
 		_bot_jump_cooldown = randf_range(1.2, 3.0)
 		if not ghost_mode: SFX.jump(global_position)
 
 	# Occasional dash — usually in the current move direction, sometimes sideways.
+	var dash_ok := move_dir.length_squared() > 0.01
+	if dash_ok and _bot_on_lava_map() and not _bot_may_take_lava_risk():
+		dash_ok = _bot_move_is_lava_safe(move_dir, _bot_edge_probe_dist() + 1.2)
+	var panic_dash := strike_dist < BOT_AIR_STRIKE_PANIC_RADIUS
 	if dash_timer <= 0.0 and dash_charges > 0 and _bot_dash_cooldown <= 0.0 \
-			and randf() < BOT_DASH_CHANCE:
+			and (panic_dash or (randf() < BOT_DASH_CHANCE and dash_ok)):
 		var wish: Vector3 = move_dir if move_dir.length_squared() > 0.01 else fwd_dir
+		if panic_dash and flee_dir.length_squared() > 0.01:
+			wish = flee_dir
 		dash_dir = wish.normalized()
 		dash_timer = DASH_TIME
 		dash_charges -= 1
@@ -3057,6 +3082,129 @@ func _bot_physics(delta: float) -> void:
 				# the same magazine and reload gates as humans.
 				_bot_shoot_cooldown = weapon.get_fire_interval()
 
+func _bot_get_arena() -> Node:
+	var game := get_tree().current_scene
+	return game.get_node_or_null("Arena") if game else null
+
+
+func _bot_on_lava_map() -> bool:
+	var arena := _bot_get_arena()
+	return arena != null and arena.has_method("is_all_floor_lava") and arena.is_all_floor_lava()
+
+
+func _bot_is_lava_safe_at(world_pos: Vector3) -> bool:
+	if not _bot_on_lava_map():
+		return true
+	var arena := _bot_get_arena()
+	if arena and arena.has_method("is_lava_spawn_safe"):
+		return arena.is_lava_spawn_safe(world_pos)
+	return true
+
+
+func _bot_may_take_lava_risk() -> bool:
+	return randf() < BOT_LAVA_MISTAKE_CHANCE
+
+
+func _bot_edge_probe_dist() -> float:
+	return BOT_LAVA_EDGE_PROBE_DIST if _bot_on_lava_map() else BOT_EDGE_PROBE_DIST
+
+
+func _bot_has_floor_at(world_pos: Vector3) -> bool:
+	var origin: Vector3 = world_pos + Vector3.UP * 0.8
+	var target: Vector3 = origin + Vector3.DOWN * 3.5
+	var q: PhysicsRayQueryParameters3D = PhysicsRayQueryParameters3D.create(origin, target, 1)
+	q.exclude = [get_rid()]
+	return not get_world_3d().direct_space_state.intersect_ray(q).is_empty()
+
+
+func _bot_move_is_lava_safe(move_dir: Vector3, look_ahead: float = -1.0) -> bool:
+	if not _bot_on_lava_map() or move_dir.length_squared() < 0.001:
+		return true
+	if look_ahead < 0.0:
+		look_ahead = _bot_edge_probe_dist()
+	var dir: Vector3 = move_dir.normalized()
+	for dist in [0.9, 1.6, look_ahead]:
+		var probe: Vector3 = global_position + dir * dist
+		if not _bot_is_lava_safe_at(probe):
+			return false
+		if not _bot_has_floor_at(probe):
+			return false
+	return true
+
+
+func _bot_lava_safe_move_dir(preferred: Vector3) -> Vector3:
+	if preferred.length_squared() > 0.01 and _bot_move_is_lava_safe(preferred):
+		return preferred.normalized()
+	var arena := _bot_get_arena()
+	var center: Vector3 = arena.global_position if arena else Vector3.ZERO
+	var to_center := Vector3(center.x - global_position.x, 0.0, center.z - global_position.z)
+	var candidates: Array[Vector3] = []
+	if to_center.length_squared() > 0.01:
+		var tc := to_center.normalized()
+		candidates.append(tc)
+		candidates.append(Vector3(-tc.z, 0.0, tc.x))
+		candidates.append(Vector3(tc.z, 0.0, -tc.x))
+	for cand in candidates:
+		if _bot_move_is_lava_safe(cand):
+			return cand
+	for fallback in [Vector3.BACK, Vector3.FORWARD, Vector3.LEFT, Vector3.RIGHT]:
+		var world_fallback: Vector3 = (global_transform.basis * fallback).normalized()
+		world_fallback.y = 0.0
+		if world_fallback.length_squared() > 0.01 and _bot_move_is_lava_safe(world_fallback):
+			return world_fallback.normalized()
+	return Vector3.ZERO
+
+
+func _bot_nearest_air_strike_flat_dist() -> float:
+	var best := INF
+	for node in get_tree().get_nodes_in_group("air_strike_markers"):
+		if not is_instance_valid(node):
+			continue
+		if not node.has_method("get"):
+			continue
+		var target_pos_val: Variant = node.get("target_pos")
+		if typeof(target_pos_val) != TYPE_VECTOR3:
+			continue
+		var target: Vector3 = target_pos_val
+		var flat_dist: float = Vector2(
+			global_position.x - target.x,
+			global_position.z - target.z,
+		).length()
+		best = minf(best, flat_dist)
+	return best
+
+
+func _bot_air_strike_flee_dir() -> Vector3:
+	var best_target: Vector3 = Vector3.ZERO
+	var best_dist := INF
+	for node in get_tree().get_nodes_in_group("air_strike_markers"):
+		if not is_instance_valid(node):
+			continue
+		if not node.has_method("get"):
+			continue
+		var target_pos_val: Variant = node.get("target_pos")
+		if typeof(target_pos_val) != TYPE_VECTOR3:
+			continue
+		var target: Vector3 = target_pos_val
+		var flat_dist: float = Vector2(
+			global_position.x - target.x,
+			global_position.z - target.z,
+		).length()
+		if flat_dist < best_dist:
+			best_dist = flat_dist
+			best_target = target
+	if best_dist >= BOT_AIR_STRIKE_FLEE_RADIUS:
+		return Vector3.ZERO
+	var away := global_position - best_target
+	away.y = 0.0
+	if away.length_squared() < 0.01:
+		away = Vector3(randf_range(-1.0, 1.0), 0.0, randf_range(-1.0, 1.0))
+	away = away.normalized()
+	if _bot_on_lava_map() and not _bot_may_take_lava_risk():
+		return _bot_lava_safe_move_dir(away)
+	return away
+
+
 func _bot_has_floor_ahead(move_dir: Vector3, distance: float) -> bool:
 	if move_dir.length_squared() <= 0.001:
 		return true
@@ -3065,7 +3213,17 @@ func _bot_has_floor_ahead(move_dir: Vector3, distance: float) -> bool:
 	var target: Vector3 = origin + Vector3.DOWN * 3.0
 	var q: PhysicsRayQueryParameters3D = PhysicsRayQueryParameters3D.create(origin, target, 1)
 	q.exclude = [get_rid()]
-	return not get_world_3d().direct_space_state.intersect_ray(q).is_empty()
+	var hit: Dictionary = get_world_3d().direct_space_state.intersect_ray(q)
+	if hit.is_empty():
+		return false
+	if _bot_on_lava_map() and not _bot_may_take_lava_risk():
+		var ahead: Vector3 = global_position + dir * distance
+		if not _bot_is_lava_safe_at(ahead):
+			return false
+		var landing: Vector3 = hit.get("position", ahead)
+		if not _bot_is_lava_safe_at(landing + Vector3.UP * 0.9):
+			return false
+	return true
 
 func _bot_gap_landing_distance(move_dir: Vector3) -> float:
 	if move_dir.length_squared() <= 0.001:
@@ -3081,7 +3239,11 @@ func _bot_gap_landing_distance(move_dir: Vector3) -> float:
 		var hit: Dictionary = space.intersect_ray(q)
 		if hit.is_empty():
 			continue
-		var landing_y := float((hit["position"] as Vector3).y)
+		var landing_pos: Vector3 = hit.get("position", origin)
+		if _bot_on_lava_map() and not _bot_may_take_lava_risk():
+			if not _bot_is_lava_safe_at(landing_pos + Vector3.UP * 0.9):
+				continue
+		var landing_y := landing_pos.y
 		if landing_y >= global_position.y - 4.5 and landing_y <= global_position.y + 3.5:
 			return float(distance)
 	return 0.0

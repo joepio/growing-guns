@@ -20,6 +20,7 @@ var _rocket: Node3D = null
 var _body_mat: StandardMaterial3D = null
 var _engine_mat: StandardMaterial3D = null
 var _plume_mat: StandardMaterial3D = null
+var _plume: MeshInstance3D = null
 var _engine_light: OmniLight3D = null
 var _core_light: OmniLight3D = null
 var _woosh: AudioStreamPlayer3D = null
@@ -246,28 +247,31 @@ func _build_rocket_visual() -> Node3D:
 	_engine_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	_engine_mat.albedo_color = Color(1.0, 0.82, 0.28)
 	_engine_mat.emission_enabled = true
-	_engine_mat.emission = Color(1.0, 0.62, 0.1)
-	_engine_mat.emission_energy_multiplier = 64.0
+	_engine_mat.emission = Color(1.0, 0.72, 0.14)
+	_engine_mat.emission_energy_multiplier = 90.0
 	engine.material_override = _engine_mat
 	root.add_child(engine)
 
 	var plume := MeshInstance3D.new()
 	plume.name = "EnginePlume"
 	var plume_mesh := CylinderMesh.new()
-	plume_mesh.top_radius = 0.55
-	plume_mesh.bottom_radius = 0.12
-	plume_mesh.height = 3.6
+	plume_mesh.top_radius = 0.65
+	plume_mesh.bottom_radius = 0.14
+	plume_mesh.height = 4.2
 	plume.mesh = plume_mesh
-	plume.position = Vector3(0.0, -4.2, 0.0)
+	plume.position = Vector3(0.0, -4.6, 0.0)
 	_plume_mat = StandardMaterial3D.new()
 	_plume_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	_plume_mat.albedo_color = Color(1.0, 0.48, 0.06, 0.9)
+	_plume_mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	_plume_mat.albedo_color = Color(1.0, 0.55, 0.08, 0.85)
 	_plume_mat.emission_enabled = true
-	_plume_mat.emission = Color(1.0, 0.32, 0.02)
-	_plume_mat.emission_energy_multiplier = 52.0
+	_plume_mat.emission = Color(1.0, 0.45, 0.04)
+	_plume_mat.emission_energy_multiplier = 120.0
 	_plume_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_plume_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	plume.material_override = _plume_mat
 	root.add_child(plume)
+	_plume = plume
 
 	_core_light = OmniLight3D.new()
 	_core_light.name = "EngineCoreLight"
@@ -299,17 +303,21 @@ func _process(delta: float) -> void:
 		return
 
 	_pulse += delta
+	_travel_elapsed += delta
 	var pulse := sin(_pulse * 14.0)
-	if _body_mat:
-		_body_mat.emission_energy_multiplier = 16.0 + pulse * 6.0
+	var u := clampf(_travel_elapsed / maxf(_travel_seconds, 0.001), 0.0, 1.0)
+	var approach := u * u
 	if _engine_mat:
-		_engine_mat.emission_energy_multiplier = 58.0 + pulse * 14.0
+		_engine_mat.emission_energy_multiplier = lerpf(90.0, 210.0, approach) + pulse * 18.0
 	if _plume_mat:
-		_plume_mat.emission_energy_multiplier = 48.0 + pulse * 12.0
+		_plume_mat.emission_energy_multiplier = lerpf(120.0, 320.0, approach) + pulse * 24.0
+		_plume_mat.albedo_color = Color(1.0, 0.55, 0.08, lerpf(0.55, 0.95, approach))
+	if _plume:
+		_plume.scale = Vector3(1.0, lerpf(0.75, 2.4, approach), 1.0)
 	if _core_light:
-		_core_light.light_energy = 110.0 + pulse * 35.0
+		_core_light.light_energy = lerpf(90.0, 180.0, approach) + pulse * 25.0
 	if _engine_light:
-		_engine_light.light_energy = 165.0 + pulse * 40.0
+		_engine_light.light_energy = lerpf(120.0, 220.0, approach) + pulse * 30.0
 	if is_instance_valid(_rocket) and _fx_scene:
 		_smoke_tick += delta
 		if _smoke_tick >= 0.016:
@@ -330,7 +338,5 @@ func _process(delta: float) -> void:
 					(-flight_dir * 0.35 + Vector3.UP * 0.55 + spread * 0.18).normalized(),
 				)
 	if _woosh:
-		_travel_elapsed += delta
-		var u := clampf(_travel_elapsed / maxf(_travel_seconds, 0.001), 0.0, 1.0)
 		var swell := lerpf(0.62, 1.0, u * u)
 		_woosh.volume_db = SFX.air_strike_inbound_db + linear_to_db(swell)
