@@ -307,6 +307,9 @@ func _ready() -> void:
 		_save_settings()
 	NetworkManager.local_player_name = _player_name
 
+	# Voronoi gib bakes are expensive — do them once at boot, not on first kill.
+	Violence.prewarm_disintegration_cache()
+
 	# Auto-host an iroh server unless we're already wired to a real peer
 	# (e.g. the user just clicked Join in the pause menu, which set up an
 	# IrohClient before reloading the scene). This is what makes the boot

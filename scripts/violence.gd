@@ -4,6 +4,8 @@ class_name Violence extends RefCounted
 # gib_warm_tree() at scene load — varying it forces synchronous bakes on the
 # main thread (~200ms per mesh).
 const GIB_CHUNK_COUNT := 5
+# Killing blow that would leave health here or lower → full body disintegrate.
+const OVERKILL_DISINTEGRATE_HEALTH := -50
 
 # Single home for all death / ragdoll / impact / gore logic. Player.gd keeps
 # RPC entry points (must live on the Node) as thin pass-throughs and exposes
@@ -36,7 +38,6 @@ const _GIB_QUANTIZE := 0.0001
 static var _gib_cache: Dictionary = {}
 static var _gib_cache_mutex: Mutex = Mutex.new()
 static var _gib_flesh_material_cached: StandardMaterial3D = null
-static var _gib_blood_splat_material_cached: StandardMaterial3D = null
 
 # Kick off async bakes for every MeshInstance3D under `root`. Idempotent;
 # subsequent calls with the same mesh/chunk_count are no-ops.
@@ -60,6 +61,48 @@ static func gib_warm(mesh: Mesh, chunk_count: int = 4) -> void:
 	if present:
 		return
 	WorkerThreadPool.add_task(_gib_warm_task.bind(mesh, chunk_count), false, "Violence.gib_warm")
+
+static func gib_warm_sync(mesh: Mesh, chunk_count: int = GIB_CHUNK_COUNT) -> void:
+	if mesh == null:
+		return
+	var key: Array = [mesh, chunk_count]
+	_gib_cache_mutex.lock()
+	var cached: Variant = _gib_cache.get(key)
+	if cached is Array:
+		_gib_cache_mutex.unlock()
+		return
+	_gib_cache_mutex.unlock()
+	var variants: Array = _gib_build_variants(mesh, chunk_count)
+	_gib_cache_mutex.lock()
+	if _gib_cache.get(key) is Array:
+		_gib_cache_mutex.unlock()
+		return
+	_gib_cache[key] = variants
+	_gib_cache_mutex.unlock()
+
+static func gib_warm_tree_sync(root: Node, chunk_count: int = GIB_CHUNK_COUNT) -> void:
+	if root == null:
+		return
+	var meshes: Array[Mesh] = []
+	_gib_collect_meshes(root, meshes)
+	for m in meshes:
+		gib_warm_sync(m, chunk_count)
+
+# Bake every player-body gib variant up front so the first overkill /
+# disintegration never hitches on the main thread.
+static func prewarm_disintegration_cache() -> void:
+	_gib_get_flesh_material()
+	var player_scene: PackedScene = load("res://scenes/player.tscn") as PackedScene
+	if player_scene:
+		var temp: Node = player_scene.instantiate()
+		var body_model: Node = temp.get_node_or_null("BodyModel")
+		if body_model:
+			gib_warm_tree_sync(body_model, GIB_CHUNK_COUNT)
+		temp.free()
+	# Bots swap HeadBlob to a box — warm that mesh too.
+	var bot_head := BoxMesh.new()
+	bot_head.size = Vector3(0.78, 0.78, 0.78)
+	gib_warm_sync(bot_head, GIB_CHUNK_COUNT)
 
 static func _gib_warm_task(mesh: Mesh, chunk_count: int) -> void:
 	var variants: Array = _gib_build_variants(mesh, chunk_count)
@@ -313,6 +356,122 @@ static func gib_body_ragdoll(
 			rb.queue_free())
 	return rb
 
+
+# Extra flying blood/meat spheres on top of Voronoi body chunks — reads
+# gory even when the source mesh is a smooth blob.
+static func spawn_blood_gib_blobs(
+	scene: Node,
+	origin: Vector3,
+	dir: Vector3,
+	intensity: float,
+	chaos: float,
+	base_velocity: Vector3,
+	burst_strength: float,
+	force_origin: Vector3,
+	impact_blood_strength: float,
+	lifetime: float = 12.0,
+) -> Array[RigidBody3D]:
+	var out: Array[RigidBody3D] = []
+	if scene == null:
+		return out
+	var dir_n := dir.normalized() if dir.length_squared() > 0.001 else Vector3.UP
+	var sev := clampf(intensity, 0.35, 2.8)
+	var blob_count := clampi(int(round(lerpf(5.0, 20.0, sev / 2.5) + chaos * 6.0)), 4, 24)
+	for i in blob_count:
+		var radius := randf_range(0.035, 0.13) * lerpf(0.85, 1.55, sev / 2.5)
+		var rb := RigidBody3D.new()
+		rb.collision_layer = 0
+		rb.collision_mask = 1
+		rb.gravity_scale = 1.0
+		rb.contact_monitor = true
+		rb.max_contacts_reported = 1
+		scene.add_child(rb)
+		rb.global_position = origin + Vector3(
+			randf_range(-0.35, 0.35),
+			randf_range(-0.15, 0.45),
+			randf_range(-0.35, 0.35),
+		)
+		var mi := MeshInstance3D.new()
+		var sm := SphereMesh.new()
+		sm.radius = radius
+		sm.height = radius * 2.0
+		sm.radial_segments = 5
+		sm.rings = 3
+		mi.mesh = sm
+		var mat := StandardMaterial3D.new()
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		if randf() < 0.38:
+			mat.albedo_color = _gib_flesh_color()
+		else:
+			mat.albedo_color = Color(randf_range(0.16, 0.34), 0.018, 0.012, 1.0)
+		mat.emission_enabled = true
+		mat.emission = Color(0.38, 0.02, 0.015)
+		mat.emission_energy_multiplier = 0.07
+		mi.material_override = mat
+		mi.scale = Vector3(
+			randf_range(0.75, 1.25),
+			randf_range(0.65, 1.05),
+			randf_range(0.75, 1.25),
+		)
+		rb.add_child(mi)
+		var cs := CollisionShape3D.new()
+		var shape := SphereShape3D.new()
+		shape.radius = radius
+		cs.shape = shape
+		rb.add_child(cs)
+		var burst_dir := rb.global_position - (force_origin if force_origin != Vector3.INF else origin)
+		if burst_dir.length_squared() < 0.0001:
+			burst_dir = dir_n + Vector3(
+				randf_range(-0.7, 0.7),
+				randf_range(0.15, 0.85),
+				randf_range(-0.7, 0.7),
+			)
+		burst_dir = burst_dir.normalized()
+		var burst := burst_strength * randf_range(0.85, 1.35) * (1.0 + chaos * 0.22)
+		rb.linear_velocity = base_velocity + burst_dir * burst + Vector3.UP * burst * randf_range(0.15, 0.35)
+		rb.angular_velocity = Vector3(
+			randf_range(-14.0, 14.0),
+			randf_range(-14.0, 14.0),
+			randf_range(-14.0, 14.0),
+		)
+		rb.body_entered.connect(func(_body: Node) -> void:
+			_gib_on_chunk_body_entered(rb, scene, impact_blood_strength)
+		)
+		scene.get_tree().create_timer(lifetime).timeout.connect(func() -> void:
+			if is_instance_valid(rb):
+				rb.queue_free())
+		out.append(rb)
+	return out
+
+
+static func spawn_disintegrate_gore(
+	scene: Node,
+	pos: Vector3,
+	dir: Vector3,
+	intensity: float,
+	chaos: float = 0.0,
+	base_velocity: Vector3 = Vector3.ZERO,
+	burst_strength: float = 3.0,
+	force_origin: Vector3 = Vector3.INF,
+	impact_blood_strength: float = 0.6,
+	skip_mist: bool = false,
+) -> Array[RigidBody3D]:
+	if scene == null:
+		return []
+	var dir_n := dir.normalized() if dir.length_squared() > 0.001 else Vector3.UP
+	var sev := clampf(intensity, 0.35, 2.8)
+	if not skip_mist:
+		spawn_gib_mist(scene, pos, dir_n, sev * 2.4, 0.0, sev * 0.52 + chaos * 0.28)
+		spawn_blood(scene, pos, dir_n, sev * 1.6, 16)
+		spawn_blast_blood_splash(scene, pos, dir_n, clampf(sev * 0.78, 0.4, 1.0))
+		_spawn_headshot_puffs(scene, pos, dir_n, sev, true)
+	return spawn_blood_gib_blobs(
+		scene, pos, dir_n, sev, chaos, base_velocity, burst_strength,
+		force_origin, impact_blood_strength,
+	)
+
+
 # Cumulative damage at which a still-intact corpse falls apart into chunks.
 const CORPSE_DISINTEGRATE_DMG := 50.0
 
@@ -344,10 +503,24 @@ static func hit_corpse(rb: RigidBody3D, hit_pos: Vector3, dir: Vector3, dmg: flo
 static func disintegrate_corpse(rb: RigidBody3D, push_dir: Vector3 = Vector3.ZERO) -> void:
 	if rb == null or not is_instance_valid(rb):
 		return
+	_free_ragdoll_blood_wounds(rb)
 	var scene: Node = rb.get_tree().current_scene
 	if scene == null:
 		return
 	var carry: Vector3 = rb.linear_velocity + push_dir.normalized() * 4.0
+	var origin: Vector3 = rb.global_position
+	var push_n := push_dir.normalized() if push_dir.length_squared() > 0.001 else carry.normalized()
+	spawn_disintegrate_gore(
+		scene,
+		origin,
+		push_n,
+		0.9,
+		0.25,
+		carry,
+		3.0,
+		origin,
+		0.55,
+	)
 	for child in rb.get_children():
 		if not (child is MeshInstance3D):
 			continue
@@ -394,48 +567,250 @@ static func _gib_spawn_blood_splat(
 	pos: Vector3,
 	normal: Vector3,
 	travel_dir: Vector3,
-	strength: float
-) -> void:
-	var splat := MeshInstance3D.new()
-	var mesh := QuadMesh.new()
-	var size := randf_range(0.16, 0.28) * lerpf(0.9, 2.1, clampf(strength, 0.0, 1.0))
-	mesh.size = Vector2(size, size * randf_range(0.6, 1.15))
-	splat.mesh = mesh
-	splat.material_override = _gib_get_blood_splat_material()
-	# Tag for bulk-clear at round-reset (game.gd's _clear_blood_splats RPC).
-	splat.add_to_group("blood_splats")
-	scene.add_child(splat)
+	strength: float,
+) -> MeshInstance3D:
+	if scene == null:
+		return null
+	var up := normal.normalized() if normal.length_squared() > 0.001 else Vector3.UP
+	var sev := maxf(strength, 0.0)
+	var count := clampi(int(round(lerpf(2.0, 8.0, clampf(sev / 2.5, 0.0, 1.0)))), 2, 10)
+	var first: MeshInstance3D = null
+	for i in count:
+		var blob := _spawn_env_blood_stain(scene, pos, up, travel_dir, sev)
+		if blob and first == null:
+			first = blob
+	return first
 
+
+static func _spawn_env_blood_stain(
+	scene: Node,
+	pos: Vector3,
+	normal: Vector3,
+	travel_dir: Vector3,
+	strength: float,
+) -> MeshInstance3D:
+	var up := normal.normalized()
+	var tangent := travel_dir.slide(up).normalized()
+	if tangent.length_squared() < 0.001:
+		tangent = up.cross(Vector3.RIGHT).normalized()
+		if tangent.length_squared() < 0.001:
+			tangent = Vector3.FORWARD
+	var blob := MeshInstance3D.new()
+	var mesh := SphereMesh.new()
+	var sev := maxf(strength, 0.0)
+	var size_mult := lerpf(0.9, 2.15, clampf(sev / 2.5, 0.0, 1.0))
+	var radius := randf_range(0.055, 0.15) * size_mult
+	mesh.radius = radius
+	mesh.height = radius * 2.0
+	mesh.radial_segments = 6
+	mesh.rings = 4
+	blob.mesh = mesh
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.albedo_color = Color(randf_range(0.18, 0.34), 0.016, 0.01, 1.0)
+	mat.emission_enabled = true
+	mat.emission = Color(0.32, 0.02, 0.015)
+	mat.emission_energy_multiplier = 0.06
+	blob.material_override = mat
+	blob.add_to_group("blood_splats")
+	scene.add_child(blob)
+	blob.global_position = pos + up * 0.015 + tangent * randf_range(-0.08, 0.08) * size_mult \
+		+ up.cross(tangent).normalized() * randf_range(-0.08, 0.08) * size_mult
+	blob.look_at(blob.global_position + up, tangent)
+	# Squash into the surface so it reads as a smear, not a floating orb.
+	var spread := lerpf(1.0, 1.65, clampf(sev / 2.5, 0.0, 1.0))
+	blob.scale = Vector3(
+		randf_range(0.95, 1.45) * spread,
+		randf_range(0.95, 1.45) * spread,
+		randf_range(0.22, 0.42),
+	)
+	return blob
+
+
+const PLAYER_BLOOD_WOUND_MAX := 32
+
+
+static func _spawn_player_blood_blob(
+	attach_to: Node3D,
+	hit_pos: Vector3,
+	normal: Vector3,
+	strength: float,
+) -> MeshInstance3D:
+	if attach_to == null:
+		return null
+	var blob := MeshInstance3D.new()
+	var mesh := SphereMesh.new()
+	var radius := randf_range(0.05, 0.1) * lerpf(0.95, 1.4, clampf(strength, 0.0, 1.2))
+	mesh.radius = radius
+	mesh.height = radius * 2.0
+	mesh.radial_segments = 6
+	mesh.rings = 4
+	blob.mesh = mesh
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mat.render_priority = 2
+	mat.albedo_color = Color(randf_range(0.2, 0.36), 0.018, 0.012, 1.0)
+	mat.emission_enabled = true
+	mat.emission = Color(0.35, 0.02, 0.015)
+	mat.emission_energy_multiplier = 0.12
+	blob.material_override = mat
+	blob.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	blob.add_to_group("player_blood_wounds")
+	attach_to.add_child(blob)
+	attach_to.move_child(blob, -1)
+
+	var up := normal.normalized() if normal.length_squared() > 0.001 else Vector3.UP
+	# Sit slightly proud of the skin — embedding caused z-fighting / clipping.
+	blob.global_position = hit_pos + up * radius * randf_range(0.08, 0.22)
+	blob.scale = Vector3(
+		randf_range(0.88, 1.22),
+		randf_range(0.78, 1.12),
+		randf_range(0.88, 1.22),
+	)
+	return blob
+
+
+static func _spawn_player_blood_cluster(
+	attach: Node3D,
+	center: Vector3,
+	normal: Vector3,
+	strength: float,
+	count: int,
+) -> Array:
+	var out: Array = []
+	if attach == null:
+		return out
+	var up := normal.normalized() if normal.length_squared() > 0.001 else Vector3.UP
+	for i in count:
+		var jitter := Vector3(
+			randf_range(-0.06, 0.06),
+			randf_range(-0.06, 0.06),
+			randf_range(-0.06, 0.06),
+		)
+		var blob := _spawn_player_blood_blob(
+			attach,
+			center + jitter,
+			normal,
+			strength * randf_range(0.85, 1.05),
+		)
+		if blob:
+			out.append(blob)
+	return out
+
+
+static func _append_ragdoll_blood_wounds(rb: RigidBody3D, wounds: Array) -> void:
+	if rb == null or wounds.is_empty():
+		return
+	var existing: Array = rb.get_meta("blood_wounds") if rb.has_meta("blood_wounds") else []
+	existing.append_array(wounds)
+	rb.set_meta("blood_wounds", existing)
+
+
+static func _player_blood_attach_mesh(player: Node, collider: Node) -> Node3D:
+	if collider != null and collider.is_in_group("player_head_hitboxes"):
+		var head: Variant = player.get("head_blob")
+		if head is Node3D:
+			return head
+	var core: Variant = player.get("blob_core")
+	if core is Node3D:
+		return core
+	var body: Variant = player.get("body_model")
+	if body is Node3D:
+		return body
+	return null
+
+
+static func spawn_player_blood_wound(
+	player: Node,
+	collider: Node,
+	hit_pos: Vector3,
+	normal: Vector3,
+	travel_dir: Vector3,
+	strength: float,
+) -> void:
+	if player == null or hit_pos == Vector3.INF:
+		return
+	var attach := _player_blood_attach_mesh(player, collider)
+	if attach == null:
+		return
+	var wounds: Array = player.get("_blood_wounds")
+	while wounds.size() >= PLAYER_BLOOD_WOUND_MAX:
+		var old: Variant = wounds.pop_front()
+		if old is Node and is_instance_valid(old):
+			(old as Node).queue_free()
+	var count := clampi(int(round(lerpf(2.0, 4.0, clampf(strength, 0.0, 1.2)))), 2, 5)
 	var up := normal.normalized() if normal.length_squared() > 0.001 else Vector3.UP
 	var tangent := travel_dir.slide(up).normalized()
 	if tangent.length_squared() < 0.001:
 		tangent = up.cross(Vector3.RIGHT).normalized()
 		if tangent.length_squared() < 0.001:
 			tangent = Vector3.FORWARD
-	splat.global_position = pos + up * 0.025
-	splat.look_at(splat.global_position + up, tangent)
-	splat.rotate_object_local(Vector3.FORWARD, randf_range(-0.55, 0.55))
+	for i in count:
+		var jitter := tangent * randf_range(-0.05, 0.05) \
+			+ up.cross(tangent).normalized() * randf_range(-0.05, 0.05) \
+			+ up * randf_range(-0.025, 0.025)
+		var blob := _spawn_player_blood_blob(
+			attach,
+			hit_pos + jitter,
+			normal,
+			strength * randf_range(0.82, 1.05),
+		)
+		if blob:
+			wounds.append(blob)
+	player.set("_blood_wounds", wounds)
 
-	var mat := splat.material_override.duplicate() as StandardMaterial3D
-	var alpha := randf_range(0.5, 0.82) * lerpf(0.8, 1.2, clampf(strength, 0.0, 1.0))
-	mat.albedo_color = Color(randf_range(0.28, 0.42), 0.015, 0.015, clampf(alpha, 0.0, 0.92))
-	splat.material_override = mat
 
-	var tw := splat.create_tween().set_parallel(true)
-	tw.tween_property(splat, "scale", Vector3.ONE * randf_range(1.05, 1.3), 0.22)\
-		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
-	tw.tween_property(mat, "albedo_color", Color(mat.albedo_color.r, 0.015, 0.015, mat.albedo_color.a * 0.92), 0.22)
+static func clear_player_blood_wounds(player: Node) -> void:
+	if player == null:
+		return
+	var wounds: Array = player.get("_blood_wounds")
+	for d in wounds:
+		if d is Node and is_instance_valid(d):
+			(d as Node).queue_free()
+	wounds.clear()
+	player.set("_blood_wounds", wounds)
+	var body_model: Node = player.get("body_model")
+	if body_model:
+		_clear_group_under(body_model, "player_blood_wounds")
 
-static func _gib_get_blood_splat_material() -> StandardMaterial3D:
-	if _gib_blood_splat_material_cached:
-		return _gib_blood_splat_material_cached
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	mat.billboard_mode = BaseMaterial3D.BILLBOARD_DISABLED
-	_gib_blood_splat_material_cached = mat
-	return mat
+
+static func _clear_group_under(root: Node, group_name: String) -> void:
+	for child in root.get_children():
+		if child.is_in_group(group_name):
+			child.queue_free()
+		_clear_group_under(child, group_name)
+
+
+static func transfer_player_blood_wounds(player: Node, attach_rb: Node3D) -> void:
+	if player == null or attach_rb == null or not is_instance_valid(attach_rb):
+		return
+	var wounds: Array = player.get("_blood_wounds")
+	var transferred: Array = []
+	for d in wounds:
+		if not (d is Node3D) or not is_instance_valid(d):
+			continue
+		(d as Node3D).reparent(attach_rb, true)
+		transferred.append(d)
+	wounds.clear()
+	player.set("_blood_wounds", wounds)
+	_append_ragdoll_blood_wounds(attach_rb, transferred)
+	var body_model: Node = player.get("body_model")
+	if body_model:
+		_clear_group_under(body_model, "player_blood_wounds")
+
+
+static func _free_ragdoll_blood_wounds(rb: RigidBody3D) -> void:
+	if rb == null or not is_instance_valid(rb):
+		return
+	if rb.has_meta("blood_wounds"):
+		for d in rb.get_meta("blood_wounds"):
+			if d is Node and is_instance_valid(d):
+				(d as Node).queue_free()
+		rb.remove_meta("blood_wounds")
+	for child in rb.get_children():
+		if child.is_in_group("player_blood_wounds"):
+			child.queue_free()
 
 # -------------------- baking (thread-safe) --------------------
 
@@ -1769,6 +2144,9 @@ static func clear_blood_splats(scene_root: Node) -> void:
 	for n in scene_root.get_tree().get_nodes_in_group("blood_splats"):
 		if is_instance_valid(n):
 			n.queue_free()
+	for n in scene_root.get_tree().get_nodes_in_group("player_blood_wounds"):
+		if is_instance_valid(n):
+			n.queue_free()
 
 
 static func clear_smoke_puffs(scene_root: Node) -> void:
@@ -1923,6 +2301,207 @@ static func spawn_blast_blood_splash(scene: Node, pos: Vector3, dir: Vector3, se
 			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
 		tw.chain().tween_callback(splash.queue_free)
 
+
+# Headshot gore — red mist puffs radiating from the wound.
+static func _spawn_headshot_puffs(
+	scene: Node,
+	pos: Vector3,
+	dir: Vector3,
+	severity: float,
+	lethal: bool,
+) -> void:
+	if scene == null:
+		return
+	var dir_n := dir.normalized() if dir.length_squared() > 0.001 else Vector3.UP
+	var sev := clampf(severity, 0.25, 3.0)
+	var count := clampi(
+		int(round(lerpf(6.0, 18.0, sev / 2.5) if lethal else lerpf(3.0, 9.0, sev / 1.8))),
+		3, 20)
+	var base_size := lerpf(0.12, 0.34, sev / 2.5) if lethal else lerpf(0.09, 0.22, sev / 1.6)
+	var spread := lerpf(0.35, 0.75, sev / 2.5) if lethal else lerpf(0.28, 0.5, sev / 1.6)
+	var travel := lerpf(0.55, 1.35, sev / 2.5) if lethal else lerpf(0.35, 0.85, sev / 1.6)
+
+	for i in count:
+		var puff := MeshInstance3D.new()
+		var mesh := SphereMesh.new()
+		mesh.radius = randf_range(base_size * 0.55, base_size * 1.25)
+		mesh.height = mesh.radius * 2.0
+		mesh.radial_segments = 6
+		mesh.rings = 4
+		puff.mesh = mesh
+		var mat := StandardMaterial3D.new()
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		var shade := randf_range(0.32, 0.58)
+		mat.albedo_color = Color(shade, 0.015, 0.01, randf_range(0.28, 0.55))
+		mat.emission_enabled = true
+		mat.emission = Color(0.55, 0.03, 0.02)
+		mat.emission_energy_multiplier = lerpf(0.12, 0.35, sev / 2.5)
+		puff.material_override = mat
+		puff.position = pos + Vector3(
+			randf_range(-0.06, 0.06),
+			randf_range(-0.06, 0.06),
+			randf_range(-0.06, 0.06),
+		)
+		scene.add_child(puff)
+
+		var scatter := Vector3(
+			randf_range(-spread, spread),
+			randf_range(-0.18, 0.42),
+			randf_range(-spread, spread),
+		)
+		var travel_dir := (dir_n + scatter).normalized()
+		var end := puff.position + travel_dir * randf_range(travel * 0.55, travel * 1.15)
+		var dur := randf_range(0.18, 0.42) if lethal else randf_range(0.22, 0.48)
+		var tw := puff.create_tween().set_parallel(true)
+		tw.tween_property(puff, "position", end, dur)\
+			.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+		tw.tween_property(puff, "scale", Vector3.ONE * randf_range(2.0, 3.4), dur)\
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+		tw.tween_property(mat, "albedo_color", Color(shade, 0.015, 0.01, 0.0), dur)\
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+		tw.chain().tween_callback(puff.queue_free)
+
+
+# Non-lethal head hit — extra red spray on top of the normal blood squirt.
+static func spawn_headshot_spray(scene: Node, pos: Vector3, dir: Vector3, severity: float = 1.0) -> void:
+	if scene == null:
+		return
+	var dir_n := dir.normalized() if dir.length_squared() > 0.001 else Vector3.UP
+	var sev := clampf(severity, 0.35, 2.5)
+	spawn_gib_mist(scene, pos, dir_n, sev * 1.35, 0.0, sev * 0.28)
+	_spawn_headshot_puffs(scene, pos, dir_n, sev, false)
+
+
+# Lethal headshot — head chunks + heavy red mist.
+static func spawn_headshot_gore(scene: Node, pos: Vector3, dir: Vector3, intensity: float = 1.5) -> void:
+	if scene == null:
+		return
+	var dir_n := dir.normalized() if dir.length_squared() > 0.001 else Vector3.UP
+	var sev := clampf(intensity, 0.8, 3.0)
+
+	var light := OmniLight3D.new()
+	light.light_color = Color(0.95, 0.08, 0.06)
+	light.light_energy = 5.5 * sev
+	light.omni_range = 2.4 + sev * 0.9
+	light.shadow_enabled = false
+	_attach_world_3d(scene, light, pos)
+	var lt := light.create_tween()
+	lt.tween_property(light, "light_energy", 0.0, 0.2)\
+		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+	lt.tween_callback(light.queue_free)
+
+	spawn_gib_mist(scene, pos, dir_n, sev * 2.1, 0.0, sev * 0.55)
+	spawn_blood(scene, pos, dir_n, sev * 1.75, 14)
+	spawn_blast_blood_splash(scene, pos, dir_n, clampf(sev * 0.8, 0.5, 1.0))
+	_spawn_headshot_puffs(scene, pos, dir_n, sev, true)
+
+
+# Overkill gib — blood cloud + wall/floor splatter when a hit pulps the target.
+static func spawn_overkill_gore(scene: Node, pos: Vector3, dir: Vector3, severity: float = 1.0) -> void:
+	if scene == null:
+		return
+	var dir_n := dir.normalized() if dir.length_squared() > 0.001 else Vector3.UP
+	var sev := clampf(severity, 0.4, 2.5)
+
+	var light := OmniLight3D.new()
+	light.light_color = Color(0.92, 0.06, 0.05)
+	light.light_energy = 4.0 + sev * 3.5
+	light.omni_range = 2.0 + sev * 1.4
+	light.shadow_enabled = false
+	_attach_world_3d(scene, light, pos)
+	var lt := light.create_tween()
+	lt.tween_property(light, "light_energy", 0.0, 0.24)\
+		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+	lt.tween_callback(light.queue_free)
+
+	spawn_gib_mist(scene, pos, dir_n, sev * 2.4, 0.0, sev * 0.65)
+	spawn_blood(scene, pos, dir_n, sev * 2.0, 18)
+	spawn_blast_blood_splash(scene, pos, dir_n, clampf(sev * 0.95, 0.55, 1.0))
+	_spawn_headshot_puffs(scene, pos, dir_n, sev, true)
+	spawn_overkill_blood_splats(scene, pos, dir_n, sev)
+
+
+static func spawn_overkill_blood_splats(scene: Node, pos: Vector3, dir: Vector3, severity: float) -> void:
+	if scene == null:
+		return
+	var space: PhysicsDirectSpaceState3D = scene.get_world_3d().direct_space_state
+	if space == null:
+		return
+	var dir_n := dir.normalized() if dir.length_squared() > 0.001 else Vector3.UP
+	var sev := clampf(severity, 0.4, 2.5)
+	var radius := clampf(1.8 + sev * sev * 2.2, 1.8, 10.0)
+	var strength := clampf(0.55 + sev * 0.72, 0.55, 2.35)
+	const CARDINAL: Array[Vector3] = [
+		Vector3.DOWN, Vector3.UP,
+		Vector3.RIGHT, Vector3.LEFT,
+		Vector3.FORWARD, Vector3.BACK,
+	]
+	var cardinal_passes := 1 if sev < 1.2 else (2 if sev < 1.9 else 3)
+	for pass_i in cardinal_passes:
+		var pass_strength := strength * lerpf(0.82, 1.0, float(pass_i) / maxf(float(cardinal_passes - 1), 1.0))
+		for axis in CARDINAL:
+			var offset := Vector3.ZERO
+			if pass_i > 0:
+				offset = Vector3(
+					randf_range(-0.35, 0.35),
+					randf_range(-0.35, 0.35),
+					randf_range(-0.35, 0.35),
+				)
+			var origin := pos + offset
+			var q := PhysicsRayQueryParameters3D.create(origin, origin + axis * radius)
+			q.collision_mask = 1
+			var hit := space.intersect_ray(q)
+			if hit.is_empty():
+				continue
+			var hit_strength := pass_strength * (1.28 if axis == Vector3.DOWN else 1.0)
+			_gib_spawn_blood_splat(scene, hit.position, hit.normal, dir_n, hit_strength)
+	# Floor pool — big ground stain under the burst.
+	var floor_count := clampi(int(round(2.0 + sev * sev * 5.0)), 2, 14)
+	for i in floor_count:
+		var offset := Vector3(
+			randf_range(-0.55, 0.55) * sev,
+			0.0,
+			randf_range(-0.55, 0.55) * sev,
+		)
+		var origin := pos + offset + Vector3.UP * 0.2
+		var qf := PhysicsRayQueryParameters3D.create(origin, origin + Vector3.DOWN * radius)
+		qf.collision_mask = 1
+		var floor_hit := space.intersect_ray(qf)
+		if floor_hit.is_empty():
+			continue
+		_gib_spawn_blood_splat(
+			scene,
+			floor_hit.position,
+			floor_hit.normal,
+			dir_n,
+			strength * randf_range(1.05, 1.35),
+		)
+	var spray_count := clampi(int(round(4.0 + sev * sev * 9.0)), 4, 28)
+	for i in spray_count:
+		var scatter := (-dir_n * lerpf(0.45, 0.85, sev / 2.5)) + Vector3(
+			randf_range(-1.0, 1.0),
+			randf_range(-0.35, 0.85),
+			randf_range(-1.0, 1.0),
+		)
+		if scatter.length_squared() < 0.001:
+			continue
+		var ray_dir := scatter.normalized()
+		var q2 := PhysicsRayQueryParameters3D.create(pos, pos + ray_dir * radius)
+		q2.collision_mask = 1
+		var hit2 := space.intersect_ray(q2)
+		if hit2.is_empty():
+			continue
+		_gib_spawn_blood_splat(
+			scene,
+			hit2.position,
+			hit2.normal,
+			dir_n,
+			strength * randf_range(0.78, 1.08),
+		)
+
+
 # -------------------- 3. PLAYER-COUPLED HELPERS --------------------
 #
 # These take a `player` Node and read/mutate its state. Player.gd's @rpc
@@ -2035,6 +2614,8 @@ static func do_ragdoll(
 	blast_radius: float = 0.0,
 	blast_severity: float = 0.0,
 	is_head: bool = false,
+	overkill_disintegrate: bool = false,
+	overkill_severity: float = 0.0,
 ) -> void:
 	if player == null:
 		return
@@ -2043,7 +2624,12 @@ static func do_ragdoll(
 	# cloning still reflect the (about-to-be-hidden) authored tree.
 	set_hit_face_state(player, true)
 	player.set("_hit_face_timer", 0.0)  # don't let _process auto-revert on the dead body
-	spawn_ragdoll(player, push_dir, force_origin, gib_force, blast_radius, blast_severity, is_head)
+	spawn_ragdoll(
+		player, push_dir, force_origin, gib_force, blast_radius, blast_severity, is_head,
+		overkill_disintegrate, overkill_severity,
+	)
+	if blast_radius > 0.0 or overkill_disintegrate:
+		clear_player_blood_wounds(player)
 	# Every peer simulates its own corpse — cosmetic desync is fine.
 	var body_model: Node = player.get("body_model")
 	if body_model:
@@ -2058,11 +2644,14 @@ static func spawn_ragdoll(
 	blast_radius: float = 0.0,
 	blast_severity: float = 0.0,
 	is_head: bool = false,
+	overkill_disintegrate: bool = false,
+	overkill_severity: float = 0.0,
 ) -> void:
 	# Voronoi-split the blob's primitive meshes into chunks that fly apart.
 	# body_model is hidden first so the user only reads the flying debris.
 	# Chunks collide with world only — players and bullets ignore the corpse.
 	var scene: Node = player.get_tree().current_scene
+	var full_disintegrate := blast_radius > 0.0 or overkill_disintegrate
 	var inferred_force: float = push_dir.length()
 	if gib_force > 0.0:
 		inferred_force = maxf(inferred_force, gib_force)
@@ -2071,14 +2660,20 @@ static func spawn_ragdoll(
 	var chaos := 0.0
 	if blast_radius > 0.0:
 		chaos = clampf(blast_severity * clampf(gib_force / maxf(Weapon.BASE_KNOCKBACK, 0.001), 0.6, 1.8), 0.0, 1.1)
+	elif overkill_disintegrate:
+		chaos = clampf(overkill_severity * 0.82, 0.35, 1.1)
 	var blast_lift := 0.2
 	if blast_radius > 0.0:
 		blast_lift = 0.2 + chaos * 0.06
+	elif overkill_disintegrate:
+		blast_lift = 0.18 + chaos * 0.08
 	var base_vel: Vector3 = dir_n * randf_range(2.2, 3.9) * kb_mag * (1.0 + chaos * 0.18) \
 		+ Vector3.UP * randf_range(1.2, 2.8) * kb_mag * (1.0 + blast_lift)
 	var burst_strength: float = 1.45 * kb_mag
 	if blast_radius > 0.0:
 		burst_strength *= 1.0 + clampf(blast_radius / 12.0, 0.0, 0.25) + chaos * 0.2
+	elif overkill_disintegrate:
+		burst_strength *= 1.0 + clampf(overkill_severity * 0.22, 0.0, 0.35) + chaos * 0.18
 
 	var meshes: Array[MeshInstance3D] = []
 	var body_model: Node = player.get("body_model")
@@ -2087,20 +2682,56 @@ static func spawn_ragdoll(
 	if meshes.is_empty():
 		return
 	var mist_origin: Vector3 = force_origin if force_origin != Vector3.INF else (player.global_position as Vector3) + Vector3.UP * 0.4
-	spawn_gib_mist(scene, mist_origin, dir_n, kb_mag, blast_radius, blast_severity)
-	if blast_radius > 0.0:
-		spawn_blast_blood_splash(scene, mist_origin, dir_n, blast_severity)
+	if is_head and not full_disintegrate:
+		var head_blob_for_fx: Node = player.get("head_blob")
+		if head_blob_for_fx:
+			mist_origin = (head_blob_for_fx as Node3D).global_position
+	if overkill_disintegrate and blast_radius <= 0.0:
+		spawn_overkill_gore(scene, mist_origin, dir_n, overkill_severity)
+	elif is_head:
+		spawn_headshot_gore(scene, mist_origin, dir_n, kb_mag)
+	elif not full_disintegrate:
+		spawn_gib_mist(scene, mist_origin, dir_n, kb_mag, blast_radius, blast_severity)
+		if blast_radius > 0.0:
+			spawn_blast_blood_splash(scene, mist_origin, dir_n, blast_severity)
 	# Fixed chunk_count so the gib cache stays at one key per source mesh.
 	var chunk_count: int = GIB_CHUNK_COUNT
 	var impact_blood_strength := clampf(0.18 + kb_mag * 0.12 + chaos * 0.22, 0.15, 1.0)
+	if overkill_disintegrate:
+		impact_blood_strength = clampf(impact_blood_strength + overkill_severity * 0.18, 0.45, 1.0)
 
-	# Three death modes:
-	#   • Explosion (blast_radius > 0): chunk every body mesh — full disintegrate.
-	#   • Headshot: head pops off as one body, the rest stays connected.
+	# Death modes:
+	#   • Explosion / overkill: chunk every body mesh — full disintegrate.
+	#   • Headshot: head Voronoi-shatters, torso ragdolls intact.
 	#   • Regular hit: whole body tumbles as a single rigid body.
 	var local_is_authority: bool = player.is_multiplayer_authority() and not bool(player.get("is_bot"))
 	var ragdoll_pieces: Array = player.get("_ragdoll_pieces")
-	if blast_radius > 0.0:
+	if full_disintegrate:
+		var gore_int := kb_mag
+		if overkill_disintegrate:
+			gore_int = maxf(gore_int, overkill_severity)
+		if blast_radius > 0.0:
+			gore_int = maxf(gore_int, blast_severity * 1.15)
+		var skip_mist := overkill_disintegrate and blast_radius <= 0.0
+		var extra_gibs: Array = spawn_disintegrate_gore(
+			scene,
+			mist_origin,
+			dir_n,
+			gore_int,
+			chaos,
+			base_vel,
+			burst_strength,
+			force_origin,
+			impact_blood_strength,
+			skip_mist,
+		)
+		for g in extra_gibs:
+			ragdoll_pieces.append(g)
+		if blast_radius > 0.0:
+			var splat_sev := clampf(blast_radius / 3.5 + blast_severity * 0.95, 1.0, 2.6)
+			if overkill_disintegrate:
+				splat_sev = maxf(splat_sev, overkill_severity)
+			spawn_overkill_blood_splats(scene, mist_origin, dir_n, splat_sev)
 		var first: bool = true
 		for src in meshes:
 			if src.mesh == null:
@@ -2145,6 +2776,16 @@ static func spawn_ragdoll(
 		)
 		if torso_rb:
 			ragdoll_pieces.append(torso_rb)
+			transfer_player_blood_wounds(player, torso_rb)
+			if is_head and head_blob:
+				var neck_wounds := _spawn_player_blood_cluster(
+					torso_rb,
+					(head_blob as Node3D).global_position,
+					Vector3.UP,
+					0.9,
+					4,
+				)
+				_append_ragdoll_blood_wounds(torso_rb, neck_wounds)
 			if local_is_authority:
 				player.set("_ragdoll_head", torso_rb)
 				if scene.has_method("show_death_effect_for"):
@@ -2152,16 +2793,36 @@ static func spawn_ragdoll(
 				elif scene.has_method("show_death_effect"):
 					scene.show_death_effect(true)
 		if not head_meshes.is_empty():
-			var head_v: Vector3 = base_vel + dir_n * 6.0 + Vector3.UP * 8.0
-			var head_rb: RigidBody3D = gib_body_ragdoll(
-				(head_blob as Node3D).global_transform, head_meshes, scene,
-				head_v, 18.0, 14.0,
-			)
-			if head_rb:
-				ragdoll_pieces.append(head_rb)
-				# Camera prefers the popping head over the torso.
-				if local_is_authority:
-					player.set("_ragdoll_head", head_rb)
+			var head_pos: Vector3 = (head_blob as Node3D).global_position
+			var head_vel: Vector3 = base_vel + dir_n * 9.0 + Vector3.UP * 11.0
+			var head_burst: float = burst_strength * 2.1
+			var head_blood: float = clampf(0.65 + kb_mag * 0.18, 0.55, 1.0)
+			var first_head_chunk: bool = true
+			for src in head_meshes:
+				if src.mesh == null:
+					continue
+				var head_chunks: Array[RigidBody3D] = gib_explode(
+					src.mesh,
+					src.global_transform,
+					scene,
+					src.material_override,
+					head_vel + Vector3(
+						randf_range(-2.2, 2.2),
+						randf_range(0.6, 2.8),
+						randf_range(-2.2, 2.2),
+					),
+					head_burst,
+					chunk_count,
+					14.0,
+					head_pos,
+					head_blood,
+				)
+				for c in head_chunks:
+					ragdoll_pieces.append(c)
+					if first_head_chunk and local_is_authority:
+						player.set("_ragdoll_head", c)
+						first_head_chunk = false
+
 
 # Free all spawned ragdoll pieces and restore body visibility / hitbox layers.
 # Caller is responsible for calling _apply_ghost_visuals() afterward (since
@@ -2170,8 +2831,11 @@ static func clear_ragdoll(player: Node) -> void:
 	var pieces: Array = player.get("_ragdoll_pieces")
 	for piece in pieces:
 		if is_instance_valid(piece):
+			if piece is RigidBody3D:
+				_free_ragdoll_blood_wounds(piece as RigidBody3D)
 			piece.queue_free()
 	pieces.clear()
+	clear_player_blood_wounds(player)
 	set_dead_visuals(player, false)
 
 static func apply_knockback(player: Node, impulse: Vector3) -> void:
