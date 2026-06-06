@@ -1,5 +1,7 @@
 extends RigidBody3D
 
+const Blast = preload("res://scripts/blast.gd")
+
 const FUSE := 4.0                # fallback if the grenade somehow never touches anything
 const ARM_DELAY := 0.04          # ignore contacts for this long after spawn (just enough to clear the muzzle)
 # Mines stay dormant a bit longer than thrown grenades — long enough for the
@@ -110,6 +112,7 @@ static func warmup_shaders(scene: Node) -> void:
 
 @export var shooter_id: int = 1
 @export var is_mine: bool = false
+@export var predicted_visual: bool = false
 
 var _age := 0.0
 var _exploded := false
@@ -117,7 +120,7 @@ var _exploded := false
 func _ready() -> void:
 	set_multiplayer_authority(1)
 	add_to_group("projectiles")
-	if not multiplayer.is_server():
+	if not multiplayer.is_server() and is_mine:
 		freeze = true
 		freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
 	body_entered.connect(_on_body_entered)
@@ -179,80 +182,21 @@ func _remove_quietly() -> void:
 
 func _explode() -> void:
 	_exploded = true
-	var players_root: Node = get_tree().current_scene.get_node_or_null("Players")
-	var shooter_node: Node = players_root.get_node_or_null(str(shooter_id)) if players_root else null
-	for p in get_tree().get_nodes_in_group("players"):
-		if not is_instance_valid(p):
-			continue
-		if p.get("ghost_mode") == true:
-			continue
-		var dist: float = global_position.distance_to(p.global_position)
-		if dist > RADIUS:
-			continue
-		var space := get_world_3d().direct_space_state
-		var q := PhysicsRayQueryParameters3D.create(global_position, p.global_position)
-		q.collision_mask = 1  # world only — LoS check
-		var hit := space.intersect_ray(q)
-		if not hit.is_empty():
-			continue
-
-		var falloff: float = lerpf(MIN_FALLOFF, 1.0, clampf(1.0 - (dist / RADIUS), 0.0, 1.0))
-		var dmg: int = max(MIN_DAMAGE, int(float(MAX_DAMAGE) * falloff))
-
-		# Self-damage reduction
-		if p.player_id == shooter_id:
-			dmg = int(dmg * 0.4)
-
-		# Grenade Knockback
-		var kb_force: float = 18.0 # Stronger base for heavy grenades
-		var dir: Vector3 = (p.global_position - global_position)
-		if dir.length_squared() > 0.001:
-			dir = dir.normalized()
-		else:
-			dir = Vector3.UP
-
-		var impulse: Vector3 = (dir * kb_force * falloff) + (Vector3.UP * kb_force * 0.4 * falloff)
-		# Damage / knockback / hitmarker arrive when the shockwave reaches the
-		# target — same dist/SPEED_OF_SOUND delay used by the audio + visual
-		# shockwave shell. Captured locals so the timer lambda has its own
-		# values per-target.
-		var ep_pos: Vector3 = global_position
-		var c_dmg := dmg
-		var c_dir := dir
-		var c_imp := impulse
-		var c_kb_len := impulse.length()
-		var c_falloff := falloff
-		var target_player := p
-		var target_authority: int = p.get_multiplayer_authority()
-		var target_pos: Vector3 = p.global_position
-		var target_delay: float = dist / SPEED_OF_SOUND
-		var apply_target := func() -> void:
-			if not is_instance_valid(target_player):
-				return
-			if c_dmg > 0:
-				target_player.take_damage.rpc_id(
-					target_authority, c_dmg, shooter_id, ep_pos,
-					c_dir, c_kb_len, RADIUS, c_falloff)
-			target_player.apply_knockback.rpc_id(target_authority, c_imp)
-		if target_delay < 0.01:
-			apply_target.call()
-		else:
-			get_tree().create_timer(target_delay).timeout.connect(apply_target)
-		# Hitmarker arrives when the shockwave reaches the SHOOTER (different
-		# distance from the explosion than the target).
-		if c_dmg > 0 and p.player_id != shooter_id and shooter_node and is_instance_valid(shooter_node):
-			var sn := shooter_node
-			var sn_authority: int = sn.get_multiplayer_authority()
-			var hit_pos: Vector3 = target_pos + Vector3.UP * 0.6
-			var local_dmg := c_dmg
-			var shooter_delay: float = ep_pos.distance_to(sn.global_position) / SPEED_OF_SOUND
-			var fire_hitmarker := func() -> void:
-				if is_instance_valid(sn):
-					sn._hit_confirm.rpc_id(sn_authority, false, local_dmg, hit_pos)
-			if shooter_delay < 0.01:
-				fire_hitmarker.call()
-			else:
-				get_tree().create_timer(shooter_delay).timeout.connect(fire_hitmarker)
+	Blast.apply(
+		get_tree().current_scene,
+		global_position,
+		RADIUS,
+		float(MAX_DAMAGE),
+		shooter_id,
+		MIN_FALLOFF,
+		0.4,
+		18.0,
+		7.2,
+		Blast.LOS_CENTER,
+		false,
+		MIN_DAMAGE,
+		SPEED_OF_SOUND
+	)
 	_do_vfx.rpc()
 
 @rpc("authority", "call_local", "reliable")

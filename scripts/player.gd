@@ -1,6 +1,7 @@
 extends CharacterBody3D
 
 const Violence = preload("res://scripts/violence.gd")
+const Blast = preload("res://scripts/blast.gd")
 
 # All ragdoll, death, impact, and gore logic lives in scripts/violence.gd.
 # The @rpc methods + a few thin wrappers stay here because they need to live
@@ -46,6 +47,8 @@ const RIFLE_SHAKE := 0.015                # camera shake impulse
 const MAX_FIRST_PERSON_CASINGS_PER_TRIGGER := 4
 const MAX_SHOT_FX_PER_FRAME := 1
 const MAX_THIRD_PERSON_CASINGS_PER_FRAME := 3
+const HIGH_RATE_REMOTE_CASING_BPS := 90.0
+const HIGH_RATE_REMOTE_CASING_INTERVAL_MS := 90
 const GRENADE_RELOAD := 3.0
 const AIR_STRIKE_RELOAD := 12.0
 const ION_CANNON_RELOAD := 14.0
@@ -201,6 +204,7 @@ var _shot_fx_frame: int = -1
 var _shot_fx_count: int = 0
 var _third_person_casing_frame: int = -1
 var _third_person_casing_count: int = 0
+var _last_high_rate_remote_casing_ms: int = -10000
 var _body_materials: Dictionary = {}
 var _blob_rig_rest_pos: Vector3 = Vector3.ZERO
 var _blob_core_rest_scale: Vector3 = Vector3.ONE
@@ -1218,7 +1222,7 @@ func _rifle_fired(
 	var spawn_shot_fx := true
 	if shooter_node and shooter_node.has_method("_consume_shot_fx_budget"):
 		spawn_shot_fx = bool(shooter_node.call("_consume_shot_fx_budget"))
-	if spawn_shot_fx:
+	if spawn_shot_fx and not (BenchFlags.active and BenchFlags.no_shot_audio):
 		SFX.shot(w, origin, is_self, silenced)
 
 	# Bench A/B: skip bullet spawning entirely (one static bool branch out
@@ -1238,7 +1242,7 @@ func _rifle_fired(
 	var visual_anchor := muzzle if local_first_person else _third_person_gun
 	if visual_anchor == null:
 		visual_anchor = muzzle
-	if spawn_shot_fx and not silenced:
+	if spawn_shot_fx and not silenced and not (BenchFlags.active and BenchFlags.no_muzzle_flash):
 		var dmg_ratio := w.get_damage() / Weapon.BASE_DAMAGE
 		var flash_brightness := clampf(pow(dmg_ratio, 0.88) * 1.5, 0.85, 8.0)
 		_spawn_muzzle_flash(w.bullet_color, w.get_bullet_scale(), visual_anchor, local_first_person, flash_brightness)
@@ -1256,59 +1260,19 @@ func _consume_shot_fx_budget() -> bool:
 	return true
 
 func _apply_bullet_splash(pos: Vector3, radius: float, damage: float, shooter_id: int) -> void:
-	var shooter := get_parent().get_node_or_null(str(shooter_id))
-	for p: Node3D in get_tree().get_nodes_in_group("players"):
-		if not is_instance_valid(p):
-			continue
-		if p.get("ghost_mode") == true:
-			continue
-		var dist: float = pos.distance_to(p.global_position)
-		if dist > radius:
-			continue
-		# LoS check - target torso (UP 1.0m) to avoid floor clipping
-		var target_pos: Vector3 = p.global_position + Vector3.UP * 1.0
-		var q := PhysicsRayQueryParameters3D.create(pos + Vector3.UP * 0.1, target_pos)
-		q.collision_mask = 1
-		if not get_world_3d().direct_space_state.intersect_ray(q).is_empty():
-			continue
-
-		var dist_ratio := dist / radius
-		# Use a square-root falloff so the explosion stays 'hotter' for longer
-		var linear_falloff := clampf(1.0 - dist_ratio, 0.0, 1.0)
-		var falloff := lerpf(EXPLOSION_EDGE_FALLOFF, 1.0, linear_falloff)
-		var curve_falloff := lerpf(EXPLOSION_EDGE_FALLOFF, 1.0, sqrt(linear_falloff))
-
-		var dmg: int = int(damage * curve_falloff)
-
-		# Self-damage reduction (50%) but keep full knockback
-		if p.player_id == shooter_id:
-			dmg = int(dmg * 0.5)
-
-		var dir: Vector3 = (p.global_position - pos)
-		if dir.length_squared() > 0.001:
-			dir = dir.normalized()
-		else:
-			dir = Vector3.UP
-
-		# Explosions use their own radial push. Weapon knockback is projectile
-		# direction force and should not multiply area blasts.
-		var impulse: Vector3 = (dir * EXPLOSION_PUSH + Vector3.UP * EXPLOSION_UPWARD_PUSH) * falloff
-		if dmg > 0:
-			p.take_damage.rpc_id(
-				p.get_multiplayer_authority(),
-				dmg,
-				shooter_id,
-				pos,
-				dir,
-				impulse.length(),
-				radius,
-				falloff
-			)
-			if p.player_id != shooter_id and shooter and is_instance_valid(shooter):
-				shooter._hit_confirm.rpc_id(shooter.get_multiplayer_authority(), false, dmg, p.global_position + Vector3.UP * 0.6)
-				if shooter.has_method("_on_dealt_damage"):
-					shooter._on_dealt_damage.rpc_id(shooter.get_multiplayer_authority(), dmg)
-		p.apply_knockback.rpc_id(p.get_multiplayer_authority(), impulse)
+	Blast.apply(
+		get_tree().current_scene,
+		pos,
+		radius,
+		damage,
+		shooter_id,
+		EXPLOSION_EDGE_FALLOFF,
+		0.5,
+		EXPLOSION_PUSH,
+		EXPLOSION_UPWARD_PUSH,
+		Blast.LOS_TORSO,
+		true
+	)
 
 
 func _apply_air_strike_splash(pos: Vector3, radius: float, damage: float, shooter_id: int) -> void:
@@ -1560,6 +1524,11 @@ func _spawn_muzzle_flash(
 func _spawn_third_person_casing(w: Weapon) -> void:
 	if BenchFlags.active and BenchFlags.no_casings:
 		return
+	if w.get_projectiles_per_second() >= HIGH_RATE_REMOTE_CASING_BPS:
+		var now := Time.get_ticks_msec()
+		if now - _last_high_rate_remote_casing_ms < HIGH_RATE_REMOTE_CASING_INTERVAL_MS:
+			return
+		_last_high_rate_remote_casing_ms = now
 	var frame := Engine.get_physics_frames()
 	if _third_person_casing_frame != frame:
 		_third_person_casing_frame = frame
@@ -2046,33 +2015,51 @@ func _fire_grenade() -> void:
 		var uname := "G_%d_%d" % [player_id, Time.get_ticks_usec()]
 		_spawn_grenade.rpc(origin, dir, player_id, uname)
 	else:
-		_request_grenade.rpc_id(1, origin, dir)
+		var uname := "G_%d_%d" % [player_id, Time.get_ticks_usec()]
+		_spawn_predicted_grenade(origin, dir, player_id, uname)
+		_request_grenade.rpc_id(1, origin, dir, uname)
 
 @rpc("any_peer", "reliable")
-func _request_grenade(origin: Vector3, dir: Vector3) -> void:
+func _request_grenade(origin: Vector3, dir: Vector3, uname: String) -> void:
 	if not multiplayer.is_server():
 		return
 	var sender := multiplayer.get_remote_sender_id()
 	if sender == 0:
 		sender = player_id
-	var uname := "G_%d_%d" % [sender, Time.get_ticks_usec()]
+	var expected_prefix := "G_%d_" % sender
+	if not uname.begins_with(expected_prefix):
+		uname = "G_%d_%d" % [sender, Time.get_ticks_usec()]
 	_spawn_grenade.rpc(origin, dir, sender, uname)
 
 @rpc("any_peer", "call_local", "reliable")
 func _spawn_grenade(origin: Vector3, dir: Vector3, shooter: int, uname: String) -> void:
-	SFX.grenade_launch(origin)
 	# Only the server may authorize grenade spawns.
 	var sender := multiplayer.get_remote_sender_id()
 	if sender != 0 and sender != 1:
 		return
+	var parent := get_tree().current_scene
+	var existing := parent.get_node_or_null(uname) if parent else null
+	if existing:
+		if "predicted_visual" in existing:
+			existing.predicted_visual = false
+		return
+	SFX.grenade_launch(origin)
+	_spawn_grenade_visual(origin, dir, shooter, uname, false)
+
+func _spawn_predicted_grenade(origin: Vector3, dir: Vector3, shooter: int, uname: String) -> void:
+	SFX.grenade_launch(origin)
+	_spawn_grenade_visual(origin, dir, shooter, uname, true)
+
+func _spawn_grenade_visual(origin: Vector3, dir: Vector3, shooter: int, uname: String, predicted: bool) -> void:
 	var scene: PackedScene = load("res://scenes/grenade.tscn")
 	var g := scene.instantiate()
 	g.name = uname
 	g.shooter_id = shooter
+	if "predicted_visual" in g:
+		g.predicted_visual = predicted
 	get_tree().current_scene.add_child(g)
 	g.global_position = origin + dir * 0.6
-	if multiplayer.is_server():
-		g.linear_velocity = dir * GRENADE_LAUNCH_SPEED + Vector3(0.0, GRENADE_LAUNCH_LIFT, 0.0)
+	g.linear_velocity = dir * GRENADE_LAUNCH_SPEED + Vector3(0.0, GRENADE_LAUNCH_LIFT, 0.0)
 
 func _place_mine() -> void:
 	var pos := _mine_position()

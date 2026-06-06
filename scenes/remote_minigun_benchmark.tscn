@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://remote_minigun_bench"]
+
+[ext_resource type="Script" path="res://scripts/remote_minigun_benchmark.gd" id="1_remote_minigun_bench"]
+
+[node name="RemoteMinigunBenchmark" type="Node3D"]
+script = ExtResource("1_remote_minigun_bench")

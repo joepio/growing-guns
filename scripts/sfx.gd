@@ -93,6 +93,9 @@ var bullet_zip_far_db: float = -36.0
 # speed_factor itself is bullet_speed / 165 m/s, clamped 0.2..5.0.
 var bullet_zip_base_hz: float = 2400.0
 var bullet_zip_speed_hz: float = 1300.0
+const BULLET_ZIP_VARIANTS := 6
+const BULLET_ZIP_MIN_INTERVAL_MS := 32
+var _last_bullet_zip_ms: int = -10000
 # Subsonic rumble layered under big-damage shots — same piping as the
 # explosion bang+rumble pair. Default -12 dB so it sits under the gun bang.
 var shot_rumble_db: float = -12.0
@@ -643,6 +646,8 @@ func empty_chamber(at: Vector3 = NO_POS) -> void:
 # the synth itself is cheap (≤4k samples, mono) and fires at most once per
 # bullet. Out-of-range bullets bail before any allocation.
 func bullet_zip(speed: float, scale: float, at: Vector3) -> void:
+	if BenchFlags.active and BenchFlags.no_bullet_zips:
+		return
 	var listener := _listener_position()
 	if listener == NO_POS:
 		return
@@ -650,6 +655,10 @@ func bullet_zip(speed: float, scale: float, at: Vector3) -> void:
 	# Quick reject: well outside the audible bubble.
 	if dist_sq > 144.0:  # 12 m
 		return
+	var now := Time.get_ticks_msec()
+	if now - _last_bullet_zip_ms < BULLET_ZIP_MIN_INTERVAL_MS:
+		return
+	_last_bullet_zip_ms = now
 	var speed_factor: float = clampf(speed / 165.0, 0.2, 5.0)
 	var scale_factor: float = clampf(scale, 0.5, 4.0)
 	# Range-driven volume: gentle sqrt falloff so a 5 m miss isn't dramatically
@@ -665,14 +674,21 @@ func bullet_zip(speed: float, scale: float, at: Vector3) -> void:
 	var speed_norm: float = clampf((speed_factor - 0.2) / 4.8, 0.0, 1.0)
 	var speed_db: float = lerpf(-10.0, 6.0, speed_norm)
 	var vol_db: float = dist_db + speed_db
-	var samples := _synth_bullet_zip(speed_factor, scale_factor)
+	var speed_bucket := int(round(speed_factor * 10.0))
+	var scale_bucket := int(round(scale_factor * 10.0))
+	var variant := randi() % BULLET_ZIP_VARIANTS
+	var key := "bullet_zip:%d:%d:%d" % [speed_bucket, scale_bucket, variant]
+	var wav := _cached_wav(
+		key,
+		Callable(self, "_synth_bullet_zip").bind(float(speed_bucket) / 10.0, float(scale_bucket) / 10.0)
+	)
 	# Real near-miss zips read ~95 dB; supersonic rounds peak well above 130 dB
 	# from the ballistic crack alone. Scale priority high enough that the
 	# sniper zip survives HDR culling next to its own ~157 dB gunshot
 	# (cull threshold = max_spl - HDR_WINDOW_DB ≈ 122).
 	var spl: float = lerpf(95.0, 135.0, speed_norm)
 	# Dry primary — clean transient, no tail smear.
-	_play(samples, vol_db, at, "bullet_zip", -1.0, true, spl, false)
+	_play_stream(wav, vol_db, at, 1.0, "bullet_zip", -1.0, true, spl, false)
 	# Manual reverb companion at a much hotter level than the default
 	# big_tail_send_db (-24): supersonic zips need a noticeable hangar tail.
 	# Send level scales with speed (slow grenades stay dry, fast rounds get
@@ -681,7 +697,7 @@ func bullet_zip(speed: float, scale: float, at: Vector3) -> void:
 	if speed_norm > 0.0:
 		var send_db: float = vol_db + lerpf(-30.0, -2.0, speed_norm)
 		_big_tail_intensity = maxf(_big_tail_intensity, lerpf(0.3, 1.0, speed_norm))
-		_spawn_big_tail_send(_samples_to_wav(samples), send_db, at, 1.0, "bullet_zip")
+		_spawn_big_tail_send(wav, send_db, at, 1.0, "bullet_zip")
 
 # Bullet hitting world geometry — small click for tiny rounds, fatter thump
 # the bigger the bullet. Cached per damage bucket × variant so a full-auto

@@ -71,12 +71,18 @@ func setup(origin: Vector3, dir: Vector3, shooter: int, w: Weapon, p_last_in_mag
 
 	if silenced:
 		return
+	if BenchFlags.active and BenchFlags.no_bullet_visuals:
+		return
 
 	look_at(global_position + direction)
 
 	var mat: StandardMaterial3D = StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.albedo_color = weapon_stats.bullet_color
+	var tracer_color := weapon_stats.bullet_color.lerp(Color.WHITE, 0.18)
+	mat.albedo_color = tracer_color
+	mat.emission_enabled = true
+	mat.emission = tracer_color
+	mat.emission_energy_multiplier = clampf(1.6 * weapon_stats.get_bullet_scale(), 1.2, 4.5)
 
 	# Head — a small bright dot that always sits at the bullet's tip.
 	var s: float = weapon_stats.get_bullet_scale()
