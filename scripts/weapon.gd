@@ -109,6 +109,14 @@ func get_reload_time() -> float:
 func get_headshot_mult() -> float:
 		return BASE_HEADSHOT_MULT * headshot_mult
 
+func get_spread() -> float:
+		return maxf(0.0, spread)
+
+func get_recoil_per_shot() -> float:
+		var precision_ratio := get_spread() / BASE_SPREAD
+		var precision_recoil_mult := clampf(sqrt(maxf(precision_ratio, 0.0)), 0.15, 1.0)
+		return maxf(0.0, recoil_per_shot * precision_recoil_mult)
+
 func get_shots_per_trigger() -> int:
 		return mini(MAX_SHOTS_PER_TRIGGER, 1 + extra_projectiles)
 

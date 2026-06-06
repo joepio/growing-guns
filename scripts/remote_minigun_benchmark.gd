@@ -16,6 +16,9 @@ extends Node3D
 #   mode=no_shot_audio
 #   mode=no_muzzle_flash
 #   mode=no_casings
+#   mode=no_explosion_visuals
+#   mode=no_explosion_audio
+#   mode=no_explosion_audio_or_visuals
 
 const PLAYER_SCENE := preload("res://scenes/player.tscn")
 const SHOOTER_ID := 9001
@@ -98,6 +101,13 @@ func _parse_cli_args() -> void:
 			BenchFlags.no_shot_audio = true
 		"no_muzzle_flash":
 			BenchFlags.no_muzzle_flash = true
+		"no_explosion_visuals":
+			BenchFlags.no_explosion_visuals = true
+		"no_explosion_audio":
+			BenchFlags.no_explosion_audio = true
+		"no_explosion_audio_or_visuals":
+			BenchFlags.no_explosion_visuals = true
+			BenchFlags.no_explosion_audio = true
 
 
 func _build_world() -> void:
