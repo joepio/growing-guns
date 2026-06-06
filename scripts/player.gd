@@ -47,6 +47,8 @@ const MAX_FIRST_PERSON_CASINGS_PER_TRIGGER := 4
 const MAX_SHOT_FX_PER_FRAME := 1
 const MAX_THIRD_PERSON_CASINGS_PER_FRAME := 3
 const GRENADE_RELOAD := 3.0
+const AIR_STRIKE_RELOAD := 12.0
+const AIR_STRIKE_AIM_RANGE := 800.0
 const GRENADE_LAUNCH_SPEED := 22.0
 const GRENADE_LAUNCH_LIFT := 4.0
 const MELEE_RELOAD := 0.5
@@ -1300,6 +1302,51 @@ func _apply_bullet_splash(pos: Vector3, radius: float, damage: float, shooter_id
 					shooter._on_dealt_damage.rpc_id(shooter.get_multiplayer_authority(), dmg)
 		p.apply_knockback.rpc_id(p.get_multiplayer_authority(), impulse)
 
+
+func _apply_air_strike_splash(pos: Vector3, radius: float, damage: float, shooter_id: int) -> void:
+	# Artillery-style blast: horizontal reach, no world LoS check (low cover
+	# doesn't block a sky strike). Bullet/bazooka splash still raycasts.
+	var shooter := get_parent().get_node_or_null(str(shooter_id))
+	for p: Node3D in get_tree().get_nodes_in_group("players"):
+		if not is_instance_valid(p):
+			continue
+		if p.get("ghost_mode") == true:
+			continue
+		var flat_dist: float = Vector2(
+			p.global_position.x - pos.x,
+			p.global_position.z - pos.z
+		).length()
+		if flat_dist > radius:
+			continue
+		var dist_ratio := clampf(flat_dist / radius, 0.0, 1.0)
+		var falloff := lerpf(0.58, 1.0, 1.0 - dist_ratio)
+		var dmg: int = int(damage * falloff)
+		if p.player_id == shooter_id:
+			dmg = int(dmg * 0.5)
+		var dir: Vector3 = p.global_position - pos
+		if dir.length_squared() > 0.001:
+			dir = dir.normalized()
+		else:
+			dir = Vector3.UP
+		var impulse: Vector3 = (dir * EXPLOSION_PUSH * 1.35 + Vector3.UP * EXPLOSION_UPWARD_PUSH * 1.2) * falloff
+		if dmg > 0:
+			p.take_damage.rpc_id(
+				p.get_multiplayer_authority(),
+				dmg,
+				shooter_id,
+				pos,
+				dir,
+				impulse.length(),
+				radius,
+				falloff
+			)
+			if p.player_id != shooter_id and shooter and is_instance_valid(shooter):
+				shooter._hit_confirm.rpc_id(shooter.get_multiplayer_authority(), false, dmg, p.global_position + Vector3.UP * 0.6)
+				if shooter.has_method("_on_dealt_damage"):
+					shooter._on_dealt_damage.rpc_id(shooter.get_multiplayer_authority(), dmg)
+		p.apply_knockback.rpc_id(p.get_multiplayer_authority(), impulse)
+
+
 @rpc("any_peer", "call_local", "reliable")
 func _on_dealt_damage(damage: int) -> void:
 	var sender := multiplayer.get_remote_sender_id()
@@ -1672,6 +1719,8 @@ func _use_special() -> void:
 			grenade_cooldown = TELEPORT_RELOAD * mult
 		Weapon.SPECIAL_SWORD:
 			grenade_cooldown = MELEE_RELOAD * mult
+		Weapon.SPECIAL_AIR_STRIKE:
+			grenade_cooldown = AIR_STRIKE_RELOAD * mult
 		_:
 			grenade_cooldown = GRENADE_RELOAD * mult
 	# Snapshot for HUD progress display — _update_hud divides current cooldown
@@ -1697,6 +1746,8 @@ func _activate_special_effect() -> void:
 			_use_teleport()
 		Weapon.SPECIAL_SWORD:
 			_swing_melee()
+		Weapon.SPECIAL_AIR_STRIKE:
+			_call_air_strike()
 		_:
 			_fire_grenade()
 
@@ -1833,6 +1884,47 @@ func _animate_third_person_reload(duration: float) -> void:
 		.set_delay(duration * 0.68).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
 
 # -------------------- TELEPORT --------------------
+
+func _call_air_strike() -> void:
+	var target := _air_strike_target()
+	if multiplayer.is_server():
+		_spawn_player_air_strike(target)
+	else:
+		_request_air_strike.rpc_id(1, target)
+
+
+func _air_strike_target() -> Vector3:
+	var origin: Vector3 = camera.global_position
+	var dir: Vector3 = -camera.global_transform.basis.z
+	var space := get_world_3d().direct_space_state
+	var q := PhysicsRayQueryParameters3D.create(origin, origin + dir * AIR_STRIKE_AIM_RANGE)
+	q.collision_mask = 1 | 2
+	q.collide_with_areas = true
+	if has_method("get_hitbox_rids"):
+		q.exclude = get_hitbox_rids()
+	var hit := space.intersect_ray(q)
+	if hit.is_empty():
+		return origin + dir * AIR_STRIKE_AIM_RANGE
+	return hit.get("position", origin) + Vector3.UP * 0.05
+
+
+@rpc("any_peer", "reliable")
+func _request_air_strike(target: Vector3) -> void:
+	if not multiplayer.is_server():
+		return
+	var sender := multiplayer.get_remote_sender_id()
+	if sender == 0:
+		sender = int(get_multiplayer_authority())
+	if sender != int(get_multiplayer_authority()):
+		return
+	_spawn_player_air_strike(target)
+
+
+func _spawn_player_air_strike(target: Vector3) -> void:
+	var game := get_tree().current_scene
+	if game and game.has_method("begin_player_air_strike"):
+		game.begin_player_air_strike(target, player_id)
+
 
 func _use_teleport() -> void:
 	var origin: Vector3 = camera.global_position

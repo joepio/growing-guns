@@ -72,10 +72,16 @@ func _process(delta: float) -> void:
 	_apply_lava_leak_damage(delta)
 
 
-func apply_seed(s: int) -> void:
+func apply_seed(s: int, size_min: float = -1.0, size_max: float = -1.0) -> void:
 	# Set seed first so palette lookup uses the new value, then regenerate
 	# synchronously so spawnpoints exist before the caller queries them.
 	stop_lava_leak()
+	if size_min >= 0.0 and size_max >= 0.0:
+		generator.arena_size_min = size_min
+		generator.arena_size_max = size_max
+	else:
+		generator.arena_size_min = 55.0
+		generator.arena_size_max = 95.0
 	generator.seed = s
 	generator.regenerate()
 

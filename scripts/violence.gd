@@ -814,6 +814,132 @@ static func spawn_bullet_blast(scene: Node, pos: Vector3, radius: float, color: 
 		if not (BenchFlags.active and BenchFlags.no_explosion_audio):
 			SFX.explosion(pos, radius)
 
+	if radius >= 5.0:
+		spawn_blast_smoke(scene, pos, radius)
+
+
+static func spawn_smoke_puff(
+	scene: Node,
+	pos: Vector3,
+	size: float = 1.0,
+	drift: Vector3 = Vector3.UP,
+	lifetime: float = 2.5,
+	tint: Color = Color(0.42, 0.40, 0.36, 0.52),
+	rise_mult: float = 1.0,
+) -> void:
+	if scene == null or (BenchFlags.active and BenchFlags.no_explosion_visuals):
+		return
+	var puff := MeshInstance3D.new()
+	var mesh := SphereMesh.new()
+	mesh.radius = 0.35 * size
+	mesh.height = 0.7 * size
+	mesh.radial_segments = 8
+	mesh.rings = 4
+	puff.mesh = mesh
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mat.albedo_color = Color(tint.r, tint.g, tint.b, 0.0)
+	puff.material_override = mat
+	puff.position = pos
+	puff.scale = Vector3.ONE * 0.06
+	puff.add_to_group("smoke_puffs")
+	scene.add_child(puff)
+	var drift_norm := drift
+	if drift_norm.length_squared() < 0.0001:
+		drift_norm = Vector3.UP
+	else:
+		drift_norm = drift_norm.normalized()
+	var horizontal := Vector3(drift_norm.x, 0.0, drift_norm.z)
+	var lateral_dist := size * randf_range(0.35, 1.05)
+	if horizontal.length_squared() > 0.0001:
+		horizontal = horizontal.normalized() * lateral_dist
+	else:
+		horizontal = Vector3.ZERO
+	var rise_dist := size * randf_range(2.6, 5.4) * rise_mult
+	var end_pos := pos + horizontal + Vector3.UP * rise_dist
+	var end_scale := Vector3.ONE * randf_range(1.2, 2.1) * maxf(size, 0.35)
+	var peak := Color(tint.r, tint.g, tint.b, tint.a)
+	var tw := puff.create_tween().set_parallel(true)
+	tw.tween_property(puff, "position", end_pos, lifetime)\
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tw.tween_property(puff, "scale", end_scale, lifetime * 0.88)\
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	var atw := puff.create_tween()
+	atw.tween_property(mat, "albedo_color", peak, lifetime * 0.22)\
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	atw.tween_property(mat, "albedo_color", Color(tint.r, tint.g, tint.b, 0.0), lifetime * 0.72)\
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
+	atw.tween_callback(puff.queue_free)
+
+
+static func spawn_exhaust_smoke(scene: Node, pos: Vector3, size: float, drift: Vector3) -> void:
+	var tint := Color(
+		randf_range(0.58, 0.68),
+		randf_range(0.54, 0.62),
+		randf_range(0.48, 0.56),
+		randf_range(0.10, 0.18),
+	)
+	spawn_smoke_puff(
+		scene,
+		pos,
+		size * 0.28,
+		drift,
+		randf_range(0.75, 1.35),
+		tint,
+		1.85,
+	)
+
+
+static func spawn_blast_smoke(scene: Node, pos: Vector3, radius: float) -> void:
+	if scene == null or radius <= 0.0 or (BenchFlags.active and BenchFlags.no_explosion_visuals):
+		return
+	var ground := pos + Vector3.UP * 0.35
+	var scale := clampf(radius / 14.0, 0.55, 2.4)
+	for i in int(clampf(radius * 0.18, 4, 10)):
+		var ang := randf() * TAU
+		var rad := randf_range(0.0, radius * 0.34)
+		var offset := Vector3(cos(ang) * rad, randf_range(0.0, 1.2), sin(ang) * rad)
+		var dark := i % 3 == 0
+		var tint := Color(
+			randf_range(0.18, 0.28) if dark else randf_range(0.42, 0.50),
+			randf_range(0.16, 0.24) if dark else randf_range(0.40, 0.46),
+			randf_range(0.14, 0.22) if dark else randf_range(0.36, 0.42),
+			randf_range(0.22, 0.36),
+		)
+		spawn_smoke_puff(
+			scene,
+			ground + offset,
+			randf_range(1.8, 3.8) * scale,
+			Vector3(
+				randf_range(-1.0, 1.0),
+				randf_range(1.6, 4.0),
+				randf_range(-1.0, 1.0),
+			).normalized(),
+			randf_range(4.0, 7.0),
+			tint,
+		)
+	var column_count := int(clampf(radius * 0.12, 2, 6))
+	for j in column_count:
+		var delay := float(j) * 0.16
+		scene.get_tree().create_timer(delay).timeout.connect(func() -> void:
+			if not is_instance_valid(scene):
+				return
+			var ring := randf_range(0.0, radius * 0.16)
+			var ang2 := randf() * TAU
+			var col_offset := Vector3(cos(ang2) * ring, randf_range(1.0, 3.0), sin(ang2) * ring)
+			spawn_smoke_puff(
+				scene,
+				ground + col_offset,
+				randf_range(2.2, 4.5) * scale,
+				Vector3(randf_range(-0.25, 0.25), randf_range(2.8, 5.0), randf_range(-0.25, 0.25)),
+				randf_range(5.0, 8.5),
+				Color(0.34, 0.32, 0.30, randf_range(0.18, 0.30)),
+			)
+		, CONNECT_ONE_SHOT)
+
+
 static func spawn_heat_distortion(scene: Node, pos: Vector3, radius: float, duration: float, strength: float) -> void:
 	if scene == null:
 		return
@@ -1463,6 +1589,14 @@ static func clear_blood_splats(scene_root: Node) -> void:
 	if scene_root == null:
 		return
 	for n in scene_root.get_tree().get_nodes_in_group("blood_splats"):
+		if is_instance_valid(n):
+			n.queue_free()
+
+
+static func clear_smoke_puffs(scene_root: Node) -> void:
+	if scene_root == null:
+		return
+	for n in scene_root.get_tree().get_nodes_in_group("smoke_puffs"):
 		if is_instance_valid(n):
 			n.queue_free()
 
