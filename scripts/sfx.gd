@@ -66,6 +66,7 @@ var hurt_world_db: float = -20.5
 var death_self_db: float = -24.0
 var death_world_db: float = -18.5
 var lava_sizzle_db: float = -18.0
+var lava_fall_sizzle_db: float = -32.0
 var hit_received_db: float = -12.0
 # Round-start rocket spawn — heavy rumble that ramps in over the descent.
 # 2D (UI-style) so each player hears their own "rocket cabin" without
@@ -811,10 +812,10 @@ func death(at: Vector3 = NO_POS, is_self: bool = false) -> void:
 func lava_sizzle(at: Vector3 = NO_POS, fall_death: bool = false) -> void:
 	var variant := randi() % 3
 	var mode := "fall" if fall_death else "contact"
-	var key := "lava_sizzle:%s:%d" % [mode, variant]
+	var key := "lava_sizzle2:%s:%d" % [mode, variant]
 	var wav := _cached_wav(key, Callable(self, "_synth_lava_sizzle").bind(variant, fall_death))
-	var db := lava_sizzle_db if fall_death else lava_sizzle_db - 5.0
-	_play_stream(wav, db + randf_range(-1.0, 1.0), at, randf_range(0.96, 1.04), "lava_sizzle", 18.0, false, 105.0, false)
+	var db := lava_fall_sizzle_db if fall_death else lava_sizzle_db - 5.0
+	_play_stream(wav, db + randf_range(-1.0, 1.0), at, randf_range(0.96, 1.04), "lava_sizzle", 18.0, false, 85.0 if fall_death else 105.0, false)
 func rocket_descent() -> Node:
 	# Heavy, soft-distorted rumble for the round-start rocket spawn. 2D so
 	# the local player hears their own "cabin" loud regardless of where the
@@ -1552,7 +1553,7 @@ func _synth_dash() -> PackedVector2Array:
 func _synth_lava_sizzle(variant: int, fall_death: bool = false) -> PackedVector2Array:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = hash([variant, "lava_sizzle", fall_death])
-	var dur: float = lerpf(2.0, 2.45, rng.randf()) if fall_death else lerpf(0.42, 0.58, rng.randf())
+	var dur: float = lerpf(1.55, 1.95, rng.randf()) if fall_death else lerpf(0.42, 0.58, rng.randf())
 	var n: int = int(dur * MIX_RATE)
 	var out := PackedVector2Array()
 	out.resize(n)
@@ -1572,7 +1573,7 @@ func _synth_lava_sizzle(variant: int, fall_death: bool = false) -> PackedVector2
 		var env: float = attack * body
 		var noise: float = rng.randf_range(-1.0, 1.0)
 		hiss_lp = lerpf(hiss_lp, noise, 0.08)
-		var hiss: float = (noise - hiss_lp) * env * (0.24 if fall_death else 0.26)
+		var hiss: float = (noise - hiss_lp) * env * (0.17 if fall_death else 0.26)
 		var low_noise: float = rng.randf_range(-1.0, 1.0)
 		low_lp = lerpf(low_lp, low_noise, 0.018)
 		bubble_phase += TAU * lerpf(22.0, 38.0, rng.randf()) / MIX_RATE

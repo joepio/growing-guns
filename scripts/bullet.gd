@@ -69,9 +69,6 @@ func setup(origin: Vector3, dir: Vector3, shooter: int, w: Weapon) -> void:
 	var mat: StandardMaterial3D = StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	mat.albedo_color = weapon_stats.bullet_color
-	mat.emission_enabled = true
-	mat.emission = weapon_stats.bullet_color
-	mat.emission_energy_multiplier = 4.0
 
 	# Head — a small bright dot that always sits at the bullet's tip.
 	var s: float = weapon_stats.get_bullet_scale()

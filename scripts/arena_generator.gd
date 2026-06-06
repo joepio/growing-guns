@@ -149,6 +149,7 @@ const LAVA_ISLAND_MAX_GAP := 5.6
 const LAVA_ISLAND_MIN_TOP_Y := 0.9
 const LAVA_ISLAND_MAX_TOP_Y := 9.0
 const LAVA_ISLAND_MAX_HEIGHT_STEP := 2.05
+const LAVA_SPAWN_PLATFORM_INSET := 0.65  # keep the player capsule off platform edges
 
 const LAVA_SHADER_CODE := """
 shader_type spatial;
@@ -257,8 +258,10 @@ func _do_queued_regen() -> void:
 
 
 func regenerate() -> void:
-	for c in get_children():
-		c.queue_free()
+	while get_child_count() > 0:
+		var child := get_child(0)
+		remove_child(child)
+		child.free()
 	_placed.clear()
 	_spawn_positions.clear()
 	_lava_damage_accum_by_player.clear()
@@ -293,6 +296,7 @@ func regenerate() -> void:
 		hole_pos = Vector2(rng.randf_range(-max_off, max_off), rng.randf_range(-max_off, max_off))
 
 	if all_floor_lava:
+		_all_floor_lava = true
 		_build_walls()
 		_build_lava_pool()
 		_build_lava_floor_surface()
@@ -324,7 +328,6 @@ func regenerate() -> void:
 			"fill": lava_palette["fill"],
 			"gen_ms": (Time.get_ticks_usec() - t0) / 1000.0,
 		}
-		_all_floor_lava = true
 		emit_signal("regenerated", last_stats)
 		return
 
@@ -648,6 +651,40 @@ func current_palette() -> Dictionary:
 
 func is_all_floor_lava() -> bool:
 	return _all_floor_lava or bool(last_stats.get("all_floor_lava", false))
+
+
+func is_lava_spawn_safe(world_pos: Vector3) -> bool:
+	if _lava_safe_zones.is_empty():
+		return true
+	var local := Vector2(world_pos.x - global_position.x, world_pos.z - global_position.z)
+	var local_y := world_pos.y - global_position.y
+	# CharacterBody origin ≈ capsule centre; keep it above the lava damage band.
+	if local_y < LAVA_FLOOR_SURFACE_Y + LAVA_FLOOR_DAMAGE_Y + 0.5:
+		return false
+	for entry in _lava_safe_zones:
+		var center: Vector2 = entry[0]
+		var radius: float = float(entry[1])
+		var spawn_radius := maxf(0.35, radius - LAVA_SPAWN_PLATFORM_INSET)
+		if local.distance_to(center) <= spawn_radius:
+			return true
+	return false
+
+
+func get_lava_fallback_spawn_world() -> Vector3:
+	# Center pillar — always present on the lava-platforms layout.
+	return global_position + Vector3(0.0, LAVA_ISLAND_TOP_Y + 1.0, 0.0)
+
+
+func _prune_lava_spawn_positions() -> void:
+	if not _all_floor_lava:
+		return
+	var kept: Array[Vector3] = []
+	for local_spawn in _spawn_positions:
+		if is_lava_spawn_safe(global_position + local_spawn):
+			kept.append(local_spawn)
+	if kept.is_empty():
+		kept.append(Vector3(0.0, LAVA_ISLAND_TOP_Y + 1.0, 0.0))
+	_spawn_positions = kept
 
 
 func _make_mat(color: Color, roughness: float) -> StandardMaterial3D:
@@ -981,6 +1018,7 @@ func _build_lava_island_layout(rng: RandomNumberGenerator, perim_radius: float) 
 
 	var decorative_bridges: int = _build_lava_island_bridges(edges, rng)
 	_add_lava_island_cover(platforms, rng)
+	_prune_lava_spawn_positions()
 	var reachable_valid := _validate_lava_platform_graph(platforms, edges)
 	if not reachable_valid:
 		push_warning("Lava island graph failed reachability validation for seed %d" % seed)
@@ -1091,8 +1129,8 @@ func _add_lava_island_cover(platforms: Array, rng: RandomNumberGenerator) -> voi
 		var angle := rng.randf() * TAU
 		var cover_size := Vector3(rng.randf_range(1.8, 2.8), 1.1, rng.randf_range(0.8, 1.2))
 		var cover_half := maxf(cover_size.x, cover_size.z) * 0.5
-		var min_off := minf(radius * 0.82, cover_half + 0.95)
-		var max_off := maxf(min_off, radius * 0.78)
+		var min_off := maxf(cover_half + 1.35, radius * 0.58)
+		var max_off := maxf(min_off + 0.2, radius * 0.88)
 		var off := rng.randf_range(min_off, max_off)
 		var cover_pos := Vector3(pos.x + cos(angle) * off, pos.y + 0.55, pos.z + sin(angle) * off)
 		_add_static_box(cover_pos, cover_size, _mat_dark, rng.randf() * TAU)

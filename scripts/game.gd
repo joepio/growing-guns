@@ -584,9 +584,10 @@ func _input(event: InputEvent) -> void:
 			_sync_mouse_mode()
 		return
 
-	# Cheat hotkeys (G / P / M / L / 1-5 / ?) — only when dev tools are enabled.
+	# Cheat hotkeys (G / P / M / L / 0 / 1-9 / ?) — only when dev tools are enabled.
 	if event is InputEventKey and event.pressed and not event.echo and _dev_panel != null:
 		var cheat_handled := true
+		var shift: bool = event.shift_pressed
 		match event.keycode:
 			KEY_G:
 				var t = _dev_panel.get_target()
@@ -606,36 +607,30 @@ func _input(event: InputEvent) -> void:
 					_lava_leak_started = true
 					_start_lava_leak.rpc(LAVA_LEAK_SPREAD_SECONDS)
 					_announce.rpc("LAVA TRIGGERED", 1.0)
-			KEY_1:
+			KEY_0:
 				var t = _dev_panel.get_target()
 				if t:
 					t.reset_weapon.rpc()
 					_announce.rpc("WEAPON RESET", 1.0)
 					_dev_panel.refresh_if_visible()
+			KEY_1:
+				_dev_card_hotkey("dmg_up", "DAMAGE", shift)
 			KEY_2:
-				var t = _dev_panel.get_target()
-				if t:
-					t.apply_card.rpc("sniper")
-					_announce.rpc("APPLIED: SNIPER", 1.0)
-					_dev_panel.refresh_if_visible()
+				_dev_card_hotkey("rapid_fire", "RAPID FIRE", shift)
 			KEY_3:
-				var t = _dev_panel.get_target()
-				if t:
-					t.apply_card.rpc("shotgun")
-					_announce.rpc("APPLIED: SHOTGUN", 1.0)
-					_dev_panel.refresh_if_visible()
+				_dev_card_hotkey("extra_barrel", "EXTRA BARREL", shift)
 			KEY_4:
-				var t = _dev_panel.get_target()
-				if t:
-					t.apply_card.rpc("uzi")
-					_announce.rpc("APPLIED: UZI", 1.0)
-					_dev_panel.refresh_if_visible()
+				_dev_card_hotkey("explosive", "EXPLOSIVE", shift)
 			KEY_5:
-				var t = _dev_panel.get_target()
-				if t:
-					t.apply_card.rpc("bazooka")
-					_announce.rpc("APPLIED: BAZOOKA", 1.0)
-					_dev_panel.refresh_if_visible()
+				_dev_card_hotkey("ricochet", "RICOCHET", shift)
+			KEY_6:
+				_dev_card_hotkey("chilling_rounds", "CHILLING", shift)
+			KEY_7:
+				_dev_card_hotkey("big_mag", "BIG MAG", shift)
+			KEY_8:
+				_dev_card_hotkey("precision", "PRECISION", shift)
+			KEY_9:
+				_dev_card_hotkey("bullet_speed", "FAST ROUNDS", shift)
 			KEY_SLASH:
 				if event.shift_pressed: # '?'
 					_dev_panel.show_help()
@@ -647,6 +642,19 @@ func _input(event: InputEvent) -> void:
 			return
 
 # -------------------- SPAWN / DESPAWN --------------------
+
+func _dev_card_hotkey(card_id: String, label: String, remove: bool) -> void:
+	if _dev_panel == null:
+		return
+	if remove:
+		if _dev_panel.remove_card_from_target(card_id):
+			_announce.rpc("REMOVED: %s" % label, 1.0)
+		else:
+			_announce.rpc("NOT STACKED: %s" % label, 1.0)
+	else:
+		if _dev_panel.apply_card_to_target(card_id):
+			_announce.rpc("APPLIED: %s" % label, 1.0)
+	_dev_panel.refresh_if_visible()
 
 func _on_peer_connected(_id: int) -> void:
 	if not multiplayer.is_server():
@@ -729,6 +737,16 @@ func _current_player_positions() -> Array[Vector3]:
 			out.append((child as Node3D).global_position)
 	return out
 
+func _arena_spawnpoints() -> Array:
+	var arena: Node = get_node_or_null("Arena")
+	if arena == null:
+		return get_tree().get_nodes_in_group("spawnpoints")
+	var out: Array = []
+	for sp in get_tree().get_nodes_in_group("spawnpoints"):
+		if sp is Node and arena.is_ancestor_of(sp):
+			out.append(sp)
+	return out
+
 func _pick_spawn(avoid: Array[Vector3] = []) -> Dictionary:
 	# Returns {"pos": Vector3, "yaw": float}. Picks the spawnpoint that maximizes
 	#   min_distance(other_spawns) - height_penalty
@@ -736,7 +754,7 @@ func _pick_spawn(avoid: Array[Vector3] = []) -> Dictionary:
 	# height as the first one already placed this round. Yaw faces the arena
 	# center unless that direction is blocked by a wall within 3m, in which
 	# case we try perpendicular and back-facing yaws.
-	var spawns := get_tree().get_nodes_in_group("spawnpoints")
+	var spawns := _arena_spawnpoints()
 	if spawns.is_empty():
 		# Belt-and-suspenders: if we somehow get here while no arena spawn
 		# nodes exist, plant the player at the arena's center at safe
@@ -781,15 +799,19 @@ func _pick_spawn(avoid: Array[Vector3] = []) -> Dictionary:
 
 	if found_clear:
 		return {"pos": best_pos, "yaw": best_yaw}
-	# Last-ditch fallback: every spawn was blocked by an obstacle or the
-	# ground-check rejected them. Do not choose blocked-but-grounded spawns:
-	# that can wedge a player into a lava platform cover column.
+	# Last-ditch fallback: every spawn was blocked by an obstacle or failed
+	# validation. Never return a raw spawnpoint — on lava-platform maps that
+	# can land in open lava or inside cover columns.
 	for spawn in spawns:
 		var pos: Vector3 = (spawn as Node3D).global_position
 		if _spawn_is_valid(pos):
 			return {"pos": pos, "yaw": _spawn_yaw_at(pos, arena_origin)}
-	var fb: Vector3 = (spawns[0] as Node3D).global_position
-	return {"pos": fb, "yaw": _spawn_yaw_at(fb, arena_origin)}
+	if arena and arena.has_method("is_all_floor_lava") and arena.is_all_floor_lava():
+		if arena.has_method("get_lava_fallback_spawn_world"):
+			var fb_lava: Vector3 = arena.get_lava_fallback_spawn_world()
+			if _spawn_is_valid(fb_lava):
+				return {"pos": fb_lava, "yaw": _spawn_yaw_at(fb_lava, arena_origin)}
+	return {"pos": arena_origin + Vector3(0.0, 8.0, 0.0), "yaw": 0.0}
 
 
 func _min_distance(pos: Vector3, others: Array[Vector3]) -> float:
@@ -842,7 +864,13 @@ func _spawn_is_clear(pos: Vector3) -> bool:
 
 
 func _spawn_is_valid(pos: Vector3) -> bool:
-	return _spawn_is_clear(pos) and _spawn_has_ground(pos)
+	if not _spawn_is_clear(pos) or not _spawn_has_ground(pos):
+		return false
+	var arena: Node = get_node_or_null("Arena")
+	if arena and arena.has_method("is_all_floor_lava") and arena.is_all_floor_lava():
+		if arena.has_method("is_lava_spawn_safe") and not arena.is_lava_spawn_safe(pos):
+			return false
+	return true
 
 
 # Cast a ray straight down from the spawn point — if nothing on layer 1
@@ -856,8 +884,18 @@ func _spawn_has_ground(pos: Vector3) -> bool:
 	var hit := space.intersect_ray(query)
 	if hit.is_empty():
 		return false
+	var hit_pos: Vector3 = hit.get("position", pos)
 	var normal: Vector3 = hit.get("normal", Vector3.UP)
-	return normal.dot(Vector3.UP) >= 0.65
+	if normal.dot(Vector3.UP) < 0.65:
+		return false
+	var arena: Node = get_node_or_null("Arena")
+	if arena and arena.has_method("is_all_floor_lava") and arena.is_all_floor_lava():
+		if arena.has_method("is_lava_spawn_safe"):
+			if not arena.is_lava_spawn_safe(pos):
+				return false
+			if not arena.is_lava_spawn_safe(hit_pos + Vector3.UP * 0.9):
+				return false
+	return true
 
 @rpc("authority", "call_local", "reliable")
 func _do_spawn(
@@ -1155,7 +1193,7 @@ func _start_round_now() -> void:
 		# from spawn to impact. Each player auto-ends their launch on first
 		# floor contact, so there's no central timer gating the round start.
 		var sky_pos: Vector3 = pick["pos"] + Vector3(0.0, 60.0, 0.0)
-		p.server_respawn.rpc_id(p.get_multiplayer_authority(), sky_pos, pick["yaw"])
+		p.server_respawn.rpc(sky_pos, pick["yaw"])
 		# Clear any leftover freeze (e.g. losers were frozen during card-pick
 		# at the end of the previous round) before kicking off the launch —
 		# otherwise the player lands and can't move.
