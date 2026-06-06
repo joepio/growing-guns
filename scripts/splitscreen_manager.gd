@@ -153,6 +153,14 @@ func show_hitmarker_for(player_id: int, kind: String) -> bool:
 	return true
 
 
+func show_pickup_collected_for(player_id: int, kind: String) -> bool:
+	var renderer := _renderers_by_player.get(player_id) as RenderPlayer
+	if renderer == null:
+		return false
+	renderer.show_pickup_toast(kind)
+	return true
+
+
 func show_damage_direction_for(player_id: int, from_pos: Vector3) -> bool:
 	var renderer := _renderers_by_player.get(player_id) as RenderPlayer
 	if renderer == null:

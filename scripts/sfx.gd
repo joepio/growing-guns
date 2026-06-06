@@ -850,6 +850,10 @@ func pick_countdown_beep(seconds_left: int) -> void:
 func pling(pitch_ratio: float = 1.0) -> void:
 	var key := "pling_%d" % int(round(pitch_ratio * 100.0))
 	_play(_cached_samples(key, Callable(self, "_synth_pling").bind(pitch_ratio)), -10.0, NO_POS, "pling", -1.0, false, 70.0)
+
+func pickup_drop(at: Vector3 = NO_POS) -> void:
+	_play(_cached_samples("pickup_drop", Callable(self, "_synth_pickup_drop")), -11.0, at, "pickup_drop", -1.0, false, 75.0)
+
 func card_flip(_pitch_ratio: float = 1.0) -> void:
 	# pitch_ratio kept for callsite compatibility but no longer used —
 	# variation comes from the 3 deterministic synthesised variants instead.
@@ -1693,6 +1697,28 @@ func _synth_pling(pitch_ratio: float = 1.0) -> PackedVector2Array:
 		var t := float(i) / MIX_RATE
 		var env := exp(-t * 22.0)
 		var s := sin(2.0 * PI * freq * t) * env * 0.5
+		out[i] = Vector2(s, s)
+	return out
+
+func _synth_pickup_drop() -> PackedVector2Array:
+	# Descending whoosh with a bright chime at the end — sky-drop telegraph.
+	var dur := 0.62
+	var n := int(dur * MIX_RATE)
+	var out := PackedVector2Array()
+	out.resize(n)
+	for i in range(n):
+		var t := float(i) / MIX_RATE
+		var u := t / dur
+		var whoosh_env := (1.0 - u) * exp(-t * 4.5)
+		var whoosh_freq := lerpf(920.0, 180.0, u * u)
+		var whoosh := sin(2.0 * PI * whoosh_freq * t) * whoosh_env * 0.22
+		var chime_start := dur * 0.58
+		var chime := 0.0
+		if t >= chime_start:
+			var ct := t - chime_start
+			var chime_env := exp(-ct * 18.0)
+			chime = sin(2.0 * PI * 1180.0 * ct) * chime_env * 0.42
+		var s := tanh((whoosh + chime) * 1.35) * 0.55
 		out[i] = Vector2(s, s)
 	return out
 

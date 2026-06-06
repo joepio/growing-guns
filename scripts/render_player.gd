@@ -7,6 +7,7 @@ const CROSSHAIR_SCRIPT := preload("res://scripts/crosshair.gd")
 const HIT_MARKER_SCRIPT := preload("res://scripts/hit_marker.gd")
 const DAMAGE_INDICATOR_SCRIPT := preload("res://scripts/damage_indicator.gd")
 const HUD_ICON_SCRIPT := preload("res://scripts/hud_icon.gd")
+const PICKUP_ITEM_SCRIPT := preload("res://scripts/pickup_item.gd")
 const PLAYER_VISUAL_LAYER_BASE := 8
 # Higher than the gameplay look-deadzone — casual stick drift shouldn't
 # advance the selection while the card pick UI is up.
@@ -31,6 +32,7 @@ var _card_exit_animating: bool = false
 # Edge-trigger state for left-stick X card nav: only fires once per push past
 # the deadzone, has to return to neutral before the next nav can register.
 var _card_stick_x_engaged: bool = false
+var _pickup_toast_timer: Timer = null
 
 
 func setup(game_node: Node, id: int, device: int = -1) -> void:
@@ -417,6 +419,28 @@ func _build() -> void:
 	root.add_child(ghost)
 
 	var card_overlay := _build_card_overlay(root)
+
+	var pickup_toast := Label.new()
+	pickup_toast.name = "PickupToast"
+	pickup_toast.visible = false
+	pickup_toast.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	pickup_toast.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	pickup_toast.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	pickup_toast.set_anchors_and_offsets_preset(Control.PRESET_CENTER_TOP)
+	pickup_toast.offset_top = 72.0
+	pickup_toast.offset_bottom = 132.0
+	pickup_toast.offset_left = -180.0
+	pickup_toast.offset_right = 180.0
+	pickup_toast.add_theme_font_size_override("font_size", 22)
+	pickup_toast.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.92))
+	pickup_toast.add_theme_constant_override("outline_size", 5)
+	root.add_child(pickup_toast)
+
+	_pickup_toast_timer = Timer.new()
+	_pickup_toast_timer.one_shot = true
+	_pickup_toast_timer.timeout.connect(func() -> void: pickup_toast.visible = false)
+	root.add_child(_pickup_toast_timer)
+
 	var retro_layer := CanvasLayer.new()
 	retro_layer.layer = 100
 	viewport.add_child(retro_layer)
@@ -443,8 +467,22 @@ func _build() -> void:
 		"card_bg": card_overlay.bg,
 		"card_row": card_overlay.row,
 		"card_title": card_overlay.title,
+		"pickup_toast": pickup_toast,
 		"retro_layer": retro_layer,
 	}
+
+
+func show_pickup_toast(kind: String) -> void:
+	var toast: Label = _hud.get("pickup_toast") as Label
+	if toast == null:
+		return
+	var info: Dictionary = PICKUP_ITEM_SCRIPT.display_info(kind)
+	toast.text = info.title if str(info.subtitle).is_empty() else "%s\n%s" % [info.title, info.subtitle]
+	toast.add_theme_color_override("font_color", info.color)
+	toast.visible = true
+	if _pickup_toast_timer:
+		_pickup_toast_timer.wait_time = 1.35
+		_pickup_toast_timer.start()
 
 
 # Bottom-row HUD panels. Each one is a plain Control with named children

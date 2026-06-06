@@ -5,6 +5,12 @@ const HUD_ICON_SCRIPT := preload("res://scripts/hud_icon.gd")
 const DEV_PANEL_SCRIPT := preload("res://scripts/dev_panel.gd")
 const RENDER_PLAYER_SCRIPT := preload("res://scripts/render_player.gd")
 const SPLITSCREEN_MANAGER_SCRIPT := preload("res://scripts/splitscreen_manager.gd")
+const PICKUP_ITEM_SCRIPT := preload("res://scripts/pickup_item.gd")
+
+const PICKUP_SPAWN_MEAN := 20.0
+const PICKUP_SPAWN_JITTER := 7.0
+const PICKUP_MAX_ACTIVE := 4
+const PICKUP_SPAWN_HEIGHT := 52.0
 
 # Maps that can be picked at the start of each round. Server picks an index
 # and broadcasts via _swap_arena.rpc(idx) so all peers agree. Add new maps
@@ -92,6 +98,8 @@ var _round_music_level: int = 1
 var _round_damage_seen: bool = false
 var _round_elapsed: float = 0.0
 var _lava_leak_started: bool = false
+var _pickups_root: Node3D = null
+var _pickup_spawn_timer: float = 0.0
 # Music keeps the same track across rounds and only switches at a round
 # boundary once it has played at least this long — so short rounds don't
 # whiplash the soundtrack. 0 = no track started yet (force one on first round).
@@ -139,6 +147,8 @@ var _network_status_panel: PanelContainer = null
 var _network_status_label: Label = null
 var _network_status_hide_token: int = 0
 var _kill_feed: VBoxContainer = null
+var _pickup_toast: Label = null
+var _pickup_toast_timer: Timer = null
 var _splitscreen_hint: Label = null
 var _join_auto_submit_text: String = ""
 var _join_in_progress: bool = false
@@ -183,6 +193,11 @@ func _ready() -> void:
 	# F2 brings up the live audio-tuning panel — same sliders as action_lab.
 	_audio_panel = AudioSettingsPanel.new()
 	add_child(_audio_panel)
+
+	_pickups_root = Node3D.new()
+	_pickups_root.name = "Pickups"
+	add_child(_pickups_root)
+	_reset_pickup_spawner()
 
 	# Always-process so the retro-shader cursor + mouse-mode keep updating
 	# while the world is paused (pause menu open). Gameplay-tickling parts of
@@ -480,6 +495,7 @@ func _process(delta: float) -> void:
 	if multiplayer.is_server() and state == State.PLAYING:
 		_update_lava_leak(delta)
 		_update_round_music_phase()
+		_update_pickup_spawner(delta)
 	if multiplayer.is_server():
 		_tick_card_pick_deadlines(delta)
 		_update_music_muffle_broadcast()
@@ -584,7 +600,7 @@ func _input(event: InputEvent) -> void:
 			_sync_mouse_mode()
 		return
 
-	# Cheat hotkeys (G / P / M / L / 0 / 1-9 / ?) — only when dev tools are enabled.
+	# Cheat hotkeys (G / P / M / L / I / 0 / 1-9 / ?) — only when dev tools are enabled.
 	if event is InputEventKey and event.pressed and not event.echo and _dev_panel != null:
 		var cheat_handled := true
 		var shift: bool = event.shift_pressed
@@ -607,6 +623,10 @@ func _input(event: InputEvent) -> void:
 					_lava_leak_started = true
 					_start_lava_leak.rpc(LAVA_LEAK_SPREAD_SECONDS)
 					_announce.rpc("LAVA TRIGGERED", 1.0)
+			KEY_I:
+				if multiplayer.is_server():
+					dev_spawn_pickup()
+					_announce.rpc("PICKUP DROPPED", 1.0)
 			KEY_0:
 				var t = _dev_panel.get_target()
 				if t:
@@ -736,6 +756,23 @@ func _current_player_positions() -> Array[Vector3]:
 		if child is Node3D:
 			out.append((child as Node3D).global_position)
 	return out
+
+
+@rpc("any_peer", "call_local", "reliable")
+func execute_phoenix_revive(player_id: int, fx_pos: Vector3) -> void:
+	if not multiplayer.is_server():
+		return
+	var p := players_root.get_node_or_null(str(player_id))
+	if p == null or not is_instance_valid(p):
+		return
+	var pick := _pick_spawn(_current_player_positions())
+	var sky_pos: Vector3 = pick["pos"] + Vector3(0.0, 60.0, 0.0)
+	p.clear_ragdoll.rpc()
+	p.phoenix_revive_at.rpc(sky_pos, pick["yaw"], fx_pos)
+	p.set_frozen.rpc(false)
+	p.set_launching.rpc(true, 80.0)
+	p._phoenix_fx.rpc(fx_pos)
+
 
 func _arena_spawnpoints() -> Array:
 	var arena: Node = get_node_or_null("Arena")
@@ -1185,6 +1222,7 @@ func _start_round_now() -> void:
 		var p := players_root.get_node_or_null(str(pid))
 		if not p:
 			continue
+		p.rebuild_weapon_from_cards.rpc()
 		var pick := _pick_spawn(used)
 		used.append(pick["pos"])
 		p.set_ghost_mode.rpc(false)
@@ -1203,6 +1241,7 @@ func _start_round_now() -> void:
 	_clear_projectiles.rpc()
 	_clear_craters.rpc()
 	_clear_blood_splats.rpc()
+	_clear_pickups.rpc()
 	_hide_rematch_overlay.rpc()
 	# Warm shot + explosion synths for whichever weapons are in play this
 	# round (and a few common explosion radii) during the rocket-spawn window
@@ -1419,6 +1458,89 @@ func _reset_round_tracking() -> void:
 	round_winner_id = 0
 	_round_elapsed = 0.0
 	_lava_leak_started = false
+	_reset_pickup_spawner()
+
+func _reset_pickup_spawner() -> void:
+	_pickup_spawn_timer = randf_range(10.0, 24.0)
+
+func _update_pickup_spawner(delta: float) -> void:
+	if not multiplayer.is_server() or state != State.PLAYING:
+		return
+	if get_tree().get_nodes_in_group("pickups").size() >= PICKUP_MAX_ACTIVE:
+		return
+	_pickup_spawn_timer -= delta
+	if _pickup_spawn_timer > 0.0:
+		return
+	_pickup_spawn_timer = PICKUP_SPAWN_MEAN + randf_range(-PICKUP_SPAWN_JITTER, PICKUP_SPAWN_JITTER)
+	var kind: String = PICKUP_ITEM_SCRIPT.KINDS[randi() % PICKUP_ITEM_SCRIPT.KINDS.size()]
+	_spawn_pickup_item_with_fx.rpc(kind, _random_pickup_spawn_pos())
+
+func dev_spawn_pickup(kind: String = "") -> void:
+	if not multiplayer.is_server():
+		return
+	if kind.is_empty() or kind not in PICKUP_ITEM_SCRIPT.KINDS:
+		kind = PICKUP_ITEM_SCRIPT.KINDS[randi() % PICKUP_ITEM_SCRIPT.KINDS.size()]
+	_spawn_pickup_item_with_fx.rpc(kind, _dev_pickup_spawn_pos())
+
+func _dev_pickup_spawn_pos() -> Vector3:
+	if _dev_panel != null and _dev_panel.has_method("get_target"):
+		var target: Node = _dev_panel.get_target()
+		if target and is_instance_valid(target):
+			var aim_point := _player_look_aim_point(target)
+			return aim_point + Vector3(0.0, PICKUP_SPAWN_HEIGHT, 0.0)
+	return _random_pickup_spawn_pos()
+
+func _player_look_aim_point(player: Node) -> Vector3:
+	var cam: Camera3D = player.get_node_or_null("Camera") as Camera3D
+	if cam == null:
+		return player.global_position
+	var cam_origin: Vector3 = cam.global_position
+	var cam_dir: Vector3 = -cam.global_transform.basis.z
+	var aim_dist: float = 800.0
+	var space := get_world_3d().direct_space_state
+	var aim_q := PhysicsRayQueryParameters3D.create(cam_origin, cam_origin + cam_dir * aim_dist)
+	aim_q.collision_mask = 1 | 2
+	aim_q.collide_with_areas = true
+	if player.has_method("get_hitbox_rids"):
+		aim_q.exclude = player.call("get_hitbox_rids")
+	var hit := space.intersect_ray(aim_q)
+	if hit.is_empty():
+		return cam_origin + cam_dir * aim_dist
+	return hit.get("position", cam_origin + cam_dir * aim_dist)
+
+func _random_pickup_spawn_pos() -> Vector3:
+	var origin := ARENA_OFFSET
+	var half := 32.0
+	var arena: Node = get_node_or_null("Arena")
+	if arena:
+		origin = (arena as Node3D).global_position
+		var gen: Node = arena.get_node_or_null("Generator")
+		if gen:
+			half = maxf(14.0, float(gen.get("arena_size")) * 0.5 - 6.0)
+	var margin := 4.0
+	var x := randf_range(-half + margin, half - margin)
+	var z := randf_range(-half + margin, half - margin)
+	return origin + Vector3(x, PICKUP_SPAWN_HEIGHT, z)
+
+@rpc("authority", "call_local", "reliable")
+func _spawn_pickup_item_with_fx(kind: String, world_pos: Vector3) -> void:
+	if _pickups_root == null:
+		return
+	SFX.pickup_drop(world_pos)
+	var pickup: Node3D = PICKUP_ITEM_SCRIPT.new()
+	pickup.name = "Pickup_%s_%d" % [kind, Time.get_ticks_msec()]
+	_pickups_root.add_child(pickup)
+	pickup.setup(kind, world_pos)
+
+@rpc("authority", "call_local", "reliable")
+func _spawn_pickup_item(kind: String, world_pos: Vector3) -> void:
+	_spawn_pickup_item_with_fx(kind, world_pos)
+
+@rpc("authority", "call_local", "reliable")
+func _clear_pickups() -> void:
+	for node in get_tree().get_nodes_in_group("pickups"):
+		if is_instance_valid(node):
+			node.queue_free()
 
 func report_kill(killer_id: int, victim_id: int) -> void:
 	# Called on the server by Player._report_death. In 3+ player rounds,
@@ -2397,6 +2519,61 @@ func _hide_rematch_overlay() -> void:
 func _broadcast_scores(scores: Dictionary) -> void:
 	round_wins = scores
 	_update_scoreboard()
+
+func show_pickup_collected_for(player_id: int, kind: String) -> void:
+	if _splitscreen and _splitscreen.is_enabled() and _splitscreen.has_method("show_pickup_collected_for"):
+		if _splitscreen.show_pickup_collected_for(player_id, kind):
+			return
+	if not _is_local_human_player(player_id):
+		return
+	_show_pickup_toast(kind)
+
+
+func _is_local_human_player(player_id: int) -> bool:
+	if _splitscreen and _splitscreen.is_enabled() and _splitscreen.has_method("_local_player_ids"):
+		return player_id in _splitscreen._local_player_ids()
+	if local_player and is_instance_valid(local_player):
+		return int(local_player.get("player_id")) == player_id
+	return player_id == multiplayer.get_unique_id()
+
+
+func _build_pickup_toast() -> void:
+	if _pickup_toast != null:
+		return
+	_pickup_toast = Label.new()
+	_pickup_toast.name = "PickupToast"
+	_pickup_toast.visible = false
+	_pickup_toast.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_pickup_toast.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_pickup_toast.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_pickup_toast.set_anchors_and_offsets_preset(Control.PRESET_CENTER_TOP)
+	_pickup_toast.offset_top = 108.0
+	_pickup_toast.offset_bottom = 188.0
+	_pickup_toast.offset_left = -220.0
+	_pickup_toast.offset_right = 220.0
+	_pickup_toast.add_theme_font_size_override("font_size", 30)
+	_pickup_toast.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.92))
+	_pickup_toast.add_theme_constant_override("outline_size", 6)
+	$HUD.add_child(_pickup_toast)
+
+	_pickup_toast_timer = Timer.new()
+	_pickup_toast_timer.name = "PickupToastTimer"
+	_pickup_toast_timer.one_shot = true
+	_pickup_toast_timer.timeout.connect(func() -> void:
+		if _pickup_toast:
+			_pickup_toast.visible = false)
+	add_child(_pickup_toast_timer)
+
+
+func _show_pickup_toast(kind: String) -> void:
+	_build_pickup_toast()
+	var info: Dictionary = PICKUP_ITEM_SCRIPT.display_info(kind)
+	_pickup_toast.text = info.title if str(info.subtitle).is_empty() else "%s\n%s" % [info.title, info.subtitle]
+	_pickup_toast.add_theme_color_override("font_color", info.color)
+	_pickup_toast.visible = true
+	_pickup_toast_timer.wait_time = 1.35
+	_pickup_toast_timer.start()
+
 
 func show_hitmarker_for(player_id: int, kind: String, dmg: int = 0, world_pos: Vector3 = Vector3.INF) -> void:
 	if _splitscreen and _splitscreen.is_enabled() and _splitscreen.has_method("show_hitmarker_for"):
