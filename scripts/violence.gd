@@ -667,6 +667,34 @@ static var _heat_mesh: SphereMesh = null
 static var _heat_shader: Shader = null
 static var _shock_mesh: SphereMesh = null
 static var _shock_shader: Shader = null
+static var _blast_budget_frame: int = -1
+static var _full_blasts_this_frame: int = 0
+static var _cheap_blasts_this_frame: int = 0
+static var _blast_cluster_positions: Array[Vector3] = []
+static var _full_blast_window_ms: int = -10000
+static var _full_blasts_this_window: int = 0
+static var _active_smoke_puffs: int = 0
+static var _pending_smoke_puffs: int = 0
+static var _smoke_burst_window_ms: int = -10000
+static var _smoke_burst_count: int = 0
+static var _explosion_sfx_window_ms: int = -10000
+static var _explosion_sfx_count: int = 0
+static var _cheap_light_window_ms: int = -10000
+static var _cheap_light_count: int = 0
+
+const MAX_FULL_BLASTS_PER_FRAME := 3
+const MAX_CHEAP_BLASTS_PER_FRAME := 10
+const BLAST_CLUSTER_DIST_SQ := 9.0
+const FULL_BLAST_WINDOW_MS := 500
+const MAX_FULL_BLASTS_PER_WINDOW := 1
+const MAX_ACTIVE_SMOKE_PUFFS := 36
+const MAX_PENDING_SMOKE_PUFFS := 12
+const SMOKE_BURST_WINDOW_MS := 750
+const MAX_SMOKE_BURSTS_PER_WINDOW := 1
+const EXPLOSION_SFX_WINDOW_MS := 500
+const MAX_EXPLOSION_SFX_PER_WINDOW := 1
+const CHEAP_LIGHT_WINDOW_MS := 180
+const MAX_CHEAP_LIGHTS_PER_WINDOW := 2
 
 # -------------------- world-space VFX attach --------------------
 
@@ -679,31 +707,88 @@ static func _attach_world_3d(scene: Node, node: Node3D, world_pos: Vector3) -> v
 		node.position = world_pos
 
 
-# Bigger blasts expand further, hold a hotter core, and pump a brighter
-# point light — stacked EXPLOSIVE ROUNDS cards should feel earth-shaking.
-# `local_player` (optional) is the local human's player; if provided, gets a
-# view-punch + is checked against the scene's exposure sidechain hook.
-static func spawn_bullet_blast(scene: Node, pos: Vector3, radius: float, color: Color, local_player: Node = null) -> void:
-	if scene == null:
+static func _begin_blast_frame() -> void:
+	var frame := Engine.get_physics_frames()
+	if _blast_budget_frame == frame:
 		return
-	if scene.has_method("trigger_explosion_sidechain"):
-		# Uncap so big bazookas push exposure WAY down (was 1.0 cap → all
-		# explosions ducked the same). Peak ~3 at radius 15+ feels properly
-		# blinding for the biggest blasts.
-		scene.trigger_explosion_sidechain(pos, radius, clampf(radius / 5.0, 0.35, 3.0))
-	if local_player and is_instance_valid(local_player) and local_player.has_method("apply_explosion_view_punch"):
-		# Allow peak > 1.0 for big blasts — uncapping makes a bazooka register
-		# noticeably harder than a small grenade-class burst.
-		local_player.apply_explosion_view_punch(pos, radius, clampf(radius / 5.0, 0.45, 1.6))
-	var expand_time: float = clampf(0.1 + radius * 0.012, 0.12, 0.24)
-	spawn_heat_distortion(scene, pos, radius, expand_time, clampf(radius * 0.012, 0.025, 0.06))
-	spawn_shockwave_ring(scene, pos, radius)
-	# Drop scorch rings on every nearby surface (floor under midair blasts,
-	# walls beside corner blasts, ceiling above ground-level pops).
-	spawn_blast_scorches(scene, pos, radius)
+	_blast_budget_frame = frame
+	_full_blasts_this_frame = 0
+	_cheap_blasts_this_frame = 0
+	_blast_cluster_positions.clear()
 
-	# 1) Fireball volume. Grow linearly to the effective radius while the
-	# emitted light drops fast; opacity ramps up as the blast front arrives.
+
+static func _claim_full_blast(pos: Vector3) -> bool:
+	_begin_blast_frame()
+	for existing in _blast_cluster_positions:
+		if existing.distance_squared_to(pos) <= BLAST_CLUSTER_DIST_SQ:
+			return false
+	var now := Time.get_ticks_msec()
+	if now - _full_blast_window_ms >= FULL_BLAST_WINDOW_MS:
+		_full_blast_window_ms = now
+		_full_blasts_this_window = 0
+	if _full_blasts_this_frame >= MAX_FULL_BLASTS_PER_FRAME:
+		return false
+	if _full_blasts_this_window >= MAX_FULL_BLASTS_PER_WINDOW:
+		return false
+	_full_blasts_this_frame += 1
+	_full_blasts_this_window += 1
+	_blast_cluster_positions.append(pos)
+	return true
+
+
+static func _claim_cheap_blast() -> bool:
+	_begin_blast_frame()
+	if _cheap_blasts_this_frame >= MAX_CHEAP_BLASTS_PER_FRAME:
+		return false
+	_cheap_blasts_this_frame += 1
+	return true
+
+
+static func _claim_explosion_sfx() -> bool:
+	var now := Time.get_ticks_msec()
+	if now - _explosion_sfx_window_ms >= EXPLOSION_SFX_WINDOW_MS:
+		_explosion_sfx_window_ms = now
+		_explosion_sfx_count = 0
+	if _explosion_sfx_count >= MAX_EXPLOSION_SFX_PER_WINDOW:
+		return false
+	_explosion_sfx_count += 1
+	return true
+
+
+static func _claim_cheap_light() -> bool:
+	var now := Time.get_ticks_msec()
+	if now - _cheap_light_window_ms >= CHEAP_LIGHT_WINDOW_MS:
+		_cheap_light_window_ms = now
+		_cheap_light_count = 0
+	if _cheap_light_count >= MAX_CHEAP_LIGHTS_PER_WINDOW:
+		return false
+	_cheap_light_count += 1
+	return true
+
+
+static func _can_spawn_smoke_puff() -> bool:
+	return _active_smoke_puffs < MAX_ACTIVE_SMOKE_PUFFS
+
+
+static func _claim_pending_smoke_puff() -> bool:
+	if _active_smoke_puffs + _pending_smoke_puffs >= MAX_ACTIVE_SMOKE_PUFFS + MAX_PENDING_SMOKE_PUFFS:
+		return false
+	_pending_smoke_puffs += 1
+	return true
+
+
+static func _claim_smoke_burst() -> bool:
+	var now := Time.get_ticks_msec()
+	if now - _smoke_burst_window_ms >= SMOKE_BURST_WINDOW_MS:
+		_smoke_burst_window_ms = now
+		_smoke_burst_count = 0
+	if _smoke_burst_count >= MAX_SMOKE_BURSTS_PER_WINDOW:
+		return false
+	_smoke_burst_count += 1
+	return true
+
+
+static func _spawn_blast_core_volume(scene: Node, pos: Vector3, radius: float, expand_time: float) -> void:
 	var core := MeshInstance3D.new()
 	var cm := SphereMesh.new()
 	cm.radius = 0.25
@@ -733,8 +818,8 @@ static func spawn_bullet_blast(scene: Node, pos: Vector3, radius: float, color: 
 		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
 	ctw.chain().tween_callback(core.queue_free)
 
-	# 2) Dense blast shell. The border of the effective radius reads as a
-	# briefly opaque wall rather than a faint transparent puff.
+
+static func _spawn_blast_dense_shell(scene: Node, pos: Vector3, radius: float, color: Color) -> void:
 	var wave := MeshInstance3D.new()
 	var wm := SphereMesh.new()
 	wm.radius = 0.2
@@ -766,25 +851,26 @@ static func spawn_bullet_blast(scene: Node, pos: Vector3, radius: float, color: 
 		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
 	tw.chain().tween_callback(wave.queue_free)
 
-	# Brief scene-wide flash — way brighter than the warm-ember decay light
-	# below, but only ~60 ms so it reads as the moment-of-detonation spike.
+
+static func _spawn_blast_flash_light(scene: Node, pos: Vector3, radius: float) -> void:
 	var flash := OmniLight3D.new()
 	flash.light_color = Color(1.0, 0.98, 0.92)
 	flash.light_energy = 100.0 + radius * 14.0
 	flash.omni_range = maxf(40.0, radius * 6.0)
+	flash.shadow_enabled = false
 	_attach_world_3d(scene, flash, pos)
 	var ftw := flash.create_tween()
 	ftw.tween_property(flash, "light_energy", 0.0, 0.06)\
 		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
 	ftw.tween_callback(flash.queue_free)
 
-	# Bright core glow — small range, longer duration than the scene flash.
-	# Reads as the white-hot fireball center hanging around as the blast
-	# evolves, distinct from the scene-wide initial spike.
+
+static func _spawn_blast_core_light(scene: Node, pos: Vector3, radius: float, color: Color, energy_mult: float = 1.0) -> void:
 	var core_light := OmniLight3D.new()
 	core_light.light_color = color.lerp(Color(1.0, 0.95, 0.78), 0.7)
-	core_light.light_energy = 60.0 + radius * 8.0
+	core_light.light_energy = (60.0 + radius * 8.0) * energy_mult
 	core_light.omni_range = maxf(8.0, radius * 1.4)
+	core_light.shadow_enabled = false
 	_attach_world_3d(scene, core_light, pos)
 	var ctlw := core_light.create_tween()
 	ctlw.tween_property(core_light, "light_color", color.lerp(Color(1.0, 0.55, 0.18), 0.5), 0.12)\
@@ -792,6 +878,64 @@ static func spawn_bullet_blast(scene: Node, pos: Vector3, radius: float, color: 
 	ctlw.parallel().tween_property(core_light, "light_energy", 0.0, 0.32)\
 		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
 	ctlw.tween_callback(core_light.queue_free)
+
+
+static func _spawn_cheap_blast_flare(scene: Node, pos: Vector3, radius: float, color: Color) -> void:
+	if scene == null or radius <= 0.0 or not _claim_cheap_blast():
+		return
+	var expand_time: float = clampf(0.1 + radius * 0.012, 0.12, 0.24)
+	_spawn_blast_core_volume(scene, pos, radius, expand_time)
+	_spawn_blast_dense_shell(scene, pos, radius, color)
+	if _claim_cheap_light():
+		_spawn_blast_flash_light(scene, pos, radius)
+		_spawn_blast_core_light(scene, pos, radius, color, 0.55)
+
+
+# Bigger blasts expand further, hold a hotter core, and pump a brighter
+# point light — stacked EXPLOSIVE ROUNDS cards should feel earth-shaking.
+# `local_player` (optional) is the local human's player; if provided, gets a
+# view-punch + is checked against the scene's exposure sidechain hook.
+static func spawn_bullet_blast(scene: Node, pos: Vector3, radius: float, color: Color, local_player: Node = null, play_audio: bool = true) -> void:
+	if scene == null:
+		return
+	var full_blast := _claim_full_blast(pos)
+	if full_blast and scene.has_method("trigger_explosion_sidechain"):
+		# Uncap so big bazookas push exposure WAY down (was 1.0 cap → all
+		# explosions ducked the same). Peak ~3 at radius 15+ feels properly
+		# blinding for the biggest blasts.
+		var sidechain_peak := clampf(radius / 5.0, 0.35, 3.0)
+		scene.trigger_explosion_sidechain(pos, radius, sidechain_peak)
+	if full_blast and local_player and is_instance_valid(local_player) and local_player.has_method("apply_explosion_view_punch"):
+		# Allow peak > 1.0 for big blasts — uncapping makes a bazooka register
+		# noticeably harder than a small grenade-class burst.
+		var punch_peak := clampf(radius / 5.0, 0.45, 1.6)
+		local_player.apply_explosion_view_punch(pos, radius, punch_peak)
+	if not full_blast:
+		_spawn_cheap_blast_flare(scene, pos, radius, color)
+		return
+	var expand_time: float = clampf(0.1 + radius * 0.012, 0.12, 0.24)
+	spawn_heat_distortion(scene, pos, radius, expand_time, clampf(radius * 0.012, 0.025, 0.06))
+	spawn_shockwave_ring(scene, pos, radius)
+	# Drop scorch rings on every nearby surface (floor under midair blasts,
+	# walls beside corner blasts, ceiling above ground-level pops).
+	spawn_blast_scorches(scene, pos, radius)
+
+	# 1) Fireball volume. Grow linearly to the effective radius while the
+	# emitted light drops fast; opacity ramps up as the blast front arrives.
+	_spawn_blast_core_volume(scene, pos, radius, expand_time)
+
+	# 2) Dense blast shell. The border of the effective radius reads as a
+	# briefly opaque wall rather than a faint transparent puff.
+	_spawn_blast_dense_shell(scene, pos, radius, color)
+
+	# Brief scene-wide flash — way brighter than the warm-ember decay light
+	# below, but only ~60 ms so it reads as the moment-of-detonation spike.
+	_spawn_blast_flash_light(scene, pos, radius)
+
+	# Bright core glow — small range, longer duration than the scene flash.
+	# Reads as the white-hot fireball center hanging around as the blast
+	# evolves, distinct from the scene-wide initial spike.
+	_spawn_blast_core_light(scene, pos, radius, color)
 
 	# 3) Explosion light — extremely bright at ignition, then it collapses fast.
 	var light := OmniLight3D.new()
@@ -814,10 +958,10 @@ static func spawn_bullet_blast(scene: Node, pos: Vector3, radius: float, color: 
 	ltw.tween_callback(light.queue_free)
 
 	# 4) Big blasts play the full explosion SFX; smaller impacts stay visual.
-	if radius >= 3.5:
+	if play_audio and radius >= 3.5:
 		# Bench A/B isolation — gated by BenchFlags so production hits one
 		# static bool branch instead of a scene-root .get() lookup.
-		if not (BenchFlags.active and BenchFlags.no_explosion_audio):
+		if not (BenchFlags.active and BenchFlags.no_explosion_audio) and _claim_explosion_sfx():
 			SFX.explosion(pos, radius)
 
 	if radius >= 5.0:
@@ -835,6 +979,9 @@ static func spawn_smoke_puff(
 ) -> void:
 	if scene == null or (BenchFlags.active and BenchFlags.no_explosion_visuals):
 		return
+	if not _can_spawn_smoke_puff():
+		return
+	_active_smoke_puffs += 1
 	var puff := MeshInstance3D.new()
 	var mesh := SphereMesh.new()
 	mesh.radius = 0.35 * size
@@ -877,7 +1024,11 @@ static func spawn_smoke_puff(
 		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
 	atw.tween_property(mat, "albedo_color", Color(tint.r, tint.g, tint.b, 0.0), lifetime * 0.72)\
 		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
-	atw.tween_callback(puff.queue_free)
+	atw.tween_callback(func() -> void:
+		_active_smoke_puffs = maxi(0, _active_smoke_puffs - 1)
+		if is_instance_valid(puff):
+			puff.queue_free()
+	)
 
 
 static func spawn_exhaust_smoke(scene: Node, pos: Vector3, size: float, drift: Vector3) -> void:
@@ -900,6 +1051,8 @@ static func spawn_exhaust_smoke(scene: Node, pos: Vector3, size: float, drift: V
 
 static func spawn_blast_smoke(scene: Node, pos: Vector3, radius: float) -> void:
 	if scene == null or radius <= 0.0 or (BenchFlags.active and BenchFlags.no_explosion_visuals):
+		return
+	if not _claim_smoke_burst():
 		return
 	var ground := pos + Vector3.UP * 0.35
 	var scale := clampf(radius / 14.0, 0.55, 2.4)
@@ -928,8 +1081,11 @@ static func spawn_blast_smoke(scene: Node, pos: Vector3, radius: float) -> void:
 		)
 	var column_count := int(clampf(radius * 0.12, 2, 6))
 	for j in column_count:
+		if not _claim_pending_smoke_puff():
+			continue
 		var delay := float(j) * 0.16
 		scene.get_tree().create_timer(delay).timeout.connect(func() -> void:
+			_pending_smoke_puffs = maxi(0, _pending_smoke_puffs - 1)
 			if not is_instance_valid(scene):
 				return
 			var ring := randf_range(0.0, radius * 0.16)

@@ -178,7 +178,7 @@ var _recoil_spread: float = 0.0
 func get_effective_spread() -> float:
 	var horiz_speed: float = Vector2(velocity.x, velocity.z).length()
 	var move_factor: float = clampf(horiz_speed / WALK_SPEED, 0.0, 1.0)
-	var raw_spread := weapon.spread * (1.0 + move_factor * MOVEMENT_SPREAD_MULT) + _recoil_spread
+	var raw_spread := weapon.get_spread() * (1.0 + move_factor * MOVEMENT_SPREAD_MULT) + _recoil_spread
 	return minf(raw_spread, MAX_EFFECTIVE_SPREAD)
 var _head_hitbox_rest_y: float = 0.86
 var _torso_hitbox_rest_y: float = 0.12
@@ -1156,10 +1156,11 @@ func _fire_rifle() -> void:
 	# Local feel (authority-only; these fields are driven by the local physics loop).
 	# Scale recoil and kick by the size of the bullet
 	var scale_f := weapon.get_bullet_scale()
-	recoil_pitch += RIFLE_RECOIL_PITCH * scale_f
-	muzzle_kick_z = max(muzzle_kick_z, RIFLE_RECOIL_KICK * scale_f)
-	shake_amt = max(shake_amt, RIFLE_SHAKE * scale_f)
-	rotate_y(randf_range(-RIFLE_RECOIL_YAW_JITTER, RIFLE_RECOIL_YAW_JITTER) * scale_f)
+	var recoil_scale := scale_f * clampf(weapon.get_recoil_per_shot() / Weapon.BASE_RECOIL, 0.2, 2.5)
+	recoil_pitch += RIFLE_RECOIL_PITCH * recoil_scale
+	muzzle_kick_z = max(muzzle_kick_z, RIFLE_RECOIL_KICK * recoil_scale)
+	shake_amt = max(shake_amt, RIFLE_SHAKE * recoil_scale)
+	rotate_y(randf_range(-RIFLE_RECOIL_YAW_JITTER, RIFLE_RECOIL_YAW_JITTER) * recoil_scale)
 	# Physical recoil push — opposite to where you're aiming. Negligible at
 	# base damage; meaningful when you stack DAMAGE / HAYMAKER / BAZOOKA.
 	# Power 1.6 means scaling is gentle until damage is well above 1×.
@@ -1169,7 +1170,7 @@ func _fire_rifle() -> void:
 	# Snapshot spread BEFORE this shot's bloom so the first shot is still crisp,
 	# then add the per-shot recoil so each successive held shot walks wider.
 	var spread: float = get_effective_spread()
-	_recoil_spread = minf(_recoil_spread + weapon.recoil_per_shot, MAX_EFFECTIVE_SPREAD)
+	_recoil_spread = minf(_recoil_spread + weapon.get_recoil_per_shot(), MAX_EFFECTIVE_SPREAD)
 	# Multi-shot: fire N rays with random yaw+pitch spread (MULTI-SHOT card).
 	var shots: int = weapon.get_shots_per_trigger()
 	var cam_right: Vector3 = camera.global_transform.basis.x
@@ -1419,10 +1420,10 @@ func get_hitbox_rids() -> Array[RID]:
 			rids.append(child.get_rid())
 	return rids
 
-func _spawn_bullet_blast(pos: Vector3, radius: float, color: Color) -> void:
+func _spawn_bullet_blast(pos: Vector3, radius: float, color: Color, play_audio: bool = false) -> void:
 	var scene: Node = get_tree().current_scene
 	var lp: Node = scene.get("local_player") if scene else null
-	Violence.spawn_bullet_blast(scene, pos, radius, color, lp)
+	Violence.spawn_bullet_blast(scene, pos, radius, color, lp, play_audio)
 
 func apply_explosion_view_punch(pos: Vector3, radius: float, peak: float = 1.0) -> void:
 	Violence.apply_explosion_view_punch(self, pos, radius, peak)
@@ -2003,7 +2004,7 @@ func _request_special_blast(pos: Vector3, radius: float, damage: float, shooter_
 		return
 	if multiplayer.get_remote_sender_id() != 0 and multiplayer.get_remote_sender_id() != shooter_id:
 		return
-	_spawn_bullet_blast(pos, radius, color)
+	_spawn_bullet_blast(pos, radius, color, true)
 	_apply_bullet_splash(pos + Vector3.UP * 0.1, radius, damage, shooter_id)
 
 # -------------------- GRENADE --------------------
@@ -2426,7 +2427,7 @@ func _phoenix_fx(pos: Vector3) -> void:
 	var scene := get_tree().current_scene
 	if scene == null:
 		return
-	_spawn_bullet_blast(pos + Vector3.UP * 0.8, 5.0, Color(1.0, 0.55, 0.15))
+	_spawn_bullet_blast(pos + Vector3.UP * 0.8, 5.0, Color(1.0, 0.55, 0.15), true)
 
 @rpc("any_peer", "call_local", "unreliable")
 func _play_hurt_sound(pos: Vector3) -> void:
