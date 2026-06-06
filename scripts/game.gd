@@ -9,6 +9,7 @@ const PICKUP_ITEM_SCRIPT := preload("res://scripts/pickup_item.gd")
 const WEAPON_NAME_SCRIPT := preload("res://scripts/weapon_name.gd")
 const ROUND_MODIFIERS_SCRIPT := preload("res://scripts/round_modifiers.gd")
 const AIR_STRIKE_SCRIPT := preload("res://scripts/air_strike.gd")
+const ION_CANNON_SCRIPT := preload("res://scripts/ion_cannon.gd")
 
 const PICKUP_SPAWN_MEAN := 20.0
 const PICKUP_SPAWN_JITTER := 7.0
@@ -19,6 +20,8 @@ const AIR_STRIKE_RADIUS := 34.0
 const AIR_STRIKE_DAMAGE := 165.0
 const AIR_STRIKE_SPAWN_HEIGHT := 263.0
 const AIR_STRIKE_SPAWN_HORIZ := 93.0
+const ION_CANNON_INTERVAL := 5.5
+const ION_CANNON_INTERVAL_JITTER := 1.5
 const PICKUP_SPAWN_HEIGHT := 52.0
 
 # Maps that can be picked at the start of each round. Server picks an index
@@ -113,6 +116,10 @@ var _air_strike_timer: float = -1.0
 var _air_strike_cancel_gen: int = 0
 var _air_strikes_armed: bool = false
 var _air_strike_pending: bool = false
+var _ion_cannon_timer: float = -1.0
+var _ion_cannon_cancel_gen: int = 0
+var _ion_cannons_armed: bool = false
+var _ion_cannon_pending: bool = false
 # Music keeps the same track across rounds and only switches at a round
 # boundary once it has played at least this long — so short rounds don't
 # whiplash the soundtrack. 0 = no track started yet (force one on first round).
@@ -523,6 +530,7 @@ func _process(delta: float) -> void:
 		_update_round_music_phase()
 		_update_pickup_spawner(delta)
 		_update_air_strikes(delta)
+		_update_ion_cannons(delta)
 	if multiplayer.is_server():
 		_tick_card_pick_deadlines(delta)
 		_update_music_muffle_broadcast()
@@ -653,6 +661,9 @@ func _input(event: InputEvent) -> void:
 			KEY_K:
 				if multiplayer.is_server():
 					dev_test_air_strike()
+			KEY_J:
+				if multiplayer.is_server():
+					dev_test_ion_cannon()
 			KEY_I:
 				if multiplayer.is_server():
 					dev_spawn_pickup()
@@ -1326,6 +1337,7 @@ func _start_round_now() -> void:
 	_clear_smoke_puffs.rpc()
 	_clear_pickups.rpc()
 	_clear_air_strike_markers.rpc()
+	_clear_ion_cannon_markers.rpc()
 	if multiplayer.is_server() and ROUND_MODIFIERS_SCRIPT.spawn_starting_pickup(current_round_modifier):
 		var kind: String = PICKUP_ITEM_SCRIPT.KINDS[randi() % PICKUP_ITEM_SCRIPT.KINDS.size()]
 		_spawn_pickup_item_with_fx.rpc(kind, _random_pickup_spawn_pos())
@@ -1344,6 +1356,9 @@ func _start_round_now() -> void:
 	if multiplayer.is_server() and ROUND_MODIFIERS_SCRIPT.needs_air_strikes(current_round_modifier):
 		_air_strikes_armed = true
 		_air_strike_timer = randf_range(0.5, 1.25)
+	if multiplayer.is_server() and ROUND_MODIFIERS_SCRIPT.needs_ion_cannon(current_round_modifier):
+		_ion_cannons_armed = true
+		_ion_cannon_timer = randf_range(0.75, 1.5)
 
 func _update_air_strikes(delta: float) -> void:
 	if not _air_strikes_armed or not ROUND_MODIFIERS_SCRIPT.needs_air_strikes(current_round_modifier):
@@ -1372,6 +1387,34 @@ func _air_strike_finished() -> void:
 	if not _air_strikes_armed or not ROUND_MODIFIERS_SCRIPT.needs_air_strikes(current_round_modifier):
 		return
 	_air_strike_timer = AIR_STRIKE_INTERVAL + randf_range(-AIR_STRIKE_INTERVAL_JITTER, AIR_STRIKE_INTERVAL_JITTER)
+
+
+func _update_ion_cannons(delta: float) -> void:
+	if not _ion_cannons_armed or not ROUND_MODIFIERS_SCRIPT.needs_ion_cannon(current_round_modifier):
+		return
+	if _ion_cannon_pending:
+		return
+	_ion_cannon_timer -= delta
+	if _ion_cannon_timer > 0.0:
+		return
+	var target := _random_air_strike_target()
+	_begin_ion_cannon(target)
+
+
+func _begin_ion_cannon(target: Vector3, shooter_id: int = 0) -> void:
+	if _ion_cannon_pending:
+		return
+	_ion_cannon_pending = true
+	_ion_cannon_launch.rpc(target, shooter_id)
+
+
+func _ion_cannon_finished() -> void:
+	if not multiplayer.is_server():
+		return
+	_ion_cannon_pending = false
+	if not _ion_cannons_armed or not ROUND_MODIFIERS_SCRIPT.needs_ion_cannon(current_round_modifier):
+		return
+	_ion_cannon_timer = ION_CANNON_INTERVAL + randf_range(-ION_CANNON_INTERVAL_JITTER, ION_CANNON_INTERVAL_JITTER)
 
 
 func _random_air_strike_target() -> Vector3:
@@ -1475,6 +1518,27 @@ func _clear_air_strike_markers() -> void:
 		if is_instance_valid(node):
 			node.queue_free()
 	for node in get_tree().get_nodes_in_group("air_strike_rockets"):
+		if is_instance_valid(node):
+			node.queue_free()
+
+
+@rpc("authority", "call_local", "reliable")
+func _ion_cannon_launch(target: Vector3, shooter_id: int = 0) -> void:
+	if state != State.PLAYING:
+		return
+	var marker := ION_CANNON_SCRIPT.new()
+	marker.name = "IonCannonMarker"
+	var fx_scene := get_tree().current_scene
+	_air_strike_fx_root().add_child(marker)
+	marker.setup(fx_scene, target, shooter_id, self, multiplayer.is_server())
+
+
+@rpc("authority", "call_local", "reliable")
+func _clear_ion_cannon_markers() -> void:
+	for node in get_tree().get_nodes_in_group("ion_cannon_markers"):
+		if is_instance_valid(node):
+			node.queue_free()
+	for node in get_tree().get_nodes_in_group("ion_cannon_motes"):
 		if is_instance_valid(node):
 			node.queue_free()
 
@@ -1689,6 +1753,10 @@ func _reset_round_tracking() -> void:
 	_air_strike_timer = -1.0
 	_air_strikes_armed = false
 	_air_strike_pending = false
+	_ion_cannon_cancel_gen += 1
+	_ion_cannon_timer = -1.0
+	_ion_cannons_armed = false
+	_ion_cannon_pending = false
 	_reset_pickup_spawner()
 
 func _reset_pickup_spawner() -> void:
@@ -1728,6 +1796,7 @@ func dev_test_air_strike() -> void:
 	if not multiplayer.is_server():
 		return
 	_clear_air_strike_markers.rpc()
+	_clear_ion_cannon_markers.rpc()
 	_air_strike_cancel_gen += 1
 	_air_strike_pending = false
 	if not ROUND_MODIFIERS_SCRIPT.needs_air_strikes(current_round_modifier):
@@ -1738,6 +1807,32 @@ func dev_test_air_strike() -> void:
 	var target := _dev_air_strike_target()
 	begin_player_air_strike(target)
 	_announce.rpc("AIR STRIKE INCOMING", 1.2)
+
+
+func begin_player_ion_cannon(target: Vector3, shooter_id: int = 0) -> void:
+	if not multiplayer.is_server():
+		return
+	if state != State.PLAYING:
+		return
+	if _ion_cannon_pending:
+		return
+	_begin_ion_cannon(target, shooter_id)
+
+
+func dev_test_ion_cannon() -> void:
+	if not multiplayer.is_server():
+		return
+	_clear_ion_cannon_markers.rpc()
+	_ion_cannon_cancel_gen += 1
+	_ion_cannon_pending = false
+	if not ROUND_MODIFIERS_SCRIPT.needs_ion_cannon(current_round_modifier):
+		_set_round_modifier.rpc("ion_cannon")
+		_apply_round_modifier_environment()
+		_show_round_modifier_on_screens.rpc()
+	_ion_cannons_armed = true
+	var target := _dev_air_strike_target()
+	begin_player_ion_cannon(target)
+	_announce.rpc("ION CANNON INCOMING", 1.2)
 
 func _dev_air_strike_target() -> Vector3:
 	if _dev_panel != null and _dev_panel.has_method("get_target"):

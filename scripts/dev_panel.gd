@@ -126,7 +126,7 @@ func _refresh() -> void:
 	for c in _content.get_children():
 		c.queue_free()
 	_heading("DEV  ·  F1 to close", Color(0.5, 0.9, 1.0), 20)
-	_note("Quick shortcuts: G (god), P (passive AI), M (restart), L (lava), K (air strike), I (drop pickup), 0 (reset), 1-9 (cards, Shift removes), ? (help)")
+	_note("Quick shortcuts: G (god), P (passive AI), M (restart), L (lava), K (air strike), J (ion cannon), I (drop pickup), 0 (reset), 1-9 (cards, Shift removes), ? (help)")
 	_toggle_row("Passive AI (stationary, no shooting)", _game.bots_hold_fire, func(v: bool) -> void:
 		_game.bots_hold_fire = v
 		call_deferred("_refresh"))

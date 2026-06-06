@@ -15,6 +15,7 @@ const IDS: PackedStringArray = [
 	"gun_swap",
 	"sniper_fight",
 	"air_strikes",
+	"ion_cannon",
 ]
 
 const GRAVITY_MULT := 0.6          # −40% gravity
@@ -101,6 +102,12 @@ static func display_info(mod_id: String) -> Dictionary:
 				"subtitle": "Random rockets from the sky",
 				"color": Color(1.0, 0.28, 0.12),
 			}
+		"ion_cannon":
+			return {
+				"title": "ION CANNON",
+				"subtitle": "Orbital beams from above",
+				"color": Color(0.35, 0.72, 1.0),
+			}
 		_:
 			return {"title": "", "subtitle": "", "color": Color.WHITE}
 
@@ -132,6 +139,10 @@ static func spawn_starting_pickup(mod_id: String) -> bool:
 
 static func needs_air_strikes(mod_id: String) -> bool:
 	return mod_id == "air_strikes"
+
+
+static func needs_ion_cannon(mod_id: String) -> bool:
+	return mod_id == "ion_cannon"
 
 
 static func apply_fog_environment(env: Environment) -> void:
