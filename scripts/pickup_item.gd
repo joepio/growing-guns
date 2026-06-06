@@ -13,6 +13,7 @@ const BOB_AMOUNT := 0.08
 const LIFETIME_GROUNDED := 45.0
 
 var kind: String = "heart"
+var _pickup_id: int = -1
 var _spawn_sky_pos := Vector3.ZERO
 var _land_pos := Vector3.ZERO
 var _velocity := Vector3.ZERO
@@ -63,8 +64,9 @@ static func display_info(p_kind: String) -> Dictionary:
 			return {"title": "PICKUP", "subtitle": "", "color": beam_color(p_kind)}
 
 
-func setup(p_kind: String, world_pos: Vector3) -> void:
+func setup(p_kind: String, world_pos: Vector3, pickup_id: int = -1) -> void:
 	kind = p_kind
+	_pickup_id = pickup_id
 	_spawn_sky_pos = world_pos
 	_land_pos = _compute_landing_pos(world_pos)
 	global_position = world_pos
@@ -149,10 +151,16 @@ func _player_collect_scale(player: Node) -> float:
 
 
 func _collect(player: Node) -> void:
+	if _collected:
+		return
 	_collected = true
 	if player.has_method("apply_round_pickup"):
 		player.apply_round_pickup.rpc(kind)
-	queue_free()
+	var game := get_tree().current_scene
+	if game and game.has_method("_despawn_pickup") and _pickup_id >= 0:
+		game._despawn_pickup.rpc(_pickup_id)
+	else:
+		queue_free()
 
 
 func _build_drop_beam() -> void:

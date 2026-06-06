@@ -727,7 +727,8 @@ func _physics_process(delta: float) -> void:
 				0.0,
 			)
 		if is_on_floor():
-			launching = false
+			if launching:
+				_sync_launching.rpc(false)
 			_rocket_descent_player = null
 			if not is_bot:
 				SFX.landing(absf(pre_impact_y), global_position)
@@ -735,7 +736,8 @@ func _physics_process(delta: float) -> void:
 			# If a spawn point is ever invalid, do not leave the player alive in
 			# launch state forever. Launch state gates shooting/movement, and
 			# environmental damage intentionally ignores it during valid descents.
-			launching = false
+			if launching:
+				_sync_launching.rpc(false)
 			_handle_fell_off_map()
 		return
 
@@ -1022,7 +1024,7 @@ func kill_environmental(_reason: String = "hazard") -> void:
 		return
 	if ghost_mode or god_mode or health <= 0:
 		return
-	launching = false
+	_sync_launching.rpc(false)
 	if _reason == "lava_fall":
 		_stop_rocket_descent_audio()
 		_suppress_next_death_sound = true
@@ -2622,6 +2624,14 @@ func set_frozen(f: bool) -> void:
 
 
 @rpc("any_peer", "call_local", "reliable")
+func _sync_launching(active: bool) -> void:
+	var sender := multiplayer.get_remote_sender_id()
+	if sender != 0 and sender != get_multiplayer_authority():
+		return
+	launching = active
+
+
+@rpc("any_peer", "call_local", "reliable")
 func set_launching(v: bool, downward_vel: float = 0.0) -> void:
 	# Round-start rocket-spawn: when v=true, set constant downward velocity,
 	# tilt camera down so the player sees the ground rushing up, and pump
@@ -2660,9 +2670,10 @@ func heal(amount: int) -> void:
 
 @rpc("any_peer", "call_local", "reliable")
 func apply_round_pickup(kind: String) -> void:
-	if not is_multiplayer_authority():
-		return
+	# Mirror apply_card — mutate every peer's copy of this player so online
+	# clients stay in sync and the server can see pickup effects for remotes.
 	var dice_detail := ""
+	var owner := is_multiplayer_authority()
 	match kind:
 		"heart":
 			health += 50
@@ -2692,13 +2703,13 @@ func apply_round_pickup(kind: String) -> void:
 		_:
 			return
 	mag = min(weapon.get_mag_size(), max(mag, weapon.get_mag_size()))
-	if is_multiplayer_authority():
+	_update_gun_visuals()
+	_update_body_scale()
+	if owner:
 		SFX.pling(1.15)
 		var g := get_tree().current_scene
 		if g and g.has_method("show_pickup_collected_for"):
 			g.show_pickup_collected_for(player_id, kind, dice_detail)
-	_update_gun_visuals()
-	_update_body_scale()
 
 func _apply_explosive_pickup_stack() -> void:
 	if weapon.explosive_radius <= 0.0:
@@ -2935,8 +2946,8 @@ func _bot_physics(delta: float) -> void:
 		return
 	if launching:
 		move_and_slide()
-		if is_on_floor():
-			launching = false
+		if is_on_floor() and launching:
+			_sync_launching.rpc(false)
 		return
 	if frozen:
 		velocity = Vector3.ZERO

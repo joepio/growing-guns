@@ -53,11 +53,15 @@ func host_game_iroh(player_name: String) -> String:
 func join_game_iroh(game_id: String, player_name: String) -> bool:
 	local_player_name = player_name
 	last_network_error = ""
+	var trimmed_id := game_id.strip_edges()
+	if not current_iroh_game_id.is_empty() and trimmed_id == current_iroh_game_id.strip_edges():
+		_fail("That's your own game ID — share it with someone else to join.")
+		return false
 	if not ClassDB.class_exists("IrohClient"):
 		_fail("Iroh networking failed to load. Re-extract the zip so MoreRounds.exe, MoreRounds.pck, and godot_iroh.dll are in the same folder.")
 		return false
 	_emit_status("Connecting to host...", false)
-	var client = ClassDB.class_call_static("IrohClient", "connect", game_id)
+	var client = ClassDB.class_call_static("IrohClient", "connect", trimmed_id)
 	if client == null:
 		_fail("Could not start the iroh client. Check the match ID, firewall, and whether the game folder was fully extracted.")
 		return false
