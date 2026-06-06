@@ -2246,14 +2246,13 @@ func _apply_damage(
 			)
 	if health <= 0 and _phoenix_charges_left > 0:
 		_phoenix_charges_left -= 1
-		health = max(1, int(float(MAX_HEALTH + weapon.max_hp_bonus) * 0.35))
-		velocity = Vector3.UP * 8.0
-		_poison_damage_left = 0.0
-		_poison_dps = 0.0
-		_slow_timer = 0.0
-		_slow_mult = 1.0
-		_clear_chill_visual()
-		_phoenix_fx.rpc(global_position)
+		var fx_pos: Vector3 = global_position
+		var game := get_tree().current_scene
+		if game and game.has_method("execute_phoenix_revive"):
+			if multiplayer.is_server():
+				game.execute_phoenix_revive(player_id, fx_pos)
+			else:
+				game.execute_phoenix_revive.rpc_id(1, player_id, fx_pos)
 		return
 	if health > 0:
 		_play_hurt_sound.rpc(global_position)
@@ -2406,6 +2405,33 @@ func server_respawn(pos: Vector3, yaw: float = 0.0) -> void:
 	_last_sync_yaw = rotation.y
 
 @rpc("any_peer", "call_local", "reliable")
+func phoenix_revive_at(sky_pos: Vector3, yaw: float, _fx_pos: Vector3) -> void:
+	if multiplayer.get_remote_sender_id() != 1 and multiplayer.get_remote_sender_id() != 0:
+		return
+	if not is_multiplayer_authority():
+		return
+	global_position = sky_pos
+	rotation.y = yaw
+	velocity = Vector3.ZERO
+	health = max(1, int(float(MAX_HEALTH + weapon.max_hp_bonus) * 0.35))
+	_poison_damage_left = 0.0
+	_poison_dps = 0.0
+	_poison_tick_accum = 0.0
+	_slow_timer = 0.0
+	_slow_mult = 1.0
+	_clear_chill_visual()
+	_ragdoll_head = null
+	if camera:
+		camera.transform = Transform3D(Basis.IDENTITY, _camera_rest_pos)
+	var scene := get_tree().current_scene
+	if scene and scene.has_method("show_death_effect_for"):
+		scene.show_death_effect_for(player_id, false)
+	_apply_ghost_visuals()
+	_broadcast_state.rpc(global_position, rotation.y)
+	_last_sync_pos = global_position
+	_last_sync_yaw = rotation.y
+
+@rpc("any_peer", "call_local", "reliable")
 func set_ghost_mode(enabled: bool) -> void:
 	var sender := multiplayer.get_remote_sender_id()
 	if sender != 1 and sender != 0:
@@ -2503,6 +2529,53 @@ func heal(amount: int) -> void:
 		return
 	health = min(MAX_HEALTH + weapon.max_hp_bonus, health + amount)
 
+@rpc("any_peer", "call_local", "reliable")
+func apply_round_pickup(kind: String) -> void:
+	if not is_multiplayer_authority():
+		return
+	match kind:
+		"heart":
+			health += 50
+		"mushroom":
+			weapon.body_scale *= 3.0
+			weapon.head_scale *= 3.0
+			weapon.damage_mult *= 3.0
+			weapon.bullet_color = weapon.bullet_color.lerp(Color(0.95, 0.2, 0.18), 0.55)
+		"bomb":
+			_apply_explosive_pickup_stack()
+			_apply_explosive_pickup_stack()
+		"plus_one":
+			_phoenix_charges_left += 1
+		"laser":
+			var shots_before: int = weapon.get_shots_per_trigger()
+			var mag_before: int = weapon.get_mag_size()
+			weapon.bullet_speed_mult *= 10.0
+			weapon.spread = maxf(weapon.spread * 0.1, 0.0002)
+			weapon.recoil_per_shot *= 0.1
+			weapon.fire_rate_mult *= 10.0
+			weapon.extra_projectiles += max(0, shots_before * 9)
+			weapon.mag_size_bonus += max(0, mag_before * 9)
+			weapon.damage_mult *= 0.1
+			weapon.bullet_color = weapon.bullet_color.lerp(Color(0.35, 1.0, 1.0), 0.75)
+		_:
+			return
+	mag = min(weapon.get_mag_size(), max(mag, weapon.get_mag_size()))
+	if is_multiplayer_authority():
+		SFX.pling(1.15)
+		var g := get_tree().current_scene
+		if g and g.has_method("show_pickup_collected_for"):
+			g.show_pickup_collected_for(player_id, kind)
+	_update_gun_visuals()
+	_update_body_scale()
+
+func _apply_explosive_pickup_stack() -> void:
+	if weapon.explosive_radius <= 0.0:
+		weapon.explosive_radius += 4.0
+	else:
+		weapon.explosive_radius += 2.5
+	weapon.explosive_damage += 25.0
+	weapon.bullet_color = weapon.bullet_color.lerp(Color(1.0, 0.45, 0.08), 0.45)
+
 # -------------------- CARDS (ROUNDS-style) --------------------
 
 @rpc("any_peer", "call_local", "reliable")
@@ -2521,6 +2594,21 @@ func apply_card(card_id: String) -> void:
 	if is_multiplayer_authority():
 		health = max(health, MAX_HEALTH + weapon.max_hp_bonus)
 		_phoenix_charges_left = max(_phoenix_charges_left, weapon.phoenix_revives)
+	_update_gun_visuals()
+	_update_body_scale()
+
+@rpc("any_peer", "call_local", "reliable")
+func rebuild_weapon_from_cards() -> void:
+	# Strip round-only pickup buffs while keeping stacked cards.
+	var cards: Array = weapon.applied_cards.duplicate()
+	weapon.reset()
+	for card_id in cards:
+		var card := CardLibrary.by_id(str(card_id))
+		if card.is_empty():
+			continue
+		card.apply.call(weapon)
+		weapon.applied_cards.append(str(card_id))
+	mag = weapon.get_mag_size()
 	_update_gun_visuals()
 	_update_body_scale()
 

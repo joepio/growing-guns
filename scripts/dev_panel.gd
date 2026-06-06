@@ -102,6 +102,7 @@ func show_help() -> void:
 		"P: Toggle Passive AI\n" + \
 		"M: Restart Match\n" + \
 		"L: Trigger Lava\n" + \
+		"I: Drop Pickup\n" + \
 		"0: Reset Weapon\n" + \
 		"1: Damage  ·  Shift+1: remove\n" + \
 		"2: Rapid Fire  ·  Shift+2: remove\n" + \
@@ -125,7 +126,7 @@ func _refresh() -> void:
 	for c in _content.get_children():
 		c.queue_free()
 	_heading("DEV  ·  F1 to close", Color(0.5, 0.9, 1.0), 20)
-	_note("Quick shortcuts: G (god), P (passive AI), M (restart), L (lava), 0 (reset), 1-9 (cards, Shift removes), ? (help)")
+	_note("Quick shortcuts: G (god), P (passive AI), M (restart), L (lava), I (drop pickup), 0 (reset), 1-9 (cards, Shift removes), ? (help)")
 	_toggle_row("Passive AI (stationary, no shooting)", _game.bots_hold_fire, func(v: bool) -> void:
 		_game.bots_hold_fire = v
 		call_deferred("_refresh"))
@@ -137,6 +138,7 @@ func _refresh() -> void:
 			call_deferred("_refresh"))
 
 	_player_picker()
+	_pickup_spawner_section()
 	# Cards first — rare ones (uzi, bazooka, etc.) at the top so they're easy
 	# to spam-add for testing. Common cards follow.
 	_heading("— CARDS —", Color(1.0, 0.6, 0.9), 15)
@@ -283,6 +285,35 @@ func _card_row(card: Dictionary, count: int) -> void:
 	hbox.add_child(btn_plus)
 
 	_content.add_child(hbox)
+
+
+func _pickup_spawner_section() -> void:
+	if _game == null or not _game.has_method("dev_spawn_pickup"):
+		return
+	_heading("— PICKUPS —", Color(0.55, 1.0, 0.75), 15)
+	if not _game.multiplayer.is_server():
+		_note("(server only — join as host to spawn drops)")
+		return
+	var kinds: Array[Dictionary] = [
+		{"id": "", "label": "Random"},
+		{"id": "heart", "label": "Heart"},
+		{"id": "mushroom", "label": "Mushroom"},
+		{"id": "bomb", "label": "Bomb"},
+		{"id": "plus_one", "label": "+1"},
+		{"id": "laser", "label": "Laser"},
+	]
+	for entry in kinds:
+		var btn := Button.new()
+		btn.text = "Drop %s" % str(entry.label)
+		btn.focus_mode = Control.FOCUS_NONE
+		btn.pressed.connect(_spawn_pickup.bind(str(entry.id)))
+		_content.add_child(btn)
+
+
+func _spawn_pickup(kind: String) -> void:
+	if _game == null:
+		return
+	_game.dev_spawn_pickup(kind)
 
 
 # ── Card mutation actions ──────────────────────────────────────────────────
