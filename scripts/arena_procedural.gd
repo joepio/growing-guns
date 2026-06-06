@@ -92,6 +92,18 @@ func is_all_floor_lava() -> bool:
 	return bool(stats.get("all_floor_lava", false))
 
 
+func is_lava_spawn_safe(world_pos: Vector3) -> bool:
+	if generator and generator.has_method("is_lava_spawn_safe"):
+		return bool(generator.is_lava_spawn_safe(world_pos))
+	return true
+
+
+func get_lava_fallback_spawn_world() -> Vector3:
+	if generator and generator.has_method("get_lava_fallback_spawn_world"):
+		return generator.get_lava_fallback_spawn_world()
+	return global_position + Vector3(0.0, 5.0, 0.0)
+
+
 func start_lava_leak(spread_seconds: float = 20.0) -> void:
 	stop_lava_leak()
 	_lava_leak_duration = maxf(0.1, spread_seconds)

@@ -19,8 +19,7 @@ static func all() -> Array:
 			"desc": "",
 			"color": Color(1.0, 0.25, 0.25),
 			"apply": func(w: Weapon) -> void:
-				w.damage_mult *= 1.5
-				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.2, 0.1), 0.35),
+				w.damage_mult *= 1.5,
 		},
 		{
 			"id": "healthy",
@@ -62,6 +61,15 @@ static func all() -> Array:
 			"color": Color(1.0, 0.8, 0.2),
 			"apply": func(w: Weapon) -> void:
 				w.fire_rate_mult *= 1.6,
+		},
+		{
+			"id": "bullet_speed",
+			"name": "FAST ROUNDS",
+			"desc": "Bullets travel faster",
+			"color": Color(0.72, 0.94, 1.0),
+			"apply": func(w: Weapon) -> void:
+				w.bullet_speed_mult *= 1.5
+				w.bullet_color = w.bullet_color.lerp(Color(0.65, 0.92, 1.0), 0.3),
 		},
 		{
 			"id": "big_mag",
@@ -106,9 +114,7 @@ static func all() -> Array:
 			"desc": "Each shot fires an extra parallel bullet",
 			"color": Color(0.72, 0.74, 0.82),
 			"apply": func(w: Weapon) -> void:
-				w.extra_projectiles += 1
-				w.spread = max(w.spread, deg_to_rad(0.8)) + deg_to_rad(0.8)
-				w.reload_mult *= 0.9,
+				w.extra_projectiles += 1,
 		},
 		{
 			"id": "lifesteal",
@@ -186,7 +192,6 @@ static func all() -> Array:
 				"rarity": "rare",
 				"color": Color(1.0, 0.65, 0.25),
 				"apply": func(w: Weapon) -> void:
-						w.full_auto = true
 						w.fire_rate_mult *= 3.0
 						w.mag_size_bonus += 20
 						w.damage_mult *= 0.7
@@ -200,7 +205,6 @@ static func all() -> Array:
 				"rarity": "rare",
 				"color": Color(1.0, 0.78, 0.28),
 				"apply": func(w: Weapon) -> void:
-						w.full_auto = true
 						w.fire_rate_mult *= 10.0
 						w.mag_size_bonus += 95
 						w.damage_mult *= 0.2
@@ -293,7 +297,6 @@ static func all() -> Array:
 			"desc": "Full-auto bullet hose — held fire sprays wild",
 			"color": Color(1.0, 0.78, 0.18),
 			"apply": func(w: Weapon) -> void:
-				w.full_auto = true
 				w.fire_rate_mult *= 2.2
 				w.mag_size_bonus += 15
 				w.damage_mult *= 0.65
@@ -360,11 +363,14 @@ static func all() -> Array:
 		{
 			"id": "chilling_rounds",
 			"name": "CHILLING ROUNDS",
-			"desc": "Hits slow enemy movement briefly",
+			"desc": "Hits heavily slow enemy movement",
 			"color": Color(0.55, 0.9, 1.0),
 			"apply": func(w: Weapon) -> void:
-				w.slow_on_hit = minf(w.slow_on_hit, 0.55)
-				w.slow_duration = maxf(w.slow_duration, 1.6)
+				# Each stack multiplies move speed down (~52% per stack) and
+				# extends the freeze window. Stacks were no-ops before (min/max
+				# with the same constant every time).
+				w.slow_on_hit = clampf(w.slow_on_hit * 0.48, 0.22, 1.0)
+				w.slow_duration += 2.6
 				w.bullet_speed_mult *= 0.9
 				w.bullet_color = w.bullet_color.lerp(Color(0.45, 0.85, 1.0), 0.45),
 		},

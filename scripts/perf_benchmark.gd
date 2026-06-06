@@ -40,7 +40,7 @@ var ev_casings_spawned: int = 0
 var _peak_collision_objects: int = 0
 # Stacked deliberately to compound (uzi×2 = 9× fire rate; explosive×2 = bigger radius).
 const BUILD: Array[String] = [
-	"uzi",        # full_auto, fire_rate ×3, mag +20, dmg ×0.7
+	"uzi",        # fire_rate ×3, mag +20, dmg ×0.7
 	"uzi",        # stacks: ×9 fire rate, +40 mag, ×0.49 dmg
 	"shotgun",    # +2 extra projectiles per trigger
 	"explosive",  # explosive radius + damage

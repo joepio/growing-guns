@@ -126,6 +126,9 @@ var _poison_from_id: int = 0
 var _poison_tick_accum: float = 0.0
 var _slow_timer: float = 0.0
 var _slow_mult: float = 1.0
+var _chill_vfx_timer: float = 0.0
+var _chill_vfx_strength: float = 0.0
+var _chill_visual_active: bool = false
 var _phoenix_charges_left: int = 0
 
 # Last broadcast state — avoids flooding the wire when idle.
@@ -631,6 +634,33 @@ func _apply_ghost_visuals() -> void:
 		else:
 			mesh.material_override = _body_materials.get(mesh, mesh.material_override)
 
+func _apply_chill_visual() -> void:
+	if body_model == null or ghost_mode:
+		return
+	var active := _chill_vfx_timer > 0.0 and _chill_vfx_strength > 0.01
+	if not active and not _chill_visual_active:
+		return
+	_chill_visual_active = active
+	for mesh in _body_meshes():
+		if active:
+			var mat := StandardMaterial3D.new()
+			var frost: float = 0.2 + _chill_vfx_strength * 0.75
+			mat.albedo_color = Color(0.62, 0.84, 1.0)
+			mat.emission_enabled = true
+			mat.emission = Color(0.3, 0.72, 1.0)
+			mat.emission_energy_multiplier = frost
+			mat.metallic = 0.12
+			mat.roughness = 0.58
+			mesh.material_override = mat
+		else:
+			mesh.material_override = _body_materials.get(mesh, mesh.material_override)
+
+func _clear_chill_visual() -> void:
+	_chill_vfx_timer = 0.0
+	_chill_vfx_strength = 0.0
+	if _chill_visual_active:
+		_apply_chill_visual()
+
 func _set_hit_face_state(active: bool) -> void:
 	Violence.set_hit_face_state(self, active)
 
@@ -871,7 +901,7 @@ func _physics_process(delta: float) -> void:
 		velocity.y = max(velocity.y, 0.0)
 		# Taper dash speed at the end (last 50% of duration).
 		var dash_factor := clampf(dash_timer / (DASH_TIME * 0.5), 0.0, 1.0)
-		var dash_vel := dash_dir * DASH_SPEED
+		var dash_vel := dash_dir * DASH_SPEED * _slow_mult
 		# Blend between dash velocity and walk velocity.
 		target_vel = target_vel.lerp(dash_vel, dash_factor)
 		accel = 2000.0 # Snap to dash trajectory
@@ -1198,7 +1228,9 @@ func _rifle_fired(
 	if visual_anchor == null:
 		visual_anchor = muzzle
 	if spawn_shot_fx:
-		_spawn_muzzle_flash(w.bullet_color, w.get_bullet_scale(), visual_anchor, local_first_person)
+		var dmg_ratio := w.get_damage() / Weapon.BASE_DAMAGE
+		var flash_brightness := clampf(pow(dmg_ratio, 0.88) * 1.5, 0.85, 8.0)
+		_spawn_muzzle_flash(w.bullet_color, w.get_bullet_scale(), visual_anchor, local_first_person, flash_brightness)
 	if spawn_shot_fx and not local_first_person:
 		_spawn_third_person_casing(w)
 
@@ -1306,14 +1338,31 @@ func apply_slow(multiplier: float, duration: float) -> void:
 		return
 	if not is_multiplayer_authority():
 		return
-	_slow_mult = minf(_slow_mult, clampf(multiplier, 0.2, 1.0))
+	_slow_mult = minf(_slow_mult, clampf(multiplier, 0.22, 1.0))
 	_slow_timer = maxf(_slow_timer, duration)
+	_sync_chill_visual.rpc(_slow_mult, _slow_timer)
+
+@rpc("any_peer", "call_local", "reliable")
+func _sync_chill_visual(slow_mult: float, timer: float) -> void:
+	var sender := multiplayer.get_remote_sender_id()
+	if sender != 0 and sender != get_multiplayer_authority():
+		return
+	_chill_vfx_timer = timer
+	_chill_vfx_strength = clampf(1.0 - slow_mult, 0.0, 1.0)
+	_apply_chill_visual()
 
 func _tick_status_effects(delta: float) -> void:
 	if _slow_timer > 0.0:
 		_slow_timer = maxf(0.0, _slow_timer - delta)
 		if _slow_timer <= 0.0:
 			_slow_mult = 1.0
+			if is_multiplayer_authority():
+				_sync_chill_visual.rpc(1.0, 0.0)
+	if _chill_vfx_timer > 0.0:
+		_chill_vfx_timer = maxf(0.0, _chill_vfx_timer - delta)
+		if _chill_vfx_timer <= 0.0 and _chill_visual_active:
+			_chill_vfx_strength = 0.0
+			_apply_chill_visual()
 	if _poison_damage_left <= 0.0 or _poison_dps <= 0.0:
 		return
 	_poison_tick_accum += delta
@@ -1358,20 +1407,34 @@ func _spawn_bullet_blast(pos: Vector3, radius: float, color: Color) -> void:
 func apply_explosion_view_punch(pos: Vector3, radius: float, peak: float = 1.0) -> void:
 	Violence.apply_explosion_view_punch(self, pos, radius, peak)
 
+func _muzzle_flash_exit_local(anchor: Node3D) -> Vector3:
+	if anchor == null:
+		return Vector3(0.0, 0.0, -0.35)
+	var pg: Node = anchor.get_node_or_null("ProceduralGun")
+	if pg and pg.has_method("get_muzzle_exit_local"):
+		return (pg as Node3D).position + pg.get_muzzle_exit_local()
+	return Vector3(0.0, 0.0, -0.35)
+
 func _spawn_muzzle_flash(
 	color: Color = Color(1.0, 0.88, 0.45),
 	scale_f: float = 1.0,
 	anchor: Node3D = null,
 	first_person: bool = true,
+	brightness_mult: float = 1.0,
 ) -> void:
 	if anchor == null:
 		anchor = muzzle
 	if anchor == null:
 		return
+	var bright: float = maxf(0.1, brightness_mult)
+	var energy: float = 6.0 * pow(bright, 1.18)
+	var light_energy: float = 5.5 * pow(bright, 1.12)
+	var gun_light_energy: float = 3.2 * pow(bright, 1.08)
+	var flash_pos: Vector3 = _muzzle_flash_exit_local(anchor)
 	# Directional flash: a short starburst plus a forward flame plume reads
 	# better than a glowing orb and stays cheap enough for multiplayer.
 	var flash_root := Node3D.new()
-	flash_root.position = Vector3(0.0, 0.0, -0.35)
+	flash_root.position = flash_pos
 	flash_root.rotation.z = randf_range(0.0, TAU)
 	anchor.add_child(flash_root)
 
@@ -1381,7 +1444,7 @@ func _spawn_muzzle_flash(
 	mat.albedo_color = Color(color.r, color.g, color.b, 0.96)
 	mat.emission_enabled = true
 	mat.emission = color
-	mat.emission_energy_multiplier = 4.0 * scale_f
+	mat.emission_energy_multiplier = energy
 	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 
 	var cross_mesh := BoxMesh.new()
@@ -1404,7 +1467,7 @@ func _spawn_muzzle_flash(
 	var tw := flash_root.create_tween().set_parallel(true)
 	tw.tween_property(flash_root, "scale", Vector3(1.35, 0.82, 1.8), 0.045)\
 		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
-	tw.tween_property(flash_root, "position:z", -0.48, 0.045)\
+	tw.tween_property(flash_root, "position:z", flash_pos.z - 0.13 * scale_f, 0.045)\
 		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
 	tw.tween_property(mat, "albedo_color", Color(1, 1, 1, 0.0), 0.06)
 	tw.tween_property(mat, "emission_energy_multiplier", 0.0, 0.06)
@@ -1412,8 +1475,8 @@ func _spawn_muzzle_flash(
 	# budget is disabled; this is a tiny, short-lived light and sells the shot.
 	var light := OmniLight3D.new()
 	light.light_color = color.lerp(Color(1.0, 0.95, 0.82), 0.45)
-	light.light_energy = 2.5 * scale_f
-	light.omni_range = 4.5 * scale_f
+	light.light_energy = light_energy
+	light.omni_range = 5.0 * scale_f * pow(bright, 0.55)
 	light.position = Vector3(0.0, 0.0, -0.42)
 	flash_root.add_child(light)
 	tw.tween_property(light, "light_energy", 0.0, 0.07)
@@ -1423,8 +1486,8 @@ func _spawn_muzzle_flash(
 	# itself catches a warm flash instead of staying flat during shots.
 	var gun_light := OmniLight3D.new()
 	gun_light.light_color = color.lerp(Color(1.0, 0.92, 0.8), 0.6)
-	gun_light.light_energy = 1.4 * scale_f
-	gun_light.omni_range = 1.7 * scale_f
+	gun_light.light_energy = gun_light_energy
+	gun_light.omni_range = 2.0 * scale_f * pow(bright, 0.5)
 	gun_light.position = Vector3(0.0, 0.0, 0.06)
 	anchor.add_child(gun_light)
 	tw.tween_property(gun_light, "light_energy", 0.0, 0.08)
@@ -1670,6 +1733,31 @@ func _stop_reload_audio() -> void:
 		_reload_audio.queue_free()
 	_reload_audio = null
 
+func _reset_weapon_combat_state() -> void:
+	reloading = false
+	rifle_cooldown = 0.0
+	if _reload_tween and _reload_tween.is_valid():
+		_reload_tween.kill()
+		_reload_tween = null
+	if _mag_reload_tween and _mag_reload_tween.is_valid():
+		_mag_reload_tween.kill()
+		_mag_reload_tween = null
+	reload_offset = Vector3.ZERO
+	if muzzle:
+		muzzle.rotation.x = 0.0
+	if _third_person_gun:
+		_third_person_gun.position = _third_person_gun_rest_pos
+		_third_person_gun.rotation = _third_person_gun_rest_rot
+	if _procedural_gun:
+		if _procedural_gun.has_method("reset_heat"):
+			_procedural_gun.reset_heat()
+		if _procedural_gun.has_method("apply_weapon_stats"):
+			# Reload tweens can leave the magazine mid-drop; snap parts back.
+			_procedural_gun.apply_weapon_stats(weapon)
+	_stop_reload_audio()
+	if is_multiplayer_authority():
+		cooldowns_changed.emit()
+
 func _animate_reload(duration: float) -> void:
 	if muzzle == null:
 		return
@@ -1731,14 +1819,16 @@ func _animate_third_person_reload(duration: float) -> void:
 	_third_person_gun.rotation = _third_person_gun_rest_rot
 	var lift := _third_person_gun_rest_pos + Vector3(0.0, 0.1, 0.04)
 	var tilt := _third_person_gun_rest_rot + Vector3(deg_to_rad(-22.0), deg_to_rad(10.0), deg_to_rad(7.0))
-	var tw := create_tween().set_parallel(true)
-	tw.tween_property(_third_person_gun, "position", lift, duration * 0.22)\
+	if _reload_tween and _reload_tween.is_valid():
+		_reload_tween.kill()
+	_reload_tween = create_tween().set_parallel(true)
+	_reload_tween.tween_property(_third_person_gun, "position", lift, duration * 0.22)\
 		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
-	tw.tween_property(_third_person_gun, "rotation", tilt, duration * 0.22)\
+	_reload_tween.tween_property(_third_person_gun, "rotation", tilt, duration * 0.22)\
 		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
-	tw.tween_property(_third_person_gun, "position", _third_person_gun_rest_pos, duration * 0.24)\
+	_reload_tween.tween_property(_third_person_gun, "position", _third_person_gun_rest_pos, duration * 0.24)\
 		.set_delay(duration * 0.68).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
-	tw.tween_property(_third_person_gun, "rotation", _third_person_gun_rest_rot, duration * 0.24)\
+	_reload_tween.tween_property(_third_person_gun, "rotation", _third_person_gun_rest_rot, duration * 0.24)\
 		.set_delay(duration * 0.68).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
 
 # -------------------- TELEPORT --------------------
@@ -2162,6 +2252,7 @@ func _apply_damage(
 		_poison_dps = 0.0
 		_slow_timer = 0.0
 		_slow_mult = 1.0
+		_clear_chill_visual()
 		_phoenix_fx.rpc(global_position)
 		return
 	if health > 0:
@@ -2269,6 +2360,7 @@ func _report_death(killer_id: int) -> void:
 func server_respawn(pos: Vector3, yaw: float = 0.0) -> void:
 	if multiplayer.get_remote_sender_id() != 1 and multiplayer.get_remote_sender_id() != 0:
 		return
+	_reset_weapon_combat_state()
 	if not is_multiplayer_authority():
 		return
 	global_position = pos
@@ -2282,9 +2374,7 @@ func server_respawn(pos: Vector3, yaw: float = 0.0) -> void:
 	_poison_tick_accum = 0.0
 	_slow_timer = 0.0
 	_slow_mult = 1.0
-	if _procedural_gun and _procedural_gun.has_method("reset_heat"):
-		_procedural_gun.reset_heat()
-	rifle_cooldown = 0.0
+	_clear_chill_visual()
 	grenade_cooldown = 0.0
 	melee_cooldown = 0.0
 	wall_jump_cooldown = 0.0
@@ -2294,15 +2384,6 @@ func server_respawn(pos: Vector3, yaw: float = 0.0) -> void:
 	# kill.
 	_bot_shoot_cooldown = 0.0
 	mag = weapon.get_mag_size()
-	reloading = false
-	if _reload_tween and _reload_tween.is_valid():
-		_reload_tween.kill()
-	if _mag_reload_tween and _mag_reload_tween.is_valid():
-		_mag_reload_tween.kill()
-	reload_offset = Vector3.ZERO
-	if muzzle:
-		muzzle.rotation.x = 0.0
-	_stop_reload_audio()
 	dash_charges = MAX_DASH_CHARGES
 	dash_timer = 0.0
 	jumps_left = 2 + weapon.extra_jumps
@@ -2447,15 +2528,13 @@ func apply_card(card_id: String) -> void:
 func reset_weapon() -> void:
 	weapon.reset()
 	mag = weapon.get_mag_size()
-	reloading = false
-	rifle_cooldown = 0.0
+	_reset_weapon_combat_state()
 	_phoenix_charges_left = weapon.phoenix_revives
 	_poison_damage_left = 0.0
 	_poison_dps = 0.0
 	_slow_timer = 0.0
 	_slow_mult = 1.0
-	if _procedural_gun and _procedural_gun.has_method("reset_heat"):
-		_procedural_gun.reset_heat()
+	_clear_chill_visual()
 	_update_gun_visuals()
 	_update_body_scale()
 
@@ -2691,7 +2770,7 @@ func _bot_physics(delta: float) -> void:
 		velocity.y = max(velocity.y, 0.0)
 		# Taper dash speed at the end.
 		var dash_factor := clampf(dash_timer / (DASH_TIME * 0.5), 0.0, 1.0)
-		target_vel = target_vel.lerp(dash_dir * DASH_SPEED, dash_factor)
+		target_vel = target_vel.lerp(dash_dir * DASH_SPEED * _slow_mult, dash_factor)
 		accel = 2000.0
 
 	velocity.x = move_toward(velocity.x, target_vel.x, accel * delta)

@@ -6,8 +6,9 @@ extends Resource
 # means: add a field here, add a getter if derived, add a card that sets it.
 
 # --- Immutable base (the "unmodified" gun) ---
-# Default is a semi-auto mid-damage pistol with a small non-zero spread — you
-# can't just hold LMB, and long-range snap-headshots aren't free.
+# Default mid-damage pistol with a small non-zero spread — you can't snap
+# headshots at range for free, but holding fire keeps shooting at the weapon's
+# fire interval.
 const BASE_DAMAGE := 22.0
 const MIN_DAMAGE := 1.0
 const BASE_FIRE_INTERVAL := 0.22
@@ -40,7 +41,6 @@ const SPECIAL_SWORD := "sword"
 @export var spread: float = BASE_SPREAD        # radians; random yaw+pitch offset per shot
 const BASE_RECOIL := 0.018                      # radians of shot-to-shot bloom; decays in Player
 @export var recoil_per_shot: float = BASE_RECOIL
-@export var full_auto: bool = false            # whether holding LMB auto-fires
 @export var lifesteal: float = 0.0             # fraction of damage dealt returned as heal
 @export var explosive_radius: float = 0.0      # per-bullet splash radius (m)
 @export var explosive_damage: float = 0.0      # max damage at epicenter
@@ -107,6 +107,9 @@ func get_headshot_mult() -> float:
 func get_shots_per_trigger() -> int:
 		return mini(MAX_SHOTS_PER_TRIGGER, 1 + extra_projectiles)
 
+func get_projectiles_per_second() -> float:
+		return float(get_shots_per_trigger()) / maxf(0.001, get_fire_interval())
+
 func get_bullet_speed() -> float:
 		return 165.0 * bullet_speed_mult
 
@@ -131,7 +134,6 @@ func reset() -> void:
 		ricochet_count = 0
 		spread = BASE_SPREAD
 		recoil_per_shot = BASE_RECOIL
-		full_auto = false
 		lifesteal = 0.0
 		explosive_radius = 0.0
 		explosive_damage = 0.0

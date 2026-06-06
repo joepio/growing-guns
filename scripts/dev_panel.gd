@@ -102,11 +102,16 @@ func show_help() -> void:
 		"P: Toggle Passive AI\n" + \
 		"M: Restart Match\n" + \
 		"L: Trigger Lava\n" + \
-		"1: Reset Weapon\n" + \
-		"2: Apply Sniper\n" + \
-		"3: Apply Shotgun\n" + \
-		"4: Apply Uzi\n" + \
-		"5: Apply Bazooka\n" + \
+		"0: Reset Weapon\n" + \
+		"1: Damage  ·  Shift+1: remove\n" + \
+		"2: Rapid Fire  ·  Shift+2: remove\n" + \
+		"3: Extra Barrel  ·  Shift+3: remove\n" + \
+		"4: Explosive  ·  Shift+4: remove\n" + \
+		"5: Ricochet  ·  Shift+5: remove\n" + \
+		"6: Chilling  ·  Shift+6: remove\n" + \
+		"7: Big Mag  ·  Shift+7: remove\n" + \
+		"8: Precision  ·  Shift+8: remove\n" + \
+		"9: Fast Rounds  ·  Shift+9: remove\n" + \
 		"F1: Full Dev Panel"
 	# Use smaller font size (24) for the help block
 	_game._announce.rpc(help_text, 10.0, 24)
@@ -120,7 +125,7 @@ func _refresh() -> void:
 	for c in _content.get_children():
 		c.queue_free()
 	_heading("DEV  ·  F1 to close", Color(0.5, 0.9, 1.0), 20)
-	_note("Quick shortcuts: G (god), P (passive AI), M (restart), L (lava), 1-5 (cards), ? (help)")
+	_note("Quick shortcuts: G (god), P (passive AI), M (restart), L (lava), 0 (reset), 1-9 (cards, Shift removes), ? (help)")
 	_toggle_row("Passive AI (stationary, no shooting)", _game.bots_hold_fire, func(v: bool) -> void:
 		_game.bots_hold_fire = v
 		call_deferred("_refresh"))
@@ -156,7 +161,7 @@ func _refresh() -> void:
 	if target and is_instance_valid(target):
 		var w: Weapon = target.weapon
 		_stat("damage", "%.1f  (base %.0f × %.2f)" % [w.get_damage(), Weapon.BASE_DAMAGE, w.damage_mult])
-		_stat("fire interval", "%.3fs  (×%.2f)  %s" % [w.get_fire_interval(), w.fire_rate_mult, "FULL-AUTO" if w.full_auto else "semi-auto"])
+		_stat("fire interval", "%.3fs  (×%.2f, %.1f proj/s)" % [w.get_fire_interval(), w.fire_rate_mult, w.get_projectiles_per_second()])
 		_stat("mag size", "%d  (base %d %+d)" % [w.get_mag_size(), Weapon.BASE_MAG_SIZE, w.mag_size_bonus])
 		_stat("reload time", "%.2fs  (×%.2f)" % [w.get_reload_time(), w.reload_mult])
 		_stat("headshot mult", "×%.2f" % w.get_headshot_mult())
@@ -282,25 +287,36 @@ func _card_row(card: Dictionary, count: int) -> void:
 
 # ── Card mutation actions ──────────────────────────────────────────────────
 
-func _apply_card(card_id: String) -> void:
+func apply_card_to_target(card_id: String) -> bool:
 	var target: Node = get_target()
 	if target == null or not is_instance_valid(target):
-		return
+		return false
 	target.apply_card.rpc(card_id)
-	call_deferred("_refresh")
+	return true
 
 
-func _remove_card(card_id: String) -> void:
-	# Cards mutate weapon cumulatively and have no inverse — easiest way to
-	# drop one is to reset and reapply every OTHER card in the stack.
+func remove_card_from_target(card_id: String) -> bool:
+	# Cards mutate weapon cumulatively and have no inverse — drop one stack by
+	# resetting and reapplying every other card in order.
 	var target: Node = get_target()
 	if target == null or not is_instance_valid(target):
-		return
+		return false
 	var remaining: Array = target.weapon.applied_cards.duplicate()
 	var idx := remaining.find(card_id)
-	if idx >= 0:
-		remaining.remove_at(idx)
+	if idx < 0:
+		return false
+	remaining.remove_at(idx)
 	target.reset_weapon.rpc()
 	for c in remaining:
 		target.apply_card.rpc(str(c))
-	call_deferred("_refresh")
+	return true
+
+
+func _apply_card(card_id: String) -> void:
+	if apply_card_to_target(card_id):
+		call_deferred("_refresh")
+
+
+func _remove_card(card_id: String) -> void:
+	if remove_card_from_target(card_id):
+		call_deferred("_refresh")

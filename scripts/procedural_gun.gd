@@ -50,13 +50,19 @@ extends Node3D
 @export var has_foregrip: bool = true : set = _set_has_foregrip
 
 @export_group("Barrel Shroud")
-# Vented metal shroud wrapping the barrel — appears on explosive rounds for
-# extra menace. Built from boxes as 4 slotted plates around the barrel,
-# with edge rails + end caps + inner ribs framing the slots.
+# Vented metal shroud wrapping the barrel — high projectiles/sec builds (hidden
+# once minigun rotation takes over). Length scales with sustained fire rate;
+# width wraps multi-barrel layouts. Slot count stays fixed — only coverage grows.
 @export var has_shroud: bool = false : set = _set_has_shroud
-@export var shroud_extent: float = 0.05 : set = _set_shroud_extent       # half-width of square cross-section
+@export var shroud_extent: float = 0.05 : set = _set_shroud_extent       # horizontal half-width (X)
 @export var shroud_length_frac: float = 0.65 : set = _set_shroud_length_frac # fraction of barrel_length covered
 @export var shroud_slot_count: int = 5 : set = _set_shroud_slot_count
+
+@export_group("Launcher Tube")
+# Shouldered RPG-style tube behind the stock — any explosive rounds.
+@export var has_launcher_tube: bool = false : set = _set_has_launcher_tube
+@export var launcher_tube_radius: float = 0.045 : set = _set_launcher_tube_radius
+@export var launcher_tube_length: float = 0.14 : set = _set_launcher_tube_length
 
 @export_group("Charging Handle")
 # Bolt / charging handle: a small cylindrical knob sticking out sideways
@@ -94,6 +100,8 @@ var _live_casings: Array[RigidBody3D] = []
 @export var heat_emits_light: bool = true          # OmniLight at muzzle, runtime only
 @export var heat_add_factor: float = 0.01           # The amount of heat added per shot (depends on damage)
 const RECEIVER_HEAT_FRACTION := 0.1  # receiver glows at 40% of barrel intensity
+const SHROUD_BPS_APPEAR := 6.0
+const SHROUD_BPS_FULL := 42.0
 
 @export_group("Indicator (Emissive)")
 @export var indicator_color: Color = Color(0.4, 1.0, 0.95) : set = _set_indicator_color
@@ -151,6 +159,9 @@ func _set_has_shroud(v: bool) -> void:              has_shroud = v;           _r
 func _set_shroud_extent(v: float) -> void:          shroud_extent = v;        _rebuild()
 func _set_shroud_length_frac(v: float) -> void:     shroud_length_frac = v;   _rebuild()
 func _set_shroud_slot_count(v: int) -> void:        shroud_slot_count = max(1, v); _rebuild()
+func _set_has_launcher_tube(v: bool) -> void:       has_launcher_tube = v;    _rebuild()
+func _set_launcher_tube_radius(v: float) -> void:  launcher_tube_radius = v; _rebuild()
+func _set_launcher_tube_length(v: float) -> void:  launcher_tube_length = v; _rebuild()
 func _set_indicator_color(v: Color) -> void:        indicator_color = v;      _rebuild()
 func _set_indicator_size(v: Vector3) -> void:       indicator_size = v;       _rebuild()
 func _set_indicator_energy(v: float) -> void:       indicator_energy = v;     _rebuild()
@@ -203,6 +214,7 @@ var _barrel_group: Node3D = null
 var _barrel_spin: float = 0.0
 var _receiver_material: StandardMaterial3D = null
 var _heat_light: OmniLight3D = null
+var _muzzle_exit_local: Vector3 = Vector3(0.0, 0.0, -0.35)
 
 # --- Bolt / charging handle state ---
 # `_bolt_back` is the current backward offset (0 = rest, _bolt_travel = max).
@@ -395,6 +407,12 @@ func add_heat(amount: float) -> void:
 	heat = clampf(heat + amount, 0.0, 1.5)
 	_update_heat_visual()
 
+func reset_heat() -> void:
+	if heat <= 0.0:
+		return
+	heat = 0.0
+	_update_heat_visual()
+
 func _update_heat_visual() -> void:
 	if _barrel_material == null:
 		return
@@ -486,15 +504,35 @@ func apply_weapon_stats(w: Weapon) -> void:
 	is_minigun = w.fire_rate_mult >= 5.0
 	# Very heavy hitters get a Havoc-style wide rectangular muzzle.
 	wide_muzzle = w.damage_mult >= 3.0
-	# Explosive rounds (BAZOOKA-style) get a vented barrel shroud — that
-	# slotted metal sleeve adds visual weight and reads as "launcher". Sits
-	# snugly around the barrel: half-width is barrel radius plus a 1 cm
-	# margin (covers the radial wall + a few mm of air gap).
-	has_shroud = w.explosive_radius > 0.0
-	shroud_extent = barrel_radius + 0.010
+	# Vented barrel shroud — sleeve length tracks projectiles/sec; width wraps
+	# however many barrels are mounted. Dropped at minigun tier (spinning barrels
+	# read as the cooling solution instead).
+	var bps: float = w.get_projectiles_per_second()
+	var bps_factor: float = clampf((bps - SHROUD_BPS_APPEAR) / (SHROUD_BPS_FULL - SHROUD_BPS_APPEAR), 0.0, 1.0)
+	has_shroud = bps >= SHROUD_BPS_APPEAR and not is_minigun
+	shroud_length_frac = lerpf(0.34, 0.92, bps_factor)
+	shroud_slot_count = 5
+	var n_barrels: int = max(1, barrel_count)
+	var barrel_pitch: float = barrel_radius * 2.4
+	var barrel_span: float = barrel_pitch * float(n_barrels - 1)
+	var single_clearance: float = barrel_radius + 0.012
+	if n_barrels > 1:
+		shroud_extent = barrel_span * 0.5 + single_clearance
+	else:
+		shroud_extent = single_clearance
+	# Any explosive stack replaces the rifle stock with a plain launcher tube.
+	var blast_factor: float = clampf((w.explosive_radius - 4.0) / 10.0, 0.0, 1.0) if w.explosive_radius > 0.0 else 0.0
+	has_launcher_tube = w.explosive_radius > 0.0
+	launcher_tube_length = lerpf(0.14, 0.46, blast_factor)
+	if has_launcher_tube:
+		has_stock = false
+		launcher_tube_radius = receiver_size.y * 0.5
 
 	_suppress_rebuild = false
 	_rebuild()
+
+func get_muzzle_exit_local() -> Vector3:
+	return _muzzle_exit_local
 
 # ---- Build ----
 # Forward is local -Z (Godot convention); +Y up; +X right.
@@ -580,6 +618,7 @@ func _rebuild() -> void:
 	var receiver_front_z: float = -effective_receiver_size.z * 0.5
 	var barrel_centre_z: float = receiver_front_z - barrel_length * 0.5
 	var muzzle_centre_z: float = receiver_front_z - barrel_length - muzzle_length * 0.5
+	_muzzle_exit_local = Vector3(0.0, 0.0, muzzle_centre_z - muzzle_length * 0.5)
 
 	# Sight rail repositioned after effective_receiver_size is final.
 	# It sits exactly on top of the receiver (half-height + half-rail-height).
@@ -610,13 +649,13 @@ func _rebuild() -> void:
 			else:
 				_add_cylinder("Muzzle%d" % i, muzzle_r, muzzle_r * 0.85, muzzle_length, Vector3(bx, 0, muzzle_centre_z), _barrel_material)
 
-	# Vented barrel shroud (explosive rounds only — see apply_weapon_stats).
-	# Wraps the rear portion of the barrel for a launcher silhouette.
+	# Vented barrel shroud (high fire-rate builds — see apply_weapon_stats).
 	if has_shroud:
 		var s_length: float = barrel_length * clampf(shroud_length_frac, 0.05, 0.95)
 		var s_centre_z: float = receiver_front_z - s_length * 0.5
-		var s_extent: float = maxf(shroud_extent, barrel_radius + 0.012)  # never thinner than barrel
-		_add_barrel_shroud(s_centre_z, s_length, s_extent, shroud_slot_count, darker_metal)
+		var s_half_x: float = maxf(shroud_extent, barrel_radius + 0.012)
+		var s_half_y: float = barrel_radius + 0.012
+		_add_barrel_shroud(s_centre_z, s_length, s_half_x, s_half_y, shroud_slot_count, darker_metal)
 
 	# Magazine — box (default) or drum (Tommy-gun style cylinder, axis along X)
 	# when mag_drum is on.
@@ -674,15 +713,28 @@ func _rebuild() -> void:
 	tg.rotation = Vector3(0, 0, PI * 0.5)
 
 	# Stock (only when bracing is "on")
+	var stock_bottom_y: float = -effective_receiver_size.y * 0.5
+	var stock_rear_z: float = effective_receiver_size.z * 0.5
 	if has_stock:
 		var back_h: float = stock_size.y
 		var front_h: float = stock_size.y * clampf(stock_taper, 0.05, 1.0)
 		var half_z: float = stock_size.z * 0.5
-		var bottom_y: float = -effective_receiver_size.y * 0.5
+		var bottom_y: float = stock_bottom_y
 		var back_z: float = effective_receiver_size.z * 0.5 + half_z * 1.5   # rear half of total depth
 		var front_z: float = effective_receiver_size.z * 0.5 + half_z * 0.5  # front half (closer to receiver)
+		stock_rear_z = back_z + half_z
 		_add_box("StockBack", Vector3(stock_size.x, back_h, half_z), Vector3(0, bottom_y + back_h * 0.5, back_z), darker_metal)
 		_add_box("StockFront", Vector3(stock_size.x * 0.95, front_h, half_z), Vector3(0, bottom_y + front_h * 0.5, front_z), darker_metal)
+
+	# Plain launcher tube off the receiver rear — replaces the rifle stock.
+	# Diameter matches receiver height so the tube reads as the same body.
+	if has_launcher_tube:
+		var tube_r: float = effective_receiver_size.y * 0.5
+		var tube_len: float = launcher_tube_length
+		var receiver_rear_z: float = effective_receiver_size.z * 0.5
+		var tube_start_z: float = receiver_rear_z + tube_r * 0.12
+		var tube_centre_z: float = tube_start_z + tube_len * 0.5
+		_add_cylinder("LauncherTube", tube_r, tube_r, tube_len, Vector3(0, 0.0, tube_centre_z), darker_metal)
 
 	# Iron sights — only when no scope is mounted (otherwise they overlap).
 	if not has_scope:
@@ -792,8 +844,15 @@ func _add_picatinny_rail(pos: Vector3, size: Vector3, mat: Material) -> void:
 		# Teeth are slightly wider than the base for that Picatinny look
 		_add_box("Tooth%d" % i, Vector3(size.x * 1.2, base_h, tooth_z), Vector3(0, size.y * 0.5 - base_h * 0.5, tz), mat, rail_parent)
 
-func _add_barrel_shroud(centre_z: float, length: float, half_extent: float, slot_count: int, mat: Material) -> void:
-	if length <= 0.0 or half_extent <= 0.0 or slot_count <= 0:
+func _add_barrel_shroud(
+	centre_z: float,
+	length: float,
+	half_extent_x: float,
+	half_extent_y: float,
+	slot_count: int,
+	mat: Material,
+) -> void:
+	if length <= 0.0 or half_extent_x <= 0.0 or half_extent_y <= 0.0 or slot_count <= 0:
 		return
 	var plate_thickness: float = 0.006    # radial wall thickness
 	# Wide rails — they overlap with the adjacent plate's rails at each
@@ -808,10 +867,14 @@ func _add_barrel_shroud(centre_z: float, length: float, half_extent: float, slot
 		(inner_length - float(ribs) * rib_z_thickness) / float(slot_count))
 	var z_back: float = centre_z + length * 0.5
 	var z_front: float = centre_z - length * 0.5
-	var plate_y: float = half_extent - plate_thickness * 0.5  # outward face of each plate
-	var plate_width: float = 2.0 * half_extent
-	var rib_x_width: float = maxf(0.001, plate_width - 2.0 * rail_width)
 	for side_idx in 4:
+		# Even sides = top/bottom (Y); odd sides = left/right (X). Multi-barrel
+		# only widens X — vertical clearance stays single-barrel height.
+		var radial_half: float = half_extent_y if side_idx % 2 == 0 else half_extent_x
+		var tangential_half: float = half_extent_x if side_idx % 2 == 0 else half_extent_y
+		var plate_y: float = radial_half - plate_thickness * 0.5
+		var plate_width: float = 2.0 * tangential_half
+		var rib_x_width: float = maxf(0.001, plate_width - 2.0 * rail_width)
 		var side := Node3D.new()
 		side.name = "Shroud%d" % side_idx
 		side.rotation = Vector3(0.0, 0.0, float(side_idx) * PI * 0.5)
@@ -822,7 +885,7 @@ func _add_barrel_shroud(centre_z: float, length: float, half_extent: float, slot
 			Vector3(0.0, plate_y, z_front + end_cap_thickness * 0.5), mat, side)
 		_add_box("BackCap", cap_size,
 			Vector3(0.0, plate_y, z_back - end_cap_thickness * 0.5), mat, side)
-		var rail_x: float = half_extent - rail_width * 0.5
+		var rail_x: float = tangential_half - rail_width * 0.5
 		var rail_size := Vector3(rail_width, plate_thickness, inner_length)
 		_add_box("RailL", rail_size, Vector3(-rail_x, plate_y, centre_z), mat, side)
 		_add_box("RailR", rail_size, Vector3(+rail_x, plate_y, centre_z), mat, side)
