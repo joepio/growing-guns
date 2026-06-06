@@ -27,6 +27,7 @@ var _hud: Dictionary = {}
 var _card_ids: Array = []
 var _card_selected_index: int = 0
 var _card_pick_locked: bool = false
+var _card_exit_animating: bool = false
 # Edge-trigger state for left-stick X card nav: only fires once per push past
 # the deadzone, has to return to neutral before the next nav can register.
 var _card_stick_x_engaged: bool = false
@@ -92,6 +93,7 @@ func handle_input(event: InputEvent) -> bool:
 
 
 func show_card_pick(card_ids: Array) -> void:
+	_blend_death_into_card_pick()
 	_card_ids = card_ids.duplicate()
 	_card_selected_index = 0
 	_card_pick_locked = true
@@ -111,11 +113,15 @@ func show_card_pick(card_ids: Array) -> void:
 		if old_tw and old_tw.is_valid():
 			old_tw.kill()
 	bg.color.a = 0.0
+	var title: Label = _hud.card_title
+	if title:
+		title.modulate.a = 1.0
+		title.position.y = 0.0
+		if title.has_meta("tween"):
+			var old_title_tw: Tween = title.get_meta("tween")
+			if old_title_tw and old_title_tw.is_valid():
+				old_title_tw.kill()
 	_hud.card_overlay.visible = true
-	var dim_tw := bg.create_tween()
-	bg.set_meta("tween", dim_tw)
-	dim_tw.tween_property(bg, "color:a", 0.70, 0.55)\
-		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
 	# Block the mouse on cards belonging to controller-using players, so the
 	# global cursor can't steal their selection while they navigate with
 	# DPAD/stick. Mouse-using players (incl. a kbd+mouse player who joined
@@ -133,9 +139,19 @@ func show_card_pick(card_ids: Array) -> void:
 
 
 func hide_card_pick() -> void:
+	if is_card_pick_visible() and _card_pick_locked and not _card_ids.is_empty() and not _card_exit_animating:
+		_animate_card_pick_exit()
+		return
+	if _card_exit_animating:
+		return
+	_clear_card_pick_now()
+
+
+func _clear_card_pick_now() -> void:
 	_card_ids.clear()
 	_card_pick_locked = false
 	_card_stick_x_engaged = false
+	_card_exit_animating = false
 	var bg: ColorRect = _hud.card_bg
 	if bg.has_meta("tween"):
 		var old_tw: Tween = bg.get_meta("tween")
@@ -217,6 +233,56 @@ func show_death_effect(show: bool) -> void:
 		tw.tween_property(death, "color", Color(0.65, 0.0, 0.0, 1.0), 0.4).set_trans(Tween.TRANS_SINE)
 	else:
 		tw.tween_property(death, "color:a", 0.0, 0.5).set_trans(Tween.TRANS_CUBIC)
+
+
+func _stop_death_tween() -> ColorRect:
+	var death: ColorRect = _hud.death
+	if death.has_meta("tween"):
+		var old_tw: Tween = death.get_meta("tween")
+		if old_tw and old_tw.is_valid():
+			old_tw.kill()
+	return death
+
+
+func _blend_death_into_card_pick() -> void:
+	var death := _stop_death_tween()
+	var tw := death.create_tween()
+	death.set_meta("tween", tw)
+	tw.tween_property(death, "color", Color(0.30, 0.0, 0.0, 1.0), 0.55)\
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	tw.tween_property(death, "color", Color(0.09, 0.0, 0.0, 1.0), 0.65)\
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+
+
+func _fade_card_pick_to_game() -> void:
+	var death := _stop_death_tween()
+	var bg: ColorRect = _hud.card_bg
+	if bg.has_meta("tween"):
+		var old_bg_tw: Tween = bg.get_meta("tween")
+		if old_bg_tw and old_bg_tw.is_valid():
+			old_bg_tw.kill()
+	var tw := create_tween().set_parallel(true)
+	death.set_meta("tween", tw)
+	bg.set_meta("tween", tw)
+	tw.tween_property(death, "color:a", 0.0, 0.18).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	tw.tween_property(bg, "color:a", 0.0, 0.18).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	var title: Label = _hud.card_title
+	if title and title.modulate.a > 0.01:
+		tw.tween_property(title, "modulate:a", 0.0, 0.20).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+		tw.tween_property(title, "position:y", title.position.y - 22.0, 0.24).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
+
+
+func _fade_card_title_after_pick() -> void:
+	var title: Label = _hud.card_title
+	if title == null:
+		return
+	if title.has_meta("tween"):
+		var old_tw: Tween = title.get_meta("tween")
+		if old_tw and old_tw.is_valid():
+			old_tw.kill()
+	var tw := title.create_tween()
+	title.set_meta("tween", tw)
+	tw.tween_property(title, "modulate:a", 0.0, 0.12).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
 
 
 func layout_for_size(view_size: Vector2) -> void:
@@ -665,7 +731,14 @@ func _emit_selected_card() -> void:
 	if _card_ids.is_empty() or _card_pick_locked:
 		return
 	_card_pick_locked = true
+	_fade_card_title_after_pick()
 	var card_id := str(_card_ids[_card_selected_index])
+	card_selected.emit(player_id, card_id)
+
+
+func _animate_card_pick_exit() -> void:
+	_card_exit_animating = true
+	_fade_card_pick_to_game()
 	var row: HBoxContainer = _hud.card_row
 	var picked := row.get_child(_card_selected_index) as Control
 	for i in range(row.get_child_count()):
@@ -678,11 +751,12 @@ func _emit_selected_card() -> void:
 			tw.tween_property(body, "scale", Vector2(1.5, 1.5), 0.42).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 			tw.tween_property(body, "position:y", -100.0, 0.42).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 			tw.tween_property(body, "rotation_degrees", 0.0, 0.2)
+			tw.tween_property(body, "modulate:a", 0.0, 0.34).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
 		else:
 			tw.tween_property(body, "scale", Vector2(0.5, 0.5), 0.35).set_trans(Tween.TRANS_CUBIC)
 			tw.tween_property(body, "modulate:a", 0.0, 0.28)
 	await get_tree().create_timer(0.48, true).timeout
-	card_selected.emit(player_id, card_id)
+	_clear_card_pick_now()
 
 
 func _set_card_highlight(card: Control, highlighted: bool) -> void:

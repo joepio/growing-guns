@@ -128,7 +128,7 @@ static func all() -> Array:
 				# First stack establishes a sizable baseline; each extra one
 				# grows the blast. Three stacks → ~9m one-shot zone.
 				if w.explosive_radius <= 0.0:
-					w.explosive_radius = 4.0
+					w.explosive_radius += 4.0
 				else:
 					w.explosive_radius += 2.5
 				w.explosive_damage += 25.0
@@ -192,6 +192,21 @@ static func all() -> Array:
 						w.damage_mult *= 0.7
 						w.spread *= 2
 						w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.55, 0.15), 0.5),
+		},
+		{
+				"id": "minigun",
+				"name": "MINIGUN",
+				"desc": "Ten barrels, absurd fire rate, tiny bullet damage",
+				"rarity": "rare",
+				"color": Color(1.0, 0.78, 0.28),
+				"apply": func(w: Weapon) -> void:
+						w.full_auto = true
+						w.fire_rate_mult *= 10.0
+						w.mag_size_bonus += 95
+						w.damage_mult *= 0.2
+						w.spread = max(w.spread, deg_to_rad(1.2)) + deg_to_rad(1.2)
+						w.recoil_per_shot *= 0.65
+						w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.72, 0.12), 0.65),
 		},		{
 			"id": "homing",
 			"name": "HOMING",
@@ -448,17 +463,17 @@ static func all() -> Array:
 		{
 			"id": "bazooka",
 			"name": "BAZOOKA",
-			"desc": "RMB: Single-shot massive explosion",
+			"desc": "Slow rocket-like shots with a massive explosion",
 			"rarity": "rare",
 			"color": Color(1.0, 0.25, 0.0),
 			"apply": func(w: Weapon) -> void:
-				w.damage_mult = 5.0
-				w.mag_size_bonus = 1 - int(Weapon.BASE_MAG_SIZE) # Force to 1
-				w.reload_mult = 0.3
-				w.bullet_speed_mult = 0.1
-				w.explosive_radius = 16.0
-				w.explosive_damage = 200.0
-				w.bullet_drop = 3.0  # rocket thrust mostly cancels gravity
+				w.damage_mult *= 4.0
+				w.fire_rate_mult *= 0.12
+				w.reload_mult *= 0.45
+				w.bullet_speed_mult *= 0.12
+				w.explosive_radius += 12.0
+				w.explosive_damage += 180.0
+				w.bullet_drop *= 0.1  # rocket thrust mostly cancels gravity
 				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.1, 0.0), 0.8),
 		},
 	]

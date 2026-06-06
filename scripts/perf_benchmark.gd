@@ -9,6 +9,7 @@ extends Node3D
 #   godot --headless --path /Users/joep/dev/godot res://scenes/perf_benchmark.tscn
 #
 # Pass `-- mode=NAME` to toggle A/B isolation flags (see _parse_cli_args).
+# Pass `-- build=card,card,...` to override the stress build.
 # In --headless mode, render-side perf monitors return 0 (draw_calls etc.);
 # physics_ms / frame_ms / event rates remain accurate, which is what we
 # actually want for tracking gameplay-side regressions.
@@ -46,6 +47,7 @@ const BUILD: Array[String] = [
 	"explosive",  # stacks
 	"damage",     # ×1.5 damage
 ]
+var build: Array[String] = BUILD.duplicate()
 
 var state: int = PLAYING_STATE
 var local_player: Node = null   # consumers null-guard this; leaving it null is fine
@@ -80,7 +82,7 @@ func _ready() -> void:
 	if DisplayServer.get_name() != "headless":
 		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_MINIMIZED)
 	print("[bench] seed=%x bots=%d warmup=%.1fs measure=%.1fs mode=%s build=%s"
-		% [RNG_SEED, NUM_BOTS, WARMUP_SEC, MEASURE_SEC, bench_mode, str(BUILD)])
+		% [RNG_SEED, NUM_BOTS, WARMUP_SEC, MEASURE_SEC, bench_mode, str(build)])
 	_build_arena()
 	_build_camera()
 	_spawn_bots()
@@ -97,6 +99,12 @@ func _parse_cli_args() -> void:
 	for arg in OS.get_cmdline_user_args():
 		if arg.begins_with("mode="):
 			bench_mode = arg.substr(5)
+		elif arg.begins_with("build="):
+			build = []
+			for cid in arg.substr(6).split(",", false):
+				var trimmed := cid.strip_edges()
+				if not trimmed.is_empty():
+					build.append(trimmed)
 	match bench_mode:
 		"no_casings":
 			BenchFlags.no_casings = true
@@ -157,7 +165,7 @@ func _spawn_bots() -> void:
 		# CardLibrary etc. are global — defer card application a frame so the
 		# Player has a chance to finish _ready / instantiate its weapon.
 		await get_tree().process_frame
-		for cid in BUILD:
+		for cid in build:
 			if bot.has_method("apply_card"):
 				bot.call("apply_card", cid)
 		bot.set("health", 999999)
@@ -240,7 +248,7 @@ func _dump_results() -> void:
 		return
 	var fps_mean: float = 1000.0 / _mean(_frame_ms) if _mean(_frame_ms) > 0.0 else 0.0
 	var summary := {
-		"build": BUILD,
+		"build": build,
 		"bots": NUM_BOTS,
 		"samples": _frame_ms.size(),
 		"warmup_sec": WARMUP_SEC,
@@ -259,7 +267,7 @@ func _dump_results() -> void:
 	}
 	print("\n========== PERF BENCHMARK RESULT ==========")
 	print("Mode:                   %s" % bench_mode)
-	print("Build:                  %s" % str(BUILD))
+	print("Build:                  %s" % str(build))
 	print("Samples:                %d frames over %.1f s" % [_frame_ms.size(), MEASURE_SEC])
 	print("FPS (from mean frame):  %6.1f" % fps_mean)
 	print("Event rates (per sec):  bullets=%4d  collisions=%4d  explosions=%4d  casings=%4d" % [
