@@ -857,7 +857,7 @@ func _apply_all_floor_lava_damage(delta: float) -> void:
 	var active_ids: Dictionary = {}
 	var lava_y := global_position.y + LAVA_FLOOR_SURFACE_Y
 	for p: Node in get_tree().get_nodes_in_group("players"):
-		if not p is Node3D:
+		if not p is Node3D or not p.is_multiplayer_authority():
 			continue
 		var pid := int(p.get("player_id")) if p.get("player_id") != null else p.get_instance_id()
 		var p3 := p as Node3D
@@ -898,7 +898,7 @@ func _apply_lava_pool_damage(delta: float) -> void:
 	var active_ids: Dictionary = {}
 	var lava_y := global_position.y + LAVA_POOL_Y
 	for p: Node in get_tree().get_nodes_in_group("players"):
-		if not p is Node3D:
+		if not p is Node3D or not p.is_multiplayer_authority():
 			continue
 		var pid := int(p.get("player_id")) if p.get("player_id") != null else p.get_instance_id()
 		var p3 := p as Node3D

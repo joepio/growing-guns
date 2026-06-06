@@ -110,8 +110,11 @@ var _round_music_level: int = 1
 var _round_damage_seen: bool = false
 var _round_elapsed: float = 0.0
 var _lava_leak_started: bool = false
+var _lava_leak_start_ms: int = 0
+var _lava_leak_spread_seconds: float = LAVA_LEAK_SPREAD_SECONDS
 var _pickups_root: Node3D = null
 var _pickup_spawn_timer: float = 0.0
+var _pickup_spawn_serial: int = 0
 var _air_strike_timer: float = -1.0
 var _air_strike_cancel_gen: int = 0
 var _air_strikes_armed: bool = false
@@ -655,8 +658,7 @@ func _input(event: InputEvent) -> void:
 					_restart_match()
 			KEY_L:
 				if multiplayer.is_server():
-					_lava_leak_started = true
-					_start_lava_leak.rpc(LAVA_LEAK_SPREAD_SECONDS)
+					_trigger_lava_leak(LAVA_LEAK_SPREAD_SECONDS)
 					_announce.rpc("LAVA TRIGGERED", 1.0)
 			KEY_K:
 				if multiplayer.is_server():
@@ -736,7 +738,7 @@ func _on_peer_disconnected(id: int) -> void:
 	_broadcast_scores.rpc(round_wins)
 	if state == State.PICKING_CARD and id == pending_picker_id:
 		_hide_card_pick.rpc()
-		state = State.PLAYING
+		_set_game_state.rpc(State.PLAYING)
 	pending_pick_cards_by_player.erase(id)
 	pending_pick_deadlines.erase(id)
 	completed_picks.erase(id)
@@ -747,7 +749,7 @@ func _on_peer_disconnected(id: int) -> void:
 			_ping_pending.erase(seq)
 	_broadcast_ping_ms.rpc(_ping_ms_by_player)
 	if NetworkManager.players.size() < 2:
-		state = State.WAITING
+		_set_game_state.rpc(State.WAITING)
 		_hide_card_pick.rpc()
 		_hide_rematch_overlay.rpc()
 		_announce.rpc("WAITING FOR PLAYERS…", 99.0)
@@ -774,6 +776,8 @@ func _request_spawn(pname: String) -> void:
 	# Targeting just the joiner via rpc_id keeps existing peers untouched.
 	if state != State.WAITING and current_map_index >= 0 and current_map_index < MAP_POOL.size():
 		_swap_arena.rpc_id(sender, current_map_index, current_map_seed, current_arena_size_min, current_arena_size_max)
+	if _lava_leak_started and _lava_leak_start_ms > 0:
+		_start_lava_leak.rpc_id(sender, _lava_leak_spread_seconds, _lava_leak_start_ms)
 	_spawn_player(sender, pname)
 	for pid in NetworkManager.players:
 		if players_root.has_node(str(pid)) and pid != sender:
@@ -784,6 +788,8 @@ func _request_spawn(pname: String) -> void:
 				existing.global_position, _is_bot_id(int(pid)), -1, false, existing.rotation.y,
 				int(_bot_appearance_seeds.get(pid, 0)))
 	_broadcast_scores.rpc(round_wins)
+	if state != State.WAITING:
+		_set_game_state.rpc_id(sender, state)
 	_maybe_start_match()
 
 func _spawn_player(id: int, pname: String) -> void:
@@ -1098,7 +1104,7 @@ func _despawn_one_bot() -> void:
 	_broadcast_scores.rpc(round_wins)
 	_refresh_bot_counter()
 	if NetworkManager.players.size() < 2:
-		state = State.WAITING
+		_set_game_state.rpc(State.WAITING)
 		_hide_card_pick.rpc()
 		_hide_rematch_overlay.rpc()
 		_announce.rpc("WAITING FOR PLAYERS…", 99.0)
@@ -1115,7 +1121,7 @@ func _despawn_all_bots() -> void:
 	if state == State.PICKING_CARD:
 		_hide_card_pick.rpc()
 	_hide_rematch_overlay.rpc()
-	state = State.WAITING
+	_set_game_state.rpc(State.WAITING)
 
 
 func _update_ping_monitor(delta: float) -> void:
@@ -1201,6 +1207,11 @@ func _broadcast_ping_ms(pings: Dictionary) -> void:
 
 # -------------------- ROUND FLOW --------------------
 
+@rpc("authority", "call_local", "reliable")
+func _set_game_state(new_state: int) -> void:
+	state = new_state
+
+
 func _maybe_start_match() -> void:
 	if not multiplayer.is_server():
 		return
@@ -1210,7 +1221,7 @@ func _maybe_start_match() -> void:
 		_announce.rpc("WAITING FOR PLAYERS…", 99.0)
 		_set_music_energy.rpc(1)
 		return
-	state = State.PLAYING
+	_set_game_state.rpc(State.PLAYING)
 	current_round = 1
 	_music_track_started_ms = 0  # fresh soundtrack each match
 	_reset_round_tracking()
@@ -1344,10 +1355,7 @@ func _start_round_now() -> void:
 	_show_round_modifier_on_screens.rpc()
 	_show_round_loadout_names.rpc()
 	if multiplayer.is_server() and ROUND_MODIFIERS_SCRIPT.lava_immediate(current_round_modifier):
-		_lava_leak_started = true
-		var arena_node := get_node_or_null("Arena")
-		if arena_node and arena_node.has_method("start_lava_leak"):
-			arena_node.start_lava_leak(LAVA_LEAK_SPREAD_SECONDS)
+		_trigger_lava_leak(LAVA_LEAK_SPREAD_SECONDS)
 	_hide_rematch_overlay.rpc()
 	_warmup_round_audio()
 	if has_node("Arena"):
@@ -1591,15 +1599,30 @@ func _update_lava_leak(delta: float) -> void:
 	_round_elapsed += delta
 	if _round_elapsed < LAVA_LEAK_START_SECONDS:
 		return
+	_trigger_lava_leak(LAVA_LEAK_SPREAD_SECONDS)
+
+
+func _trigger_lava_leak(spread_seconds: float) -> void:
+	if not multiplayer.is_server() or _lava_leak_started:
+		return
+	var start_ms := Time.get_ticks_msec()
 	_lava_leak_started = true
-	_start_lava_leak.rpc(LAVA_LEAK_SPREAD_SECONDS)
+	_lava_leak_start_ms = start_ms
+	_lava_leak_spread_seconds = spread_seconds
+	_start_lava_leak.rpc(spread_seconds, start_ms)
+
 
 @rpc("authority", "call_local", "reliable")
-func _start_lava_leak(spread_seconds: float) -> void:
+func _start_lava_leak(spread_seconds: float, start_ms: int = 0) -> void:
+	if start_ms <= 0:
+		start_ms = Time.get_ticks_msec()
+	_lava_leak_started = true
+	var elapsed := maxf(0.0, (Time.get_ticks_msec() - start_ms) / 1000.0)
 	var arena := get_node_or_null("Arena")
 	if arena and arena.has_method("start_lava_leak"):
-		arena.start_lava_leak(spread_seconds)
-	_announce("LAVA LEAK", 1.5)
+		arena.start_lava_leak(spread_seconds, elapsed)
+	if elapsed <= 0.05:
+		_announce("LAVA LEAK", 1.5)
 
 @rpc("authority", "call_local", "reliable")
 func _stop_lava_leak() -> void:
@@ -1792,6 +1815,8 @@ func _reset_round_tracking() -> void:
 	round_winner_id = 0
 	_round_elapsed = 0.0
 	_lava_leak_started = false
+	_lava_leak_start_ms = 0
+	_lava_leak_spread_seconds = LAVA_LEAK_SPREAD_SECONDS
 	_air_strike_cancel_gen += 1
 	_air_strike_timer = -1.0
 	_air_strikes_armed = false
@@ -1929,11 +1954,21 @@ func _random_pickup_spawn_pos() -> Vector3:
 func _spawn_pickup_item_with_fx(kind: String, world_pos: Vector3) -> void:
 	if _pickups_root == null:
 		return
+	_pickup_spawn_serial += 1
+	var pickup_id := _pickup_spawn_serial
 	SFX.pickup_drop(world_pos)
 	var pickup: Node3D = PICKUP_ITEM_SCRIPT.new()
-	pickup.name = "Pickup_%s_%d" % [kind, Time.get_ticks_msec()]
+	pickup.name = "Pickup_%d" % pickup_id
 	_pickups_root.add_child(pickup)
-	pickup.setup(kind, world_pos)
+	pickup.setup(kind, world_pos, pickup_id)
+
+@rpc("authority", "call_local", "reliable")
+func _despawn_pickup(pickup_id: int) -> void:
+	if _pickups_root == null or pickup_id < 0:
+		return
+	var node := _pickups_root.get_node_or_null("Pickup_%d" % pickup_id)
+	if is_instance_valid(node):
+		node.queue_free()
 
 @rpc("authority", "call_local", "reliable")
 func _spawn_pickup_item(kind: String, world_pos: Vector3) -> void:
@@ -2116,7 +2151,7 @@ func _end_round(winner_id: int) -> void:
 			_show_round_win_on_screens.rpc(winner_id)
 	# Match over?
 	if winner_id != 0 and int(round_wins[winner_id]) >= rounds_to_win:
-		state = State.MATCH_OVER
+		_set_game_state.rpc(State.MATCH_OVER)
 		for pid in NetworkManager.players:
 			var pn := players_root.get_node_or_null(str(pid))
 			if pn:
@@ -2130,7 +2165,7 @@ func _end_round(winner_id: int) -> void:
 	if winner_id != 0:
 		await get_tree().create_timer(ROUND_WIN_TO_CARD_PICK_DELAY).timeout
 	# Freeze the losers and wait for them to finish their picks.
-	state = State.PICKING_CARD
+	_set_game_state.rpc(State.PICKING_CARD)
 	# Don't freeze losers during card pick — let everyone keep moving while
 	# the round-pick UI is up. The picker's UI overlay captures their mouse
 	# / clicks; movement keys still work in the background, which is fine
@@ -2270,7 +2305,7 @@ func _maybe_finish_card_picks() -> void:
 		if not completed_picks.has(loser_id):
 			return
 	current_round += 1
-	state = State.PLAYING
+	_set_game_state.rpc(State.PLAYING)
 	_start_round_now()
 
 func _peer_for_player(pid: int) -> int:
@@ -3025,7 +3060,7 @@ func _extend_match() -> void:
 		show_death_effect_for(int(player_id), false)
 
 	# Start a normal round pick flow for the loser of the last round.
-	state = State.PICKING_CARD
+	_set_game_state.rpc(State.PICKING_CARD)
 	_hide_rematch_overlay.rpc()
 
 	# Find who lost the last round (usually the one who triggered _match_over)
@@ -3205,8 +3240,6 @@ func _is_global_modal_open() -> bool:
 	if _pause_menu and _pause_menu.visible:
 		return true
 	if _settings_panel and _settings_panel.visible:
-		return true
-	if _tab_root and _tab_root.visible:
 		return true
 	if _rematch_overlay and _rematch_overlay.visible:
 		return true
@@ -3823,14 +3856,16 @@ func _on_join_input_changed(text: String) -> void:
 	_update_join_form()
 	if _is_valid_iroh_node_id(text) and not _join_in_progress and _join_auto_submit_text != text:
 		_join_auto_submit_text = text
-		call_deferred("_pause_join")
+		if not _is_own_iroh_game_id(text):
+			call_deferred("_pause_join")
 
 
 func _update_join_form() -> void:
 	var text := _pause_join_input.text.strip_edges() if _pause_join_input else ""
 	var valid := _is_valid_iroh_node_id(text)
+	var own_id := valid and _is_own_iroh_game_id(text)
 	if _pause_join_button:
-		_pause_join_button.disabled = _join_in_progress or not valid
+		_pause_join_button.disabled = _join_in_progress or not valid or own_id
 		_pause_join_button.text = "..." if _join_in_progress else "JOIN"
 	if _pause_join_notice:
 		if _join_in_progress:
@@ -3839,6 +3874,9 @@ func _update_join_form() -> void:
 		elif text.is_empty():
 			_pause_join_notice.text = "Paste an iroh game ID"
 			_pause_join_notice.add_theme_color_override("font_color", Color(0.55, 0.60, 0.72))
+		elif own_id:
+			_pause_join_notice.text = "That's your own game ID — share it with someone else"
+			_pause_join_notice.add_theme_color_override("font_color", Color(1.0, 0.72, 0.42))
 		elif valid:
 			_pause_join_notice.text = "Valid ID - connecting automatically"
 			_pause_join_notice.add_theme_color_override("font_color", Color(0.58, 1.0, 0.65))
@@ -3866,6 +3904,13 @@ func _is_valid_iroh_node_id(text: String) -> bool:
 	if id.contains(" "):
 		return false
 	return true
+
+
+func _is_own_iroh_game_id(game_id: String) -> bool:
+	var own_id := NetworkManager.current_iroh_game_id.strip_edges()
+	if own_id.is_empty():
+		return false
+	return game_id.strip_edges() == own_id
 
 
 func _refresh_bot_counter() -> void:
@@ -3899,6 +3944,10 @@ func _pause_join() -> void:
 		return
 	var game_id := _extract_iroh_node_id(_pause_join_input.text)
 	if not _is_valid_iroh_node_id(game_id):
+		_update_join_form()
+		return
+	if _is_own_iroh_game_id(game_id):
+		push_warning("Join blocked: pasted own iroh game ID")
 		_update_join_form()
 		return
 	_pause_join_input.set_text(game_id)
@@ -4141,7 +4190,7 @@ func _tab_card_pill(text: String, col: Color) -> Control:
 func _restart_match() -> void:
 	if not multiplayer.is_server():
 		return
-	state = State.WAITING
+	_set_game_state.rpc(State.WAITING)
 	round_wins.clear()
 	for pid in NetworkManager.players:
 		round_wins[pid] = 0

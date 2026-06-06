@@ -110,10 +110,10 @@ func get_lava_fallback_spawn_world() -> Vector3:
 	return global_position + Vector3(0.0, 5.0, 0.0)
 
 
-func start_lava_leak(spread_seconds: float = 20.0) -> void:
+func start_lava_leak(spread_seconds: float = 20.0, start_elapsed: float = 0.0) -> void:
 	stop_lava_leak()
 	_lava_leak_duration = maxf(0.1, spread_seconds)
-	_lava_leak_elapsed = 0.0
+	_lava_leak_elapsed = maxf(0.0, start_elapsed)
 	_lava_floor_elapsed = 0.0
 	_lava_rise_height = 0.0
 	var arena_size: float = float(generator.get("arena_size")) if generator else 80.0
@@ -124,7 +124,21 @@ func start_lava_leak(spread_seconds: float = 20.0) -> void:
 	_lava_inset = _lava_arena_half if _lava_floor_already_full else 0.0
 	_build_lava_leak_nodes()
 	_lava_leak_active = true
-	_update_lava_leak_visuals(1.0, 1.0 if _lava_floor_already_full else 0.0)
+	if start_elapsed > 0.0:
+		var wall_seconds := LAVA_WALL_FLOW_SECONDS if _lava_has_walls else 0.0
+		_lava_floor_elapsed = maxf(0.0, _lava_leak_elapsed - wall_seconds)
+		var floor_duration := maxf(0.1, _lava_leak_duration - wall_seconds)
+		var floor_t := clampf(_lava_floor_elapsed / floor_duration, 0.0, 1.0)
+		if _lava_floor_already_full:
+			floor_t = 1.0
+		var eased_floor := floor_t * floor_t * (3.0 - 2.0 * floor_t)
+		_lava_inset = lerpf(0.0, _lava_arena_half, eased_floor)
+		if floor_t >= 1.0:
+			_lava_rise_height = minf(LAVA_MAX_RISE, maxf(0.0, _lava_floor_elapsed - floor_duration) * LAVA_RISE_SPEED)
+		var wall_t := clampf(_lava_leak_elapsed / maxf(0.01, wall_seconds), 0.0, 1.0) if wall_seconds > 0.0 else 1.0
+		_update_lava_leak_visuals(wall_t, floor_t)
+	else:
+		_update_lava_leak_visuals(1.0, 1.0 if _lava_floor_already_full else 0.0)
 
 
 func stop_lava_leak() -> void:
@@ -242,7 +256,7 @@ func _apply_lava_leak_damage(delta: float) -> void:
 	var wall_height := lerpf(0.05, wall_h, wall_t)
 	var active_ids: Dictionary = {}
 	for p: Node in get_tree().get_nodes_in_group("players"):
-		if not p is Node3D:
+		if not p is Node3D or not p.is_multiplayer_authority():
 			continue
 		var pid := int(p.get("player_id")) if p.get("player_id") != null else p.get_instance_id()
 		var p3 := p as Node3D
