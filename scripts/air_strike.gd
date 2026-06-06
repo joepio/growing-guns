@@ -3,8 +3,8 @@ extends Node3D
 const Violence = preload("res://scripts/violence.gd")
 
 const MARKER_COLOR := Color(1.0, 0.08, 0.04)
-const ROCKET_TRAVEL_SECONDS := 4.2
-const BLAST_RADIUS := 34.0
+const ROCKET_TRAVEL_SECONDS := 2.3
+const BLAST_RADIUS := 30.0
 const BLAST_DAMAGE := 165.0
 
 var target_pos: Vector3 = Vector3.ZERO

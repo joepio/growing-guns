@@ -16,7 +16,7 @@ const PICKUP_SPAWN_JITTER := 7.0
 const PICKUP_MAX_ACTIVE := 4
 const AIR_STRIKE_INTERVAL := 4.0
 const AIR_STRIKE_INTERVAL_JITTER := 1.5
-const AIR_STRIKE_RADIUS := 34.0
+const AIR_STRIKE_RADIUS := 30.0
 const AIR_STRIKE_DAMAGE := 165.0
 const AIR_STRIKE_SPAWN_HEIGHT := 263.0
 const AIR_STRIKE_SPAWN_HORIZ := 93.0
@@ -1591,6 +1591,23 @@ func _apply_environment_explosion(pos: Vector3, radius: float, damage: float, sh
 	var anchor := players_root.get_child(0)
 	if anchor and anchor.has_method("_apply_air_strike_splash"):
 		anchor.call("_apply_air_strike_splash", pos + Vector3.UP * 0.1, radius, damage, shooter_id)
+
+
+func _apply_ion_cannon_explosion(pos: Vector3, radius: float, damage: float, shooter_id: int = 0) -> void:
+	if players_root.get_child_count() == 0:
+		return
+	var bounds: Dictionary = ION_CANNON_SCRIPT.damage_column_bounds(self, pos)
+	var anchor := players_root.get_child(0)
+	if anchor and anchor.has_method("_apply_ion_cannon_splash"):
+		anchor.call(
+			"_apply_ion_cannon_splash",
+			pos,
+			radius,
+			damage,
+			shooter_id,
+			float(bounds.bottom_y),
+			float(bounds.top_y),
+		)
 
 
 @rpc("authority", "call_local", "reliable")
