@@ -1,7 +1,5 @@
 extends Node3D
 
-const Violence = preload("res://scripts/violence.gd")
-
 const ION_COLOR := Color(0.38, 0.78, 1.0)
 const ION_CORE := Color(0.92, 0.97, 1.0)
 const CHARGE_SECONDS := 3.8
@@ -11,6 +9,18 @@ const START_RADIUS := 30.0
 const END_RADIUS := 1.5
 const BLAST_RADIUS := 38.0
 const BLAST_DAMAGE := 175.0
+const DETONATION_CYLINDER_UP := 88.0
+const DETONATION_DEPTH_BELOW_LAVA := 20.0
+const DETONATION_LINE_COUNT := 40
+const DETONATION_LINE_MIN_SPEED := 70.0
+const DETONATION_LINE_MAX_SPEED := 120.0
+const DETONATION_LINE_MIN_LEN := 16.0
+const DETONATION_LINE_MAX_LEN := 30.0
+const DETONATION_LINE_MIN_LIFE := 0.28
+const DETONATION_LINE_MAX_LIFE := 0.62
+const DETONATION_SHELL_FADE := 0.17
+const DETONATION_FLASH_SUSTAIN := 0.05
+const DETONATION_FLASH_RELEASE := 0.30
 
 # Nested shells read as a volumetric column without FogVolume setup.
 const COLUMN_LAYERS := [
@@ -337,15 +347,35 @@ func _free_column() -> void:
 	_column_mats.clear()
 
 
+func _clear_charge_motes() -> void:
+	for node in get_tree().get_nodes_in_group("ion_cannon_motes"):
+		if is_instance_valid(node):
+			node.queue_free()
+
+
+func _snap_off_charge_vfx() -> void:
+	_free_column()
+	if is_instance_valid(_core_light):
+		_core_light.queue_free()
+		_core_light = null
+	if is_instance_valid(_mid_light):
+		_mid_light.queue_free()
+		_mid_light = null
+	if is_instance_valid(_ground_light):
+		_ground_light.queue_free()
+		_ground_light = null
+
+
 func _detonate() -> void:
 	if _detonated:
 		return
 	_detonated = true
+	_clear_charge_motes()
+	_snap_off_charge_vfx()
 	if is_instance_valid(_charge_audio):
 		_charge_audio.stop()
 		_charge_audio = null
 	SFX.ion_cannon_detonate(target_pos, BLAST_RADIUS)
-	var blast_color := Color(0.68, 0.9, 1.0)
 	var scene := _fx_scene if is_instance_valid(_fx_scene) else get_tree().current_scene
 	var local_player: Node = null
 	if _game and is_instance_valid(_game) and _game.get("local_player"):
@@ -353,8 +383,162 @@ func _detonate() -> void:
 	if _notify_server and _game and is_instance_valid(_game) and _game.has_method("_apply_environment_explosion"):
 		_game.call("_apply_environment_explosion", target_pos, BLAST_RADIUS, BLAST_DAMAGE, shooter_id)
 	if scene:
-		Violence.spawn_bullet_blast(scene, target_pos, BLAST_RADIUS, blast_color, local_player)
+		var sidechain_peak := 5.5
+		if scene.has_method("trigger_explosion_sidechain"):
+			scene.trigger_explosion_sidechain(
+				target_pos, BLAST_RADIUS, sidechain_peak, DETONATION_FLASH_SUSTAIN, DETONATION_FLASH_RELEASE,
+			)
+		if local_player and is_instance_valid(local_player) and local_player.has_method("apply_explosion_view_punch"):
+			local_player.apply_explosion_view_punch(
+				target_pos,
+				BLAST_RADIUS,
+				clampf(BLAST_RADIUS / 5.0, 0.55, 2.0),
+			)
+		_spawn_ion_detonation_fx(scene, target_pos, BLAST_RADIUS)
 	_finish()
+
+
+func _make_ion_add_material(tint: Color, alpha: float, emission: float) -> StandardMaterial3D:
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mat.disable_fog = true
+	mat.emission_enabled = true
+	mat.emission = tint
+	mat.albedo_color = Color(tint.r, tint.g, tint.b, alpha)
+	mat.emission_energy_multiplier = emission
+	return mat
+
+
+func _spawn_ion_rise_line(parent: Node3D, radius: float, _cyl_height: float, rng: RandomNumberGenerator) -> void:
+	var line_len := rng.randf_range(DETONATION_LINE_MIN_LEN, DETONATION_LINE_MAX_LEN)
+	var line := MeshInstance3D.new()
+	var mesh := CylinderMesh.new()
+	mesh.top_radius = rng.randf_range(0.09, 0.22)
+	mesh.bottom_radius = mesh.top_radius
+	mesh.height = line_len
+	mesh.radial_segments = 6
+	mesh.rings = 1
+	line.mesh = mesh
+	var peak_emission := rng.randf_range(420.0, 900.0)
+	var mat := _make_ion_add_material(Color(1.0, 1.0, 1.0), rng.randf_range(0.7, 1.0), peak_emission)
+	line.material_override = mat
+	var ang := rng.randf() * TAU
+	var dist := sqrt(rng.randf()) * radius * 0.88
+	# Random height around the blast site — roughly 20 m below to 20 m above ground.
+	var base_y := rng.randf_range(-20.0, 20.0)
+	line.position = Vector3(cos(ang) * dist, base_y, sin(ang) * dist)
+	line.rotation.y = rng.randf_range(0.0, TAU)
+	parent.add_child(line)
+	var speed := rng.randf_range(DETONATION_LINE_MIN_SPEED, DETONATION_LINE_MAX_SPEED)
+	var lifetime := rng.randf_range(DETONATION_LINE_MIN_LIFE, DETONATION_LINE_MAX_LIFE)
+	var travel_y := speed * lifetime
+	var end_pos := line.position + Vector3(
+		rng.randf_range(-1.5, 1.5),
+		travel_y,
+		rng.randf_range(-1.5, 1.5),
+	)
+	var tw := line.create_tween().set_parallel(true)
+	tw.tween_property(line, "position", end_pos, lifetime)\
+		.set_trans(Tween.TRANS_LINEAR)
+	tw.tween_property(mat, "emission_energy_multiplier", 0.0, lifetime * 0.85)\
+		.set_delay(lifetime * 0.15).set_trans(Tween.TRANS_LINEAR)
+	tw.tween_property(mat, "albedo_color", Color(1.0, 1.0, 1.0, 0.0), lifetime)\
+		.set_trans(Tween.TRANS_LINEAR)
+	tw.chain().tween_callback(line.queue_free)
+
+
+func _lava_surface_world_y(scene: Node, strike_pos: Vector3) -> float:
+	var arena: Node = scene.get_node_or_null("Arena")
+	if arena and arena.has_method("get_lava_surface_world_y"):
+		return float(arena.get_lava_surface_world_y())
+	if arena:
+		return arena.global_position.y - 2.0
+	return strike_pos.y - BOTTOM_DEPTH
+
+
+func _detonation_column_layout(scene: Node, strike_pos: Vector3) -> Dictionary:
+	var lava_y := _lava_surface_world_y(scene, strike_pos)
+	var bottom_y := lava_y - DETONATION_DEPTH_BELOW_LAVA
+	var top_y := strike_pos.y + DETONATION_CYLINDER_UP
+	var height := maxf(12.0, top_y - bottom_y)
+	var center_local_y := (top_y + bottom_y) * 0.5 - strike_pos.y
+	return {"height": height, "center_y": center_local_y}
+
+
+func _spawn_detonation_flash(parent: Node3D, radius: float) -> void:
+	var flash := OmniLight3D.new()
+	flash.name = "IonDetonationFlash"
+	flash.light_color = Color(0.96, 0.99, 1.0)
+	flash.light_energy = 22000.0
+	flash.omni_range = radius * 6.0
+	flash.position = Vector3(0.0, 2.0, 0.0)
+	parent.add_child(flash)
+	var ltw := flash.create_tween()
+	ltw.tween_interval(DETONATION_FLASH_SUSTAIN)
+	ltw.tween_property(flash, "light_energy", 0.0, DETONATION_FLASH_RELEASE)\
+		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_IN)
+	ltw.tween_callback(flash.queue_free)
+
+func _spawn_ion_detonation_fx(scene: Node, pos: Vector3, radius: float) -> void:
+	var root := Node3D.new()
+	root.name = "IonDetonationFx"
+	scene.add_child(root)
+	root.global_position = pos
+
+	_spawn_detonation_flash(root, radius)
+
+	var layout := _detonation_column_layout(scene, pos)
+	var cyl_height: float = layout.height
+	var shell := MeshInstance3D.new()
+	var cyl := CylinderMesh.new()
+	cyl.top_radius = radius
+	cyl.bottom_radius = radius
+	cyl.height = cyl_height
+	cyl.radial_segments = 56
+	cyl.rings = 2
+	shell.mesh = cyl
+	var shell_tint := ION_CORE.lerp(ION_COLOR, 0.18)
+	var shell_mat := _make_ion_add_material(shell_tint, 0.0, 0.0)
+	shell.material_override = shell_mat
+	shell.position = Vector3(0.0, layout.center_y, 0.0)
+	root.add_child(shell)
+
+	var shell_tw := shell.create_tween()
+	shell_tw.tween_property(shell_mat, "emission_energy_multiplier", 14000.0, 0.012)\
+		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+	shell_tw.parallel().tween_property(shell_mat, "albedo_color", Color(shell_tint.r, shell_tint.g, shell_tint.b, 0.72), 0.012)
+	shell_tw.tween_property(shell_mat, "emission_energy_multiplier", 5200.0, 0.018)\
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	shell_tw.parallel().tween_property(shell_mat, "albedo_color", Color(shell_tint.r, shell_tint.g, shell_tint.b, 0.45), 0.018)
+	shell_tw.tween_property(shell_mat, "emission_energy_multiplier", 0.0, DETONATION_SHELL_FADE)\
+		.set_trans(Tween.TRANS_LINEAR)
+	shell_tw.parallel().tween_property(shell_mat, "albedo_color", Color(shell_tint.r, shell_tint.g, shell_tint.b, 0.0), DETONATION_SHELL_FADE)
+
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash([pos.x, pos.y, pos.z, radius]) & 0x7fffffff
+	for _i in DETONATION_LINE_COUNT:
+		_spawn_ion_rise_line(root, radius, cyl_height, rng)
+
+	for i in 4:
+		var fill_light := OmniLight3D.new()
+		fill_light.light_color = ION_CORE
+		fill_light.light_energy = 0.0
+		fill_light.omni_range = radius * 3.2
+		fill_light.position = Vector3(0.0, 4.0 + float(i) * 6.0, 0.0)
+		root.add_child(fill_light)
+		var peak_energy := 5200.0 - float(i) * 650.0
+		var ltw := fill_light.create_tween()
+		ltw.tween_property(fill_light, "light_energy", peak_energy, 0.012)\
+			.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+		ltw.tween_property(fill_light, "light_energy", 0.0, DETONATION_SHELL_FADE * (0.75 + float(i) * 0.05))\
+			.set_trans(Tween.TRANS_LINEAR)
+
+	var cleanup := root.create_tween()
+	cleanup.tween_interval(DETONATION_SHELL_FADE + 0.65)
+	cleanup.tween_callback(root.queue_free)
 
 
 func _finish() -> void:

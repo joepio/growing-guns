@@ -648,6 +648,12 @@ func is_all_floor_lava() -> bool:
 	return _all_floor_lava or bool(last_stats.get("all_floor_lava", false))
 
 
+func get_lava_surface_world_y() -> float:
+	if is_all_floor_lava():
+		return global_position.y + LAVA_FLOOR_SURFACE_Y
+	return global_position.y + LAVA_POOL_Y
+
+
 func is_lava_spawn_safe(world_pos: Vector3) -> bool:
 	if _lava_safe_zones.is_empty():
 		return true
