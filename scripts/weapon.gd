@@ -51,8 +51,10 @@ const BASE_RECOIL := 0.018                      # radians of shot-to-shot bloom;
 @export var explosive_radius: float = 0.0      # per-bullet splash radius (m)
 @export var explosive_damage: float = 0.0      # max damage at epicenter
 @export var move_speed_mult: float = 1.0       # scales walk/air movement
-const BASE_KNOCKBACK := 3.0            # every shot gives a light nudge
-@export var knockback: float = BASE_KNOCKBACK   # impulse applied on bullet hit
+const KNOCKBACK_PER_DAMAGE := 0.12     # ~22 dmg rifle hit ≈ 2.6 impulse
+const BLAST_KNOCKBACK_MULT := 1.5      # explosions launch harder at the same damage
+const REFERENCE_KNOCKBACK := 25.0 * KNOCKBACK_PER_DAMAGE  # typical rifle hit (~3.0)
+@export var knockback_mult: float = 1.0  # scales all knockback from this weapon
 @export var special_cooldown_mult: float = 1.0 # <1 = special recharges faster
 @export var melee_damage_mult: float = 1.0     # scales melee damage
 @export var melee_scale: float = 1.0           # scales melee animation and range
@@ -143,6 +145,18 @@ func get_bullet_scale() -> float:
 func get_melee_damage() -> int:
 	return int(70.0 * melee_damage_mult)
 
+static func knockback_from_damage(damage: float, mult: float = 1.0, blast: bool = false) -> float:
+	var force := maxf(damage, 0.0) * KNOCKBACK_PER_DAMAGE
+	if blast:
+		force *= BLAST_KNOCKBACK_MULT
+	return force * maxf(mult, 0.0)
+
+func get_knockback_force(damage: float, blast: bool = false, is_headshot: bool = false) -> float:
+	var kb_damage := damage
+	if is_headshot:
+		kb_damage /= maxf(get_headshot_mult(), 1.0)
+	return knockback_from_damage(kb_damage, knockback_mult, blast)
+
 func reset() -> void:
 		damage_mult = 1.0
 		fire_rate_mult = 1.0
@@ -162,7 +176,7 @@ func reset() -> void:
 		move_speed_mult = 1.0
 		bullet_speed_mult = 1.0
 		bullet_drop = BASE_BULLET_DROP
-		knockback = BASE_KNOCKBACK
+		knockback_mult = 1.0
 		special_cooldown_mult = 1.0
 		melee_damage_mult = 1.0
 		melee_scale = 1.0

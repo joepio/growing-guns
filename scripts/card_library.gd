@@ -269,7 +269,7 @@ static func all() -> Array:
 			"rarity": "rare",
 			"color": Color(0.65, 0.85, 1.0),
 			"apply": func(w: Weapon) -> void:
-				w.knockback += 30.0
+				w.knockback_mult *= 3.5
 				w.damage_mult *= 1.5
 				w.bullet_color = w.bullet_color.lerp(Color(0.6, 0.9, 1.0), 0.45),
 		},

@@ -2216,7 +2216,7 @@ static func spawn_gib_mist(
 	if scene == null:
 		return
 	var dir_n := dir.normalized() if dir.length_squared() > 0.001 else Vector3.UP
-	var chaos := blast_severity * clampf(intensity / maxf(Weapon.BASE_KNOCKBACK, 0.001), 0.6, 2.4)
+	var chaos := blast_severity * clampf(intensity / maxf(Weapon.REFERENCE_KNOCKBACK, 0.001), 0.6, 2.4)
 	var count: int = clampi(int(round(8.0 + intensity * 2.5 + blast_radius * 0.25 + chaos * 10.0)), 8, 28)
 	var spread: float = 0.45 + blast_radius * 0.03 + chaos * 0.14
 	var base_travel: float = 0.9 + intensity * 0.22 + blast_radius * 0.05 + chaos * 0.9
@@ -2659,7 +2659,7 @@ static func spawn_ragdoll(
 	var dir_n: Vector3 = push_dir.normalized() if push_dir.length_squared() > 0.01 else Vector3.UP
 	var chaos := 0.0
 	if blast_radius > 0.0:
-		chaos = clampf(blast_severity * clampf(gib_force / maxf(Weapon.BASE_KNOCKBACK, 0.001), 0.6, 1.8), 0.0, 1.1)
+		chaos = clampf(blast_severity * clampf(gib_force / maxf(Weapon.REFERENCE_KNOCKBACK, 0.001), 0.6, 1.8), 0.0, 1.1)
 	elif overkill_disintegrate:
 		chaos = clampf(overkill_severity * 0.82, 0.35, 1.1)
 	var blast_lift := 0.2

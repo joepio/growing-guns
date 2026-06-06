@@ -369,7 +369,7 @@ func _handle_collision(result: Dictionary) -> void:
 				poison_total_damage = maxi(1, int(round(float(dmg) * (1.0 + weapon_stats.damage_over_time))))
 				direct_damage = 0
 			var knock_dir: Vector3 = (direction + Vector3.UP * 0.18).normalized()
-			var gib_force := weapon_stats.knockback if weapon_stats.knockback > 0.0 else bullet_damage * 0.08
+			var knock_mag := weapon_stats.get_knockback_force(float(maxi(dmg, poison_total_damage)), false, is_head)
 			var direct_blast_radius := weapon_stats.explosive_radius
 			var direct_blast_severity := 1.0 if direct_blast_radius > 0.0 else 0.0
 			if direct_damage > 0:
@@ -379,13 +379,13 @@ func _handle_collision(result: Dictionary) -> void:
 					shooter_id,
 					hit_pos,
 					knock_dir,
-					gib_force,
+					knock_mag,
 					direct_blast_radius,
 					direct_blast_severity,
 					is_head
 				)
-			if weapon_stats.knockback > 0.0:
-				hit_player.apply_knockback.rpc_id(hit_player.get_multiplayer_authority(), knock_dir * weapon_stats.knockback)
+			if knock_mag > 0.0:
+				hit_player.apply_knockback.rpc_id(hit_player.get_multiplayer_authority(), knock_dir * knock_mag)
 
 			# Send hit confirmation ONLY to the shooter's client
 			if shooter_node:
