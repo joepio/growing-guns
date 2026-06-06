@@ -309,6 +309,7 @@ func _pickup_spawner_section() -> void:
 		{"id": "plus_one", "label": "+1"},
 		{"id": "laser", "label": "Laser"},
 		{"id": "dice", "label": "Dice"},
+		{"id": "air_strike", "label": "Air Strike"},
 	]
 	for entry in kinds:
 		var btn := Button.new()
@@ -340,7 +341,7 @@ func remove_card_from_target(card_id: String) -> bool:
 	var target: Node = get_target()
 	if target == null or not is_instance_valid(target):
 		return false
-	var remaining: Array = target.weapon.applied_cards.duplicate()
+	var remaining: Array = target._owned_cards.duplicate()
 	var idx := remaining.find(card_id)
 	if idx < 0:
 		return false

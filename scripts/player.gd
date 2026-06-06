@@ -117,6 +117,7 @@ var melee_cooldown := 0.0
 var special_cooldown_max: float = 0.0
 var wall_jump_cooldown := 0.0
 var weapon: Weapon = Weapon.new()
+var _owned_cards: Array[String] = []
 var mag: int = Weapon.BASE_MAG_SIZE
 var reloading: bool = false
 var frozen: bool = false
@@ -157,6 +158,7 @@ var _chill_vfx_timer: float = 0.0
 var _chill_vfx_strength: float = 0.0
 var _chill_visual_active: bool = false
 var _phoenix_charges_left: int = 0
+var _air_strike_charges: int = 0
 
 # Last broadcast state — avoids flooding the wire when idle.
 var _last_sync_pos: Vector3 = Vector3.INF
@@ -1993,6 +1995,20 @@ const TELEPORT_RANGE := 45.0
 const TELEPORT_OFFSET := 0.8
 
 func _use_special() -> void:
+	if _air_strike_charges > 0:
+		_air_strike_charges -= 1
+		var mult: float = weapon.special_cooldown_mult
+		grenade_cooldown = AIR_STRIKE_RELOAD * mult
+		special_cooldown_max = grenade_cooldown
+		if weapon.special_reload_amount > 0:
+			mag = mini(weapon.get_mag_size(), mag + weapon.special_reload_amount)
+			if mag > 0 and reloading:
+				reloading = false
+				rifle_cooldown = 0.0
+				_stop_reload_audio()
+		cooldowns_changed.emit()
+		_call_air_strike()
+		return
 	var mult: float = weapon.special_cooldown_mult
 	match weapon.special:
 		Weapon.SPECIAL_TELEPORT:
@@ -3043,9 +3059,9 @@ func apply_round_pickup(kind: String) -> void:
 		"heart":
 			health += 50
 		"mushroom":
+			health += 100
 			weapon.body_scale *= 3.0
 			weapon.head_scale *= 3.0
-			weapon.damage_mult *= 3.0
 			weapon.bullet_color = weapon.bullet_color.lerp(Color(0.95, 0.2, 0.18), 0.55)
 		"bomb":
 			_apply_explosive_pickup_stack()
@@ -3065,6 +3081,8 @@ func apply_round_pickup(kind: String) -> void:
 			weapon.bullet_color = weapon.bullet_color.lerp(Color(0.35, 1.0, 1.0), 0.75)
 		"dice":
 			dice_detail = _apply_dice_roll()
+		"air_strike":
+			_air_strike_charges += 1
 		_:
 			return
 	mag = min(weapon.get_mag_size(), max(mag, weapon.get_mag_size()))
@@ -3143,6 +3161,7 @@ func apply_card(card_id: String) -> void:
 	if card.is_empty():
 		return
 	card.apply.call(weapon)
+	_owned_cards.append(card_id)
 	weapon.applied_cards.append(card_id)
 	# If the mag cap grew, refill up to the new cap immediately.
 	mag = min(weapon.get_mag_size(), max(mag, weapon.get_mag_size() if weapon.applied_cards.size() == 1 else mag))
@@ -3156,7 +3175,10 @@ func apply_card(card_id: String) -> void:
 @rpc("any_peer", "call_local", "reliable")
 func rebuild_weapon_from_cards() -> void:
 	# Strip round-only pickup buffs while keeping stacked cards.
-	var cards: Array = weapon.applied_cards.duplicate()
+	if _owned_cards.is_empty() and not weapon.applied_cards.is_empty():
+		for card_id in weapon.applied_cards:
+			_owned_cards.append(str(card_id))
+	var cards: Array = _owned_cards.duplicate()
 	weapon.reset()
 	for card_id in cards:
 		var card := CardLibrary.by_id(str(card_id))
@@ -3171,8 +3193,7 @@ func rebuild_weapon_from_cards() -> void:
 
 @rpc("any_peer", "call_local", "reliable")
 func apply_swapped_cards(cards: Array) -> void:
-	# Round-start loadout shuffle — server picks the permutation and broadcasts
-	# to every peer (same pattern as rebuild_weapon_from_cards / apply_card).
+	# Temporary round loadout — does not change _owned_cards.
 	var sender := multiplayer.get_remote_sender_id()
 	if sender != 1 and sender != 0:
 		return
@@ -3207,9 +3228,11 @@ func _gravity_mult() -> float:
 @rpc("any_peer", "call_local", "reliable")
 func reset_weapon() -> void:
 	weapon.reset()
+	_owned_cards.clear()
 	mag = weapon.get_mag_size()
 	_reset_weapon_combat_state()
 	_phoenix_charges_left = weapon.phoenix_revives
+	_air_strike_charges = 0
 	_poison_damage_left = 0.0
 	_poison_dps = 0.0
 	_slow_timer = 0.0

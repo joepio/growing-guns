@@ -1084,15 +1084,19 @@ func _update_hud(player: Node) -> void:
 	if is_ghost:
 		special_text = "MINE"
 	else:
-		match weapon.special:
-			Weapon.SPECIAL_CLUSTER_GRENADE:
-				special_text = "CLUSTER"
-			Weapon.SPECIAL_AIR_STRIKE:
-				special_text = "AIR STRIKE"
-			Weapon.SPECIAL_ION_CANNON:
-				special_text = "ION CANNON"
-			_:
-				special_text = weapon.special.to_upper()
+		var air_strike_charges := int(player.get("_air_strike_charges"))
+		if air_strike_charges > 0:
+			special_text = "AIR STRIKE" if air_strike_charges == 1 else "AIR STRIKE x%d" % air_strike_charges
+		else:
+			match weapon.special:
+				Weapon.SPECIAL_CLUSTER_GRENADE:
+					special_text = "CLUSTER"
+				Weapon.SPECIAL_AIR_STRIKE:
+					special_text = "AIR STRIKE"
+				Weapon.SPECIAL_ION_CANNON:
+					special_text = "ION CANNON"
+				_:
+					special_text = weapon.special.to_upper()
 		var special_cd := float(player.get("grenade_cooldown"))
 		var special_max: float = float(player.get("special_cooldown_max"))
 		if special_cd > 0.0 and special_max > 0.0:
