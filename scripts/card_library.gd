@@ -513,6 +513,15 @@ static func all() -> Array:
 				w.special = Weapon.SPECIAL_ION_CANNON,
 		},
 		{
+			"id": "cluster_grenade",
+			"name": "CLUSTER",
+			"desc": "RMB: grenade that splits into smaller blasts",
+			"rarity": "rare",
+			"color": Color(1.0, 0.52, 0.12),
+			"apply": func(w: Weapon) -> void:
+				w.special = Weapon.SPECIAL_CLUSTER_GRENADE,
+		},
+		{
 			"id": "bazooka",
 			"name": "BAZOOKA",
 			"desc": "Slow rocket-like shots with a massive explosion",

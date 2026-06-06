@@ -50,6 +50,7 @@ const MAX_THIRD_PERSON_CASINGS_PER_FRAME := 3
 const HIGH_RATE_REMOTE_CASING_BPS := 90.0
 const HIGH_RATE_REMOTE_CASING_INTERVAL_MS := 90
 const GRENADE_RELOAD := 3.0
+const CLUSTER_GRENADE_RELOAD := 4.0
 const AIR_STRIKE_RELOAD := 12.0
 const ION_CANNON_RELOAD := 14.0
 const AIR_STRIKE_AIM_RANGE := 800.0
@@ -1880,6 +1881,8 @@ func _use_special() -> void:
 			grenade_cooldown = AIR_STRIKE_RELOAD * mult
 		Weapon.SPECIAL_ION_CANNON:
 			grenade_cooldown = ION_CANNON_RELOAD * mult
+		Weapon.SPECIAL_CLUSTER_GRENADE:
+			grenade_cooldown = CLUSTER_GRENADE_RELOAD * mult
 		_:
 			grenade_cooldown = GRENADE_RELOAD * mult
 	# Snapshot for HUD progress display — _update_hud divides current cooldown
@@ -1909,6 +1912,10 @@ func _activate_special_effect() -> void:
 			_call_air_strike()
 		Weapon.SPECIAL_ION_CANNON:
 			_call_ion_cannon()
+		Weapon.SPECIAL_CLUSTER_GRENADE:
+			_fire_cluster_grenade()
+		Weapon.SPECIAL_GRENADE:
+			_fire_grenade()
 		_:
 			_fire_grenade()
 
@@ -2189,30 +2196,41 @@ func _request_special_blast(pos: Vector3, radius: float, damage: float, shooter_
 # -------------------- GRENADE --------------------
 
 func _fire_grenade() -> void:
+	_fire_grenade_internal(false)
+
+
+func _fire_cluster_grenade() -> void:
+	_fire_grenade_internal(true)
+
+
+func _fire_grenade_internal(cluster: bool) -> void:
 	var origin: Vector3 = muzzle.global_position
 	var dir: Vector3 = -camera.global_transform.basis.z
 	if multiplayer.is_server():
-		var uname := "G_%d_%d" % [player_id, Time.get_ticks_usec()]
-		_spawn_grenade.rpc(origin, dir, player_id, uname)
+		var prefix := "C" if cluster else "G"
+		var uname := "%s_%d_%d" % [prefix, player_id, Time.get_ticks_usec()]
+		_spawn_grenade.rpc(origin, dir, player_id, uname, cluster)
 	else:
-		var uname := "G_%d_%d" % [player_id, Time.get_ticks_usec()]
-		_spawn_predicted_grenade(origin, dir, player_id, uname)
-		_request_grenade.rpc_id(1, origin, dir, uname)
+		var prefix := "C" if cluster else "G"
+		var uname := "%s_%d_%d" % [prefix, player_id, Time.get_ticks_usec()]
+		_spawn_predicted_grenade(origin, dir, player_id, uname, cluster)
+		_request_grenade.rpc_id(1, origin, dir, uname, cluster)
 
 @rpc("any_peer", "reliable")
-func _request_grenade(origin: Vector3, dir: Vector3, uname: String) -> void:
+func _request_grenade(origin: Vector3, dir: Vector3, uname: String, cluster: bool = false) -> void:
 	if not multiplayer.is_server():
 		return
 	var sender := multiplayer.get_remote_sender_id()
 	if sender == 0:
 		sender = player_id
-	var expected_prefix := "G_%d_" % sender
+	var expected_prefix := ("C" if cluster else "G") + "_%d_" % sender
 	if not uname.begins_with(expected_prefix):
-		uname = "G_%d_%d" % [sender, Time.get_ticks_usec()]
-	_spawn_grenade.rpc(origin, dir, sender, uname)
+		var prefix := "C" if cluster else "G"
+		uname = "%s_%d_%d" % [prefix, sender, Time.get_ticks_usec()]
+	_spawn_grenade.rpc(origin, dir, sender, uname, cluster)
 
 @rpc("any_peer", "call_local", "reliable")
-func _spawn_grenade(origin: Vector3, dir: Vector3, shooter: int, uname: String) -> void:
+func _spawn_grenade(origin: Vector3, dir: Vector3, shooter: int, uname: String, cluster: bool = false) -> void:
 	# Only the server may authorize grenade spawns.
 	var sender := multiplayer.get_remote_sender_id()
 	if sender != 0 and sender != 1:
@@ -2224,17 +2242,19 @@ func _spawn_grenade(origin: Vector3, dir: Vector3, shooter: int, uname: String) 
 			existing.predicted_visual = false
 		return
 	SFX.grenade_launch(origin)
-	_spawn_grenade_visual(origin, dir, shooter, uname, false)
+	_spawn_grenade_visual(origin, dir, shooter, uname, false, cluster)
 
-func _spawn_predicted_grenade(origin: Vector3, dir: Vector3, shooter: int, uname: String) -> void:
+func _spawn_predicted_grenade(origin: Vector3, dir: Vector3, shooter: int, uname: String, cluster: bool = false) -> void:
 	SFX.grenade_launch(origin)
-	_spawn_grenade_visual(origin, dir, shooter, uname, true)
+	_spawn_grenade_visual(origin, dir, shooter, uname, true, cluster)
 
-func _spawn_grenade_visual(origin: Vector3, dir: Vector3, shooter: int, uname: String, predicted: bool) -> void:
+func _spawn_grenade_visual(origin: Vector3, dir: Vector3, shooter: int, uname: String, predicted: bool, cluster: bool = false) -> void:
 	var scene: PackedScene = load("res://scenes/grenade.tscn")
 	var g := scene.instantiate()
 	g.name = uname
 	g.shooter_id = shooter
+	if cluster:
+		g.is_cluster_parent = true
 	if "predicted_visual" in g:
 		g.predicted_visual = predicted
 	get_tree().current_scene.add_child(g)
