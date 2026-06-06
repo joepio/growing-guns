@@ -9,12 +9,15 @@ extends Resource
 # Default is a semi-auto mid-damage pistol with a small non-zero spread — you
 # can't just hold LMB, and long-range snap-headshots aren't free.
 const BASE_DAMAGE := 22.0
+const MIN_DAMAGE := 1.0
 const BASE_FIRE_INTERVAL := 0.22
 const BASE_MAG_SIZE := 5
 const BASE_RELOAD_TIME := 1.2
 const BASE_HEADSHOT_MULT := 2.0
 const BASE_SPREAD := 0.008                # radians — ~0.46°, noticeable at range
 const BASE_BULLET_COLOR := Color(1.0, 0.9, 0.3)
+const MAX_SHOTS_PER_TRIGGER := 16
+const MAX_PROJECTILES_PER_SECOND := 240.0
 
 # --- Special ability (RMB). Cards swap which one is equipped. ---
 const SPECIAL_GRENADE := "grenade"
@@ -85,10 +88,12 @@ const BASE_BULLET_DROP := 30.0                  # matches Player.GRAVITY so bull
 
 # --- Derived getters --- (never read the raw fields in gameplay code)
 func get_damage() -> float:
-		return BASE_DAMAGE * damage_mult
+		return maxf(MIN_DAMAGE, BASE_DAMAGE * damage_mult)
 
 func get_fire_interval() -> float:
-		return BASE_FIRE_INTERVAL / max(0.01, fire_rate_mult)
+		var raw_interval: float = BASE_FIRE_INTERVAL / maxf(0.01, fire_rate_mult)
+		var projectile_budget_interval: float = float(get_shots_per_trigger()) / MAX_PROJECTILES_PER_SECOND
+		return maxf(raw_interval, projectile_budget_interval)
 
 func get_mag_size() -> int:
 		return max(1, BASE_MAG_SIZE + mag_size_bonus)
@@ -100,7 +105,7 @@ func get_headshot_mult() -> float:
 		return BASE_HEADSHOT_MULT * headshot_mult
 
 func get_shots_per_trigger() -> int:
-		return 1 + extra_projectiles
+		return mini(MAX_SHOTS_PER_TRIGGER, 1 + extra_projectiles)
 
 func get_bullet_speed() -> float:
 		return 165.0 * bullet_speed_mult

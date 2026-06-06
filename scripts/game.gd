@@ -82,7 +82,7 @@ var pending_picker_id: int = 0
 var pending_pick_cards_by_player: Dictionary = {}
 # Server-only countdown until each pending pick auto-resolves (player_id ->
 # seconds remaining). Beeps fire at the integer crossings of the last 3s.
-const CARD_PICK_TIMEOUT := 7.0
+const CARD_PICK_TIMEOUT := 10.0
 const ROUND_WIN_TO_CARD_PICK_DELAY := 0.35
 var pending_pick_deadlines: Dictionary = {}
 var completed_picks: Dictionary = {}
@@ -1573,17 +1573,15 @@ func _finalize_card_pick(player_id_to_apply: int, card_id: String) -> void:
 	completed_picks[player_id_to_apply] = true
 	pending_pick_cards_by_player.erase(player_id_to_apply)
 	pending_pick_deadlines.erase(player_id_to_apply)
+	_maybe_finish_card_picks()
 	# Bots have no HUD; routing UI RPCs to a bot's peer hits the server peer
 	# (1), which would clobber the host human's overlay. Skip them entirely.
 	if not _is_bot_id(player_id_to_apply):
 		var peer := _peer_for_player(player_id_to_apply)
 		if peer != 0:
 			_hide_card_pick_for.rpc_id(peer, player_id_to_apply)
-			if state == State.PLAYING:
-				_show_spectating.rpc_id(peer, "SPECTATING…")
-			elif state == State.PICKING_CARD:
+			if state == State.PICKING_CARD:
 				_show_spectating.rpc_id(peer, _waiting_for_pickers_spectator_label())
-	_maybe_finish_card_picks()
 
 func _warmup_round_audio() -> void:
 	# Collect every live player's current Weapon (mutated by whatever cards

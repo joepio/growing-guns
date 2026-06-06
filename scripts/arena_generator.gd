@@ -829,6 +829,11 @@ func _apply_all_floor_lava_damage(delta: float) -> void:
 			continue
 		var pid := int(p.get("player_id")) if p.get("player_id") != null else p.get_instance_id()
 		var p3 := p as Node3D
+		if p3.global_position.y < lava_y:
+			_lava_damage_accum_by_player.erase(pid)
+			if p.has_method("kill_environmental"):
+				p.kill_environmental("lava_fall")
+			continue
 		if p3.global_position.y > lava_y + LAVA_FLOOR_DAMAGE_Y:
 			_lava_damage_accum_by_player.erase(pid)
 			continue
@@ -865,6 +870,11 @@ func _apply_lava_pool_damage(delta: float) -> void:
 			continue
 		var pid := int(p.get("player_id")) if p.get("player_id") != null else p.get_instance_id()
 		var p3 := p as Node3D
+		if p3.global_position.y < lava_y:
+			_lava_damage_accum_by_player.erase(pid)
+			if p.has_method("kill_environmental"):
+				p.kill_environmental("lava_fall")
+			continue
 		if p3.global_position.y > lava_y + 1.2:
 			_lava_damage_accum_by_player.erase(pid)
 			continue

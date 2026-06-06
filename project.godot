@@ -28,6 +28,10 @@ NetworkManager="*res://scripts/network_manager.gd"
 SFX="*res://scripts/sfx.gd"
 ProceduralMusic="*res://scripts/procedural_music.gd"
 
+[debug]
+
+file_logging/enable_file_logging=true
+
 [display]
 
 window/size/viewport_width=1281
@@ -35,11 +39,6 @@ window/size/viewport_height=720
 window/size/mode=3
 window/stretch/mode="canvas_items"
 window/vsync/vsync_mode=0
-
-[debug]
-
-file_logging/enable_file_logging=true
-file_logging/enable_file_logging.pc=true
 
 [editor_plugins]
 

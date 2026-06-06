@@ -42,6 +42,9 @@ const RIFLE_RECOIL_PITCH := 0.018         # radians added to camera pitch per sh
 const RIFLE_RECOIL_KICK := 0.08           # muzzle pushed back (meters) per shot
 const RIFLE_RECOIL_YAW_JITTER := 0.004    # tiny yaw nudge per shot
 const RIFLE_SHAKE := 0.015                # camera shake impulse
+const MAX_FIRST_PERSON_CASINGS_PER_TRIGGER := 4
+const MAX_SHOT_FX_PER_FRAME := 1
+const MAX_THIRD_PERSON_CASINGS_PER_FRAME := 3
 const GRENADE_RELOAD := 3.0
 const GRENADE_LAUNCH_SPEED := 22.0
 const GRENADE_LAUNCH_LIFT := 4.0
@@ -151,6 +154,7 @@ var _gun_pull_back: Vector3 = Vector3.ZERO
 # accurate on the move; only sloppy guns walk wide. Kept gentle on purpose;
 # the real spray comes from the recoil bloom below.
 const MOVEMENT_SPREAD_MULT := 1.0        # full walk speed → ×(1 + 1) = ×2 base spread
+const MAX_EFFECTIVE_SPREAD := 0.14       # ~8°; upper cap for cards + movement + recoil bloom
 
 # Shot-to-shot "shaking hand" bloom: each shot adds weapon.recoil_per_shot, and
 # it eases back to zero (RECOIL_DECAY_RATE). Holding the trigger / full-auto
@@ -164,7 +168,8 @@ var _recoil_spread: float = 0.0
 func get_effective_spread() -> float:
 	var horiz_speed: float = Vector2(velocity.x, velocity.z).length()
 	var move_factor: float = clampf(horiz_speed / WALK_SPEED, 0.0, 1.0)
-	return weapon.spread * (1.0 + move_factor * MOVEMENT_SPREAD_MULT) + _recoil_spread
+	var raw_spread := weapon.spread * (1.0 + move_factor * MOVEMENT_SPREAD_MULT) + _recoil_spread
+	return minf(raw_spread, MAX_EFFECTIVE_SPREAD)
 var _head_hitbox_rest_y: float = 0.86
 var _torso_hitbox_rest_y: float = 0.12
 var _legs_hitbox_rest_y: float = -0.55
@@ -181,6 +186,14 @@ var _view_punch_rot: Vector3 = Vector3.ZERO
 var _view_punch_pos: Vector3 = Vector3.ZERO
 var _melee_tween: Tween = null
 var _ragdoll_head: RigidBody3D = null
+var _suppress_next_death_sound := false
+var _suppress_next_death_ragdoll := false
+var _rocket_descent_player: Node = null
+var _last_lava_contact_sizzle_ms: int = -10000
+var _shot_fx_frame: int = -1
+var _shot_fx_count: int = 0
+var _third_person_casing_frame: int = -1
+var _third_person_casing_count: int = 0
 var _body_materials: Dictionary = {}
 var _blob_rig_rest_pos: Vector3 = Vector3.ZERO
 var _blob_core_rest_scale: Vector3 = Vector3.ONE
@@ -211,6 +224,8 @@ const BOT_EDGE_PROBE_DIST := 1.8
 const BOT_GAP_JUMP_MIN_LANDING := 4.5
 const BOT_GAP_JUMP_MAX_LANDING := 12.0
 const EXPLOSION_EDGE_FALLOFF := 0.2
+const EXPLOSION_PUSH := 9.0
+const EXPLOSION_UPWARD_PUSH := 1.6
 
 var _bot_target: Node3D = null
 var _bot_shoot_cooldown: float = 0.0
@@ -674,6 +689,7 @@ func _physics_process(delta: float) -> void:
 			)
 		if is_on_floor():
 			launching = false
+			_rocket_descent_player = null
 			if not is_bot:
 				SFX.landing(absf(pre_impact_y), global_position)
 		elif global_position.y < -30.0:
@@ -962,11 +978,37 @@ func handle_environmental_death(_reason: String = "void") -> void:
 	_apply_damage(lethal_amount, player_id)
 
 
+func kill_environmental(_reason: String = "hazard") -> void:
+	if not is_multiplayer_authority():
+		return
+	if ghost_mode or god_mode or health <= 0:
+		return
+	launching = false
+	if _reason == "lava_fall":
+		_stop_rocket_descent_audio()
+		_suppress_next_death_sound = true
+		_suppress_next_death_ragdoll = true
+		_play_lava_sizzle.rpc(global_position, true)
+	elif _reason == "lava":
+		_play_lava_sizzle.rpc(global_position, false)
+	var saved_phoenix_charges := _phoenix_charges_left
+	_phoenix_charges_left = 0
+	var lethal_amount: int = max(health, MAX_HEALTH + weapon.max_hp_bonus)
+	_apply_damage(lethal_amount, player_id)
+	if health > 0:
+		_phoenix_charges_left = saved_phoenix_charges
+
+
 func apply_environmental_damage(amount: int, _reason: String = "hazard") -> void:
 	if not is_multiplayer_authority():
 		return
 	if ghost_mode or god_mode or health <= 0 or frozen or launching:
 		return
+	if _reason == "lava":
+		var now := Time.get_ticks_msec()
+		if now - _last_lava_contact_sizzle_ms > 900:
+			_last_lava_contact_sizzle_ms = now
+			_play_lava_sizzle.rpc(global_position, false)
 	_apply_damage(max(0, amount), 0)
 
 func _move_vector() -> Vector2:
@@ -1082,7 +1124,7 @@ func _fire_rifle() -> void:
 	# Snapshot spread BEFORE this shot's bloom so the first shot is still crisp,
 	# then add the per-shot recoil so each successive held shot walks wider.
 	var spread: float = get_effective_spread()
-	_recoil_spread += weapon.recoil_per_shot
+	_recoil_spread = minf(_recoil_spread + weapon.recoil_per_shot, MAX_EFFECTIVE_SPREAD)
 	# Multi-shot: fire N rays with random yaw+pitch spread (MULTI-SHOT card).
 	var shots: int = weapon.get_shots_per_trigger()
 	var cam_right: Vector3 = camera.global_transform.basis.x
@@ -1108,10 +1150,10 @@ func _fire_rifle() -> void:
 	if _procedural_gun and _procedural_gun.has_method("cycle_bolt"):
 		_procedural_gun.cycle_bolt(weapon.get_fire_interval())
 	# Eject one brass casing per bullet — multi-barrel / multi-shot weapons
-	# spit out a small burst from the same ejection port. The per-casing
-	# velocity jitter inside eject_casing() keeps them from clumping.
+	# spit out a small capped burst from the same ejection port. The cap keeps
+	# stacked miniguns from turning every projectile into a physics body.
 	if _procedural_gun and _procedural_gun.has_method("eject_casing"):
-		for _i in shots:
+		for _i in mini(shots, MAX_FIRST_PERSON_CASINGS_PER_TRIGGER):
 			_procedural_gun.eject_casing()
 
 @rpc("any_peer", "call_local", "reliable")
@@ -1132,7 +1174,11 @@ func _rifle_fired(
 	# `is_self` = the local human is the shooter. Their copy plays a 2D
 	# variant with its own volume curve (no 3D bus reverb / distance shaping).
 	var is_self: bool = shooter_id == multiplayer.get_unique_id()
-	SFX.shot(w, origin, is_self)
+	var spawn_shot_fx := true
+	if shooter_node and shooter_node.has_method("_consume_shot_fx_budget"):
+		spawn_shot_fx = bool(shooter_node.call("_consume_shot_fx_budget"))
+	if spawn_shot_fx:
+		SFX.shot(w, origin, is_self)
 
 	# Bench A/B: skip bullet spawning entirely (one static bool branch out
 	# of bench mode). See scripts/bench_flags.gd.
@@ -1151,9 +1197,20 @@ func _rifle_fired(
 	var visual_anchor := muzzle if local_first_person else _third_person_gun
 	if visual_anchor == null:
 		visual_anchor = muzzle
-	_spawn_muzzle_flash(w.bullet_color, w.get_bullet_scale(), visual_anchor, local_first_person)
-	if not local_first_person:
+	if spawn_shot_fx:
+		_spawn_muzzle_flash(w.bullet_color, w.get_bullet_scale(), visual_anchor, local_first_person)
+	if spawn_shot_fx and not local_first_person:
 		_spawn_third_person_casing(w)
+
+func _consume_shot_fx_budget() -> bool:
+	var frame := Engine.get_physics_frames()
+	if _shot_fx_frame != frame:
+		_shot_fx_frame = frame
+		_shot_fx_count = 0
+	if _shot_fx_count >= MAX_SHOT_FX_PER_FRAME:
+		return false
+	_shot_fx_count += 1
+	return true
 
 func _apply_bullet_splash(pos: Vector3, radius: float, damage: float, shooter_id: int) -> void:
 	var shooter := get_parent().get_node_or_null(str(shooter_id))
@@ -1184,18 +1241,15 @@ func _apply_bullet_splash(pos: Vector3, radius: float, damage: float, shooter_id
 		if p.player_id == shooter_id:
 			dmg = int(dmg * 0.5)
 
-		# Explosion Knockback
-		var kb_mult: float = 24.0 # Doubled base for explosions
-		var weapon_kb: float = shooter.weapon.knockback if shooter and shooter.get("weapon") != null else 1.0
-
 		var dir: Vector3 = (p.global_position - pos)
 		if dir.length_squared() > 0.001:
 			dir = dir.normalized()
 		else:
 			dir = Vector3.UP
 
-		# Violent outward push + upward lift, using linear falloff for physics feel
-		var impulse: Vector3 = (dir * kb_mult * weapon_kb * falloff) + (Vector3.UP * kb_mult * 0.8 * falloff)
+		# Explosions use their own radial push. Weapon knockback is projectile
+		# direction force and should not multiply area blasts.
+		var impulse: Vector3 = (dir * EXPLOSION_PUSH + Vector3.UP * EXPLOSION_UPWARD_PUSH) * falloff
 		if dmg > 0:
 			p.take_damage.rpc_id(
 				p.get_multiplayer_authority(),
@@ -1387,11 +1441,18 @@ func _spawn_muzzle_flash(
 func _spawn_third_person_casing(w: Weapon) -> void:
 	if BenchFlags.active and BenchFlags.no_casings:
 		return
+	var frame := Engine.get_physics_frames()
+	if _third_person_casing_frame != frame:
+		_third_person_casing_frame = frame
+		_third_person_casing_count = 0
+	if _third_person_casing_count >= MAX_THIRD_PERSON_CASINGS_PER_FRAME:
+		return
 	if _third_person_gun == null:
 		return
 	var scene := get_tree().current_scene
 	if scene == null:
 		return
+	_third_person_casing_count += 1
 	BenchFlags.inc("casings_spawned")
 	var rb := RigidBody3D.new()
 	rb.mass = 0.018
@@ -1500,6 +1561,23 @@ func _ragdoll(
 	is_head: bool = false,
 ) -> void:
 	Violence.do_ragdoll(self, push_dir, force_origin, gib_force, blast_radius, blast_severity, is_head)
+
+
+@rpc("any_peer", "call_local", "reliable")
+func _burn_death() -> void:
+	_ragdoll_head = null
+	_set_dead_visuals(true)
+	if body_model:
+		body_model.visible = true
+	if head_blob:
+		head_blob.rotation = Vector3.ZERO
+	if camera:
+		camera.rotation.z = 0.0
+	var scene := get_tree().current_scene
+	if scene and scene.has_method("show_death_effect_for"):
+		scene.show_death_effect_for(player_id, true)
+	elif scene and scene.has_method("show_death_effect"):
+		scene.show_death_effect(true)
 
 # Hide the first-person gun mesh and turn off the hit areas so a corpse
 # can't be shot or seen with a floating gun. Wrapper kept because the
@@ -2089,7 +2167,12 @@ func _apply_damage(
 	if health > 0:
 		_play_hurt_sound.rpc(global_position)
 	else:
-		_play_death_sound.rpc(global_position)
+		var suppress_death_sound := _suppress_next_death_sound
+		var suppress_death_ragdoll := _suppress_next_death_ragdoll
+		_suppress_next_death_sound = false
+		_suppress_next_death_ragdoll = false
+		if not suppress_death_sound:
+			_play_death_sound.rpc(global_position)
 		if is_bot:
 			_bot_target = null
 			_bot_shoot_cooldown = 999.0
@@ -2123,7 +2206,10 @@ func _apply_damage(
 		var kb_scale := clampf((ctx_force if ctx_force > 0.0 else push.length()) / Weapon.BASE_KNOCKBACK, 1.0, kb_scale_max)
 		kb_scale = clampf(kb_scale * damage_factor, 0.1, kb_scale_max)
 		push = push.normalized() * kb_scale + Vector3.UP * (upward_bias + upward_scale * kb_scale)
-		_ragdoll.rpc(push, force_origin, ctx_force, blast_radius, blast_severity, is_head)
+		if suppress_death_ragdoll:
+			_burn_death.rpc()
+		else:
+			_ragdoll.rpc(push, force_origin, ctx_force, blast_radius, blast_severity, is_head)
 		died.emit(from_id)
 		_report_death.rpc_id(1, from_id)
 
@@ -2143,6 +2229,11 @@ func _play_hurt_sound(pos: Vector3) -> void:
 @rpc("any_peer", "call_local", "unreliable")
 func _play_death_sound(pos: Vector3) -> void:
 	SFX.death(pos, is_multiplayer_authority() and not is_bot)
+
+
+@rpc("any_peer", "call_local", "unreliable")
+func _play_lava_sizzle(pos: Vector3, fall_death: bool = false) -> void:
+	SFX.lava_sizzle(pos, fall_death)
 
 @rpc("any_peer", "call_local", "reliable")
 func apply_knockback(impulse: Vector3) -> void:
@@ -2315,7 +2406,13 @@ func set_launching(v: bool, downward_vel: float = 0.0) -> void:
 			# Sustained rumble during the descent. The launching path skips
 			# the normal shake-decay step, so this stays high until landing.
 			shake_amt = 0.06
-			SFX.rocket_descent()
+			_rocket_descent_player = SFX.rocket_descent()
+
+
+func _stop_rocket_descent_audio() -> void:
+	if _rocket_descent_player and is_instance_valid(_rocket_descent_player):
+		_rocket_descent_player.queue_free()
+	_rocket_descent_player = null
 
 @rpc("any_peer", "call_local", "reliable")
 func heal(amount: int) -> void:
@@ -2734,14 +2831,18 @@ func _bot_shoot() -> bool:
 	if randf() < BOT_MISS_CHANCE:
 		spread *= randf_range(2.5, 5.0)
 
-	var yaw := randf_range(-spread, spread)
-	var pitch := randf_range(-spread, spread)
-	dir = dir.rotated(Vector3.UP, yaw)
+	var shots := weapon.get_shots_per_trigger()
 	var right := Vector3.UP.cross(dir)
-	if right.length_squared() > 0.0001:
-		dir = dir.rotated(right.normalized(), pitch)
-
-	_rifle_fired.rpc(from, dir.normalized(), player_id)
+	if right.length_squared() <= 0.0001:
+		right = Vector3.RIGHT
+	else:
+		right = right.normalized()
+	for _i in shots:
+		var shot_dir := dir
+		var yaw := randf_range(-spread, spread)
+		var pitch := randf_range(-spread, spread)
+		shot_dir = shot_dir.rotated(Vector3.UP, yaw).rotated(right, pitch)
+		_rifle_fired.rpc(from, shot_dir.normalized(), player_id)
 	if mag <= 0:
 		_start_reload()
 	return true

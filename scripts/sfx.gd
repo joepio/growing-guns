@@ -65,6 +65,7 @@ var hurt_self_db: float = -28.0
 var hurt_world_db: float = -20.5
 var death_self_db: float = -24.0
 var death_world_db: float = -18.5
+var lava_sizzle_db: float = -18.0
 var hit_received_db: float = -12.0
 # Round-start rocket spawn — heavy rumble that ramps in over the descent.
 # 2D (UI-style) so each player hears their own "rocket cabin" without
@@ -807,11 +808,18 @@ func death(at: Vector3 = NO_POS, is_self: bool = false) -> void:
 		_play_stream(_death_sounds.pick_random(), death_self_db, NO_POS, 1.0, "death_self", -1.0, false, 110.0)
 	else:
 		_play_stream(_death_sounds.pick_random(), death_world_db + randf_range(-1.5, 1.5), at, 1.0, "death", -1.0, false, 85.0)
-func rocket_descent() -> void:
+func lava_sizzle(at: Vector3 = NO_POS, fall_death: bool = false) -> void:
+	var variant := randi() % 3
+	var mode := "fall" if fall_death else "contact"
+	var key := "lava_sizzle:%s:%d" % [mode, variant]
+	var wav := _cached_wav(key, Callable(self, "_synth_lava_sizzle").bind(variant, fall_death))
+	var db := lava_sizzle_db if fall_death else lava_sizzle_db - 5.0
+	_play_stream(wav, db + randf_range(-1.0, 1.0), at, randf_range(0.96, 1.04), "lava_sizzle", 18.0, false, 105.0, false)
+func rocket_descent() -> Node:
 	# Heavy, soft-distorted rumble for the round-start rocket spawn. 2D so
 	# the local player hears their own "cabin" loud regardless of where the
 	# fall is happening in world space.
-	_play(_cached_samples("rocket_descent", Callable(self, "_synth_rocket_descent")), rocket_descent_db, NO_POS, "rocket_descent", -1.0, false, 130.0)
+	return _play(_cached_samples("rocket_descent", Callable(self, "_synth_rocket_descent")), rocket_descent_db, NO_POS, "rocket_descent", -1.0, false, 130.0)
 
 
 func mine_plant(at: Vector3 = NO_POS) -> void:
@@ -1539,6 +1547,42 @@ func _synth_dash() -> PackedVector2Array:
 		var s := lp * env * 0.18
 		out[i] = Vector2(s, s)
 	return out
+
+
+func _synth_lava_sizzle(variant: int, fall_death: bool = false) -> PackedVector2Array:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash([variant, "lava_sizzle", fall_death])
+	var dur: float = lerpf(2.0, 2.45, rng.randf()) if fall_death else lerpf(0.42, 0.58, rng.randf())
+	var n: int = int(dur * MIX_RATE)
+	var out := PackedVector2Array()
+	out.resize(n)
+	var hiss_lp: float = 0.0
+	var low_lp: float = 0.0
+	var bubble_phase: float = rng.randf() * TAU
+	for i in range(n):
+		var t: float = float(i) / MIX_RATE
+		var u: float = t / dur
+		var attack_time := 0.42 if fall_death else 0.075
+		var attack: float = smoothstep(0.0, attack_time, t)
+		var fade_start := 0.38
+		var fade_u := clampf((u - fade_start) / (1.0 - fade_start), 0.0, 1.0)
+		var fall_tail := pow(cos(fade_u * PI * 0.5), 1.65)
+		var fall_body := smoothstep(0.0, 0.18, u) * fall_tail
+		var body: float = fall_body if fall_death else exp(-u * 4.2)
+		var env: float = attack * body
+		var noise: float = rng.randf_range(-1.0, 1.0)
+		hiss_lp = lerpf(hiss_lp, noise, 0.08)
+		var hiss: float = (noise - hiss_lp) * env * (0.24 if fall_death else 0.26)
+		var low_noise: float = rng.randf_range(-1.0, 1.0)
+		low_lp = lerpf(low_lp, low_noise, 0.018)
+		bubble_phase += TAU * lerpf(22.0, 38.0, rng.randf()) / MIX_RATE
+		var bubble_env: float = body * (0.55 + 0.45 * sin(bubble_phase))
+		var bubble: float = tanh(low_lp * 4.0) * bubble_env * 0.18
+		var s: float = tanh((hiss + bubble) * 1.35)
+		out[i] = Vector2(s, s)
+	return out
+
+
 func _synth_card_flip(variant: int) -> PackedVector2Array:
 	# Wide-band noise wash (the card travelling) then a short, brighter
 	# highpass-noise click (the card landing flat). Both layers are pure
