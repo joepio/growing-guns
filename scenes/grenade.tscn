@@ -39,6 +39,9 @@ properties/5/replication_mode = 0
 properties/6/path = NodePath(".:is_fragment")
 properties/6/spawn = true
 properties/6/replication_mode = 0
+properties/7/path = NodePath(".:is_dash_bomb")
+properties/7/spawn = true
+properties/7/replication_mode = 0
 
 [node name="Grenade" type="RigidBody3D" groups=["grenades"]]
 collision_layer = 4

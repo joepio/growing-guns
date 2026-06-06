@@ -240,6 +240,15 @@ static func all() -> Array:
 						w.recoil_per_shot *= 0.65
 						w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.72, 0.12), 0.65),
 		},		{
+			"id": "ninja",
+			"name": "NINJA",
+			"desc": "Shift ends with a quick slash",
+			"color": Color(0.35, 0.38, 0.48),
+			"apply": func(w: Weapon) -> void:
+				w.dash_end_melee = true
+				w.bullet_color = w.bullet_color.lerp(Color(0.45, 0.48, 0.62), 0.25),
+		},
+		{
 			"id": "homing",
 			"name": "HOMING",
 			"desc": "Bullets lazily curve toward enemies",
@@ -422,6 +431,14 @@ static func all() -> Array:
 				w.bullet_color = w.bullet_color.lerp(Color(1.0, 0.45, 0.08), 0.35),
 		},
 		{
+			"id": "dodge",
+			"name": "DODGE",
+			"desc": "Shift grants brief invulnerability",
+			"color": Color(0.72, 0.92, 1.0),
+			"apply": func(w: Weapon) -> void:
+				w.dash_iframes = true,
+		},
+		{
 			"id": "drill_rounds",
 			"name": "DRILL ROUNDS",
 			"desc": "Bullets bore through walls before stopping",
@@ -520,6 +537,14 @@ static func all() -> Array:
 			"color": Color(1.0, 0.52, 0.12),
 			"apply": func(w: Weapon) -> void:
 				w.special = Weapon.SPECIAL_CLUSTER_GRENADE,
+		},
+		{
+			"id": "backblast",
+			"name": "BACKBLAST",
+			"desc": "Shift leaves a bomb where you dashed from",
+			"color": Color(1.0, 0.42, 0.12),
+			"apply": func(w: Weapon) -> void:
+				w.dash_spawn_bomb = true,
 		},
 		{
 			"id": "bazooka",

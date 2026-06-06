@@ -89,6 +89,11 @@ const BASE_BULLET_DROP := 30.0                  # matches Player.GRAVITY so bull
 @export var special_cooldown_refund_on_hit: float = 0.0
 @export var teleport_blast_radius: float = 0.0
 
+# --- Dash (Shift) modifiers ---
+@export var dash_iframes: bool = false
+@export var dash_end_melee: bool = false
+@export var dash_spawn_bomb: bool = false
+
 # --- Tracking ---
 @export var applied_cards: Array[String] = []
 
@@ -184,4 +189,7 @@ func reset() -> void:
 		special_reload_amount = 0
 		special_cooldown_refund_on_hit = 0.0
 		teleport_blast_radius = 0.0
+		dash_iframes = false
+		dash_end_melee = false
+		dash_spawn_bomb = false
 		applied_cards.clear()

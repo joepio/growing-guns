@@ -21,6 +21,8 @@ const DASH_SPEED := 28.0
 const DASH_TIME := 0.18
 const MAX_DASH_CHARGES := 2
 const DASH_RECHARGE_TIME := 3.0
+const NINJA_MELEE_DAMAGE_MULT := 0.42
+const NINJA_MELEE_RANGE_MULT := 0.62
 const GRAVITY := 30.0
 const MOUSE_SENS := 0.0022
 const CONTROLLER_LOOK_SENS := 4.2
@@ -105,6 +107,9 @@ var dash_timer := 0.0
 var dash_dir := Vector3.ZERO
 var dash_charges: int = MAX_DASH_CHARGES
 var dash_recharge_timer := 0.0
+var _dash_iframe_timer := 0.0
+var _dash_iframe_visual_timer := 0.0
+var _dash_iframe_visual_active := false
 var rifle_cooldown := 0.0
 var grenade_cooldown := 0.0
 var melee_cooldown := 0.0
@@ -502,6 +507,11 @@ func _process(delta: float) -> void:
 		_hit_face_timer = maxf(0.0, _hit_face_timer - delta)
 		if _hit_face_timer <= 0.0:
 			_set_hit_face_state(false)
+	if _dash_iframe_visual_timer > 0.0:
+		_dash_iframe_visual_timer = maxf(0.0, _dash_iframe_visual_timer - delta)
+		_apply_dash_iframe_visual()
+	elif _dash_iframe_visual_active:
+		_clear_dash_iframe_visual()
 	if is_bot:
 		return
 	# Re-assert camera state every frame until authority is established.
@@ -824,6 +834,96 @@ func _clear_chill_visual() -> void:
 	if _chill_visual_active:
 		_apply_chill_visual()
 
+
+func _apply_dash_iframe_visual() -> void:
+	if body_model == null or ghost_mode or _phoenix_ascending:
+		return
+	_dash_iframe_visual_active = true
+	var alpha := 0.38 + 0.12 * sin(Time.get_ticks_msec() * 0.04)
+	for mesh in _body_meshes():
+		var mat := StandardMaterial3D.new()
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.albedo_color = Color(0.92, 0.98, 1.0, alpha)
+		mat.emission_enabled = true
+		mat.emission = Color(0.75, 0.92, 1.0)
+		mat.emission_energy_multiplier = 0.35
+		mat.metallic = 0.0
+		mat.roughness = 0.85
+		mesh.material_override = mat
+
+
+func _clear_dash_iframe_visual() -> void:
+	if not _dash_iframe_visual_active:
+		return
+	_dash_iframe_visual_active = false
+	if ghost_mode or _phoenix_ascending:
+		return
+	for mesh in _body_meshes():
+		mesh.material_override = _body_materials.get(mesh, mesh.material_override)
+
+
+func _start_dash(input_dir: Vector3) -> void:
+	if dash_charges <= 0:
+		return
+	if input_dir.length_squared() < 0.0001:
+		input_dir = -global_transform.basis.z
+	dash_dir = input_dir.normalized()
+	dash_timer = DASH_TIME
+	dash_charges -= 1
+	if not ghost_mode:
+		SFX.dash(global_position)
+	if weapon.dash_iframes:
+		_dash_iframe_timer = DASH_TIME
+		_begin_dash_iframe_vfx.rpc()
+	if weapon.dash_spawn_bomb:
+		var bomb_pos := global_position + Vector3.UP * 0.08
+		if multiplayer.is_server():
+			_spawn_dash_bomb.rpc(bomb_pos, player_id)
+		elif is_multiplayer_authority():
+			_request_dash_bomb.rpc_id(1, bomb_pos)
+
+
+func _on_dash_ended() -> void:
+	if weapon.dash_end_melee and not ghost_mode and health > 0:
+		var origin := global_position + Vector3.UP * 0.9
+		var dir := dash_dir if dash_dir.length_squared() > 0.001 else -global_transform.basis.z
+		_melee_swung.rpc(origin, dir.normalized(), player_id, NINJA_MELEE_DAMAGE_MULT, NINJA_MELEE_RANGE_MULT)
+
+
+@rpc("any_peer", "call_local", "reliable")
+func _begin_dash_iframe_vfx() -> void:
+	_dash_iframe_visual_timer = DASH_TIME
+
+
+@rpc("any_peer", "reliable")
+func _request_dash_bomb(pos: Vector3) -> void:
+	if not multiplayer.is_server():
+		return
+	var sender := multiplayer.get_remote_sender_id()
+	if sender == 0:
+		sender = player_id
+	_spawn_dash_bomb.rpc(pos, sender)
+
+
+@rpc("any_peer", "call_local", "reliable")
+func _spawn_dash_bomb(pos: Vector3, shooter: int) -> void:
+	var sender := multiplayer.get_remote_sender_id()
+	if sender != 0 and sender != 1:
+		return
+	var bomb_id: int = hash([pos.x, pos.y, pos.z, shooter]) & 0x7fffffff
+	var uname := "DB_%d_%x" % [shooter, bomb_id]
+	var parent := get_tree().current_scene
+	if parent == null or parent.get_node_or_null(uname):
+		return
+	var scene: PackedScene = load("res://scenes/grenade.tscn")
+	var g := scene.instantiate()
+	g.name = uname
+	g.shooter_id = shooter
+	g.is_dash_bomb = true
+	parent.add_child(g)
+	g.global_position = pos
+
 func _set_hit_face_state(active: bool) -> void:
 	Violence.set_hit_face_state(self, active)
 
@@ -1064,13 +1164,7 @@ func _physics_process(delta: float) -> void:
 
 	# --- Dash ---
 	if dash_pressed and dash_charges > 0:
-		var input_dir := _input_vector()
-		if input_dir == Vector3.ZERO:
-			input_dir = -global_transform.basis.z
-		dash_dir = input_dir.normalized()
-		dash_timer = DASH_TIME
-		dash_charges -= 1
-		if not ghost_mode: SFX.dash(global_position)
+		_start_dash(_input_vector())
 
 	# --- Movement ---
 	# Camera roll keys off lateral velocity so tilt fades when the player is
@@ -1100,6 +1194,8 @@ func _physics_process(delta: float) -> void:
 		# Blend between dash velocity and walk velocity.
 		target_vel = target_vel.lerp(dash_vel, dash_factor)
 		accel = 2000.0 # Snap to dash trajectory
+		if dash_timer <= 0.0:
+			_on_dash_ended()
 	elif is_on_floor():
 		# If we're moving faster than walk speed (e.g. from explosion), use low friction
 		# instead of high acceleration to stop us.
@@ -1553,6 +1649,8 @@ func _sync_chill_visual(slow_mult: float, timer: float) -> void:
 	_apply_chill_visual()
 
 func _tick_status_effects(delta: float) -> void:
+	if _dash_iframe_timer > 0.0:
+		_dash_iframe_timer = maxf(0.0, _dash_iframe_timer - delta)
 	if _slow_timer > 0.0:
 		_slow_timer = maxf(0.0, _slow_timer - delta)
 		if _slow_timer <= 0.0:
@@ -2334,14 +2432,14 @@ func _swing_melee() -> void:
 	_melee_swung.rpc(origin, dir, player_id)
 
 @rpc("any_peer", "call_local", "reliable")
-func _melee_swung(origin: Vector3, dir: Vector3, attacker_id: int) -> void:
+func _melee_swung(origin: Vector3, dir: Vector3, attacker_id: int, damage_mult: float = 1.0, range_mult: float = 1.0) -> void:
 	var shooter_node := get_parent().get_node_or_null(str(attacker_id))
 	var w: Weapon = shooter_node.weapon if shooter_node else Weapon.new()
 
-	SFX.melee(origin, w.get_melee_damage())
+	SFX.melee(origin, int(float(w.get_melee_damage()) * damage_mult))
 	# Gun swing + blade trail play on every peer.
-	_animate_gun_slash(w.melee_scale)
-	_spawn_slice_trail(origin, dir, w.melee_scale)
+	_animate_gun_slash(w.melee_scale * range_mult)
+	_spawn_slice_trail(origin, dir, w.melee_scale * range_mult)
 	# Camera shake only for the attacker.
 	if is_multiplayer_authority():
 		shake_amt = max(shake_amt, 0.035 * w.melee_scale)
@@ -2350,8 +2448,8 @@ func _melee_swung(origin: Vector3, dir: Vector3, attacker_id: int) -> void:
 		return
 	var space := get_world_3d().direct_space_state
 	var dir_n: Vector3 = dir.normalized()
-	var swing_range: float = MELEE_RANGE * w.melee_scale
-	var swing_radius: float = 1.2 * w.melee_scale
+	var swing_range: float = MELEE_RANGE * w.melee_scale * range_mult
+	var swing_radius: float = 1.2 * w.melee_scale * range_mult
 
 	# Forward-pointing capsule (width = swing_radius, length = swing_range).
 	# Capsule is wider than a ray so close-range hugs land, and long enough
@@ -2410,7 +2508,14 @@ func _melee_swung(origin: Vector3, dir: Vector3, attacker_id: int) -> void:
 		var hit_pos: Vector3 = target.global_position + Vector3.UP * 0.6
 		var v_fwd: Vector3 = -target.global_transform.basis.z
 		var backstab: bool = v_fwd.dot(dir_n) > 0.4
-		var dmg: int = MELEE_BACKSTAB if backstab else w.get_melee_damage()
+		var dmg: int
+		if backstab and damage_mult >= 0.99:
+			dmg = MELEE_BACKSTAB
+		else:
+			var base := float(w.get_melee_damage()) * damage_mult
+			if backstab:
+				base *= 2.0
+			dmg = int(base)
 		var melee_force: float = w.knockback if w.knockback > 0.0 else w.get_melee_damage() * 0.06
 		target.take_damage.rpc_id(
 			target.get_multiplayer_authority(),
@@ -2529,6 +2634,8 @@ func _apply_damage(
 	is_head: bool = false,
 ) -> void:
 	if ghost_mode or frozen or health <= 0 or god_mode or _phoenix_ascending:
+		return
+	if _dash_iframe_timer > 0.0:
 		return
 	health = max(0, health - amount)
 	var game_scene := get_tree().current_scene
@@ -2696,6 +2803,9 @@ func server_respawn(pos: Vector3, yaw: float = 0.0) -> void:
 	mag = weapon.get_mag_size()
 	dash_charges = MAX_DASH_CHARGES
 	dash_timer = 0.0
+	_dash_iframe_timer = 0.0
+	_dash_iframe_visual_timer = 0.0
+	_clear_dash_iframe_visual()
 	jumps_left = 2 + weapon.extra_jumps
 	_hit_face_timer = 0.0
 	_set_hit_face_state(false)
@@ -3287,12 +3397,8 @@ func _bot_physics(delta: float) -> void:
 			if not ghost_mode:
 				SFX.jump(global_position)
 			if landing_dist > 7.0 and dash_timer <= 0.0 and dash_charges > 0 and _bot_dash_cooldown <= 0.0:
-				dash_dir = move_dir.normalized()
-				dash_timer = DASH_TIME
-				dash_charges -= 1
+				_start_dash(move_dir.normalized())
 				_bot_dash_cooldown = randf_range(2.0, 4.0)
-				if not ghost_mode:
-					SFX.dash(global_position)
 		else:
 			move_dir = Vector3.ZERO
 			_bot_strafe_timer = 0.0
@@ -3322,10 +3428,8 @@ func _bot_physics(delta: float) -> void:
 		if panic_dash and flee_dir.length_squared() > 0.01:
 			wish = flee_dir
 		dash_dir = wish.normalized()
-		dash_timer = DASH_TIME
-		dash_charges -= 1
+		_start_dash(wish)
 		_bot_dash_cooldown = randf_range(2.5, 5.5)
-		if not ghost_mode: SFX.dash(global_position)
 
 	# --- Movement ---
 	var target_vel := move_dir * BOT_MOVE_SPEED * _slow_mult
@@ -3338,6 +3442,8 @@ func _bot_physics(delta: float) -> void:
 		var dash_factor := clampf(dash_timer / (DASH_TIME * 0.5), 0.0, 1.0)
 		target_vel = target_vel.lerp(dash_dir * DASH_SPEED * _slow_mult, dash_factor)
 		accel = 2000.0
+		if dash_timer <= 0.0:
+			_on_dash_ended()
 
 	velocity.x = move_toward(velocity.x, target_vel.x, accel * delta)
 	velocity.z = move_toward(velocity.z, target_vel.z, accel * delta)

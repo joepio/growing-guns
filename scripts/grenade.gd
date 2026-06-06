@@ -28,6 +28,10 @@ const FRAGMENT_FUSE := 1.8
 const FRAGMENT_LAUNCH_SPEED := 13.0
 const FRAGMENT_LAUNCH_LIFT := 5.0
 const FRAGMENT_ARM_DELAY := 0.12
+const DASH_BOMB_FUSE := 1.0
+const DASH_BOMB_RADIUS := 2.8
+const DASH_BOMB_MAX_DAMAGE := 42.0
+const DASH_BOMB_MIN_DAMAGE := 10.0
 
 # Static-cached shaders for the heat-distortion shell + shockwave ring. Each
 # explosion used to call Shader.new() with identical source, paying a fresh
@@ -124,6 +128,7 @@ static func warmup_shaders(scene: Node) -> void:
 @export var is_mine: bool = false
 @export var is_cluster_parent: bool = false
 @export var is_fragment: bool = false
+@export var is_dash_bomb: bool = false
 @export var predicted_visual: bool = false
 
 var _age := 0.0
@@ -142,6 +147,11 @@ func _ready() -> void:
 	elif is_cluster_parent:
 		scale = Vector3(1.22, 1.22, 1.22)
 		_tint_mesh(Color(1.0, 0.55, 0.15))
+	elif is_dash_bomb:
+		scale = Vector3(0.62, 0.62, 0.62)
+		_tint_mesh(Color(1.0, 0.32, 0.14))
+		freeze = true
+		freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
 
 
 func _tint_mesh(color: Color) -> void:
@@ -159,6 +169,8 @@ func _tint_mesh(color: Color) -> void:
 
 
 func _blast_radius() -> float:
+	if is_dash_bomb:
+		return DASH_BOMB_RADIUS
 	if is_fragment:
 		return FRAGMENT_RADIUS
 	if is_cluster_parent:
@@ -167,6 +179,8 @@ func _blast_radius() -> float:
 
 
 func _max_damage() -> float:
+	if is_dash_bomb:
+		return DASH_BOMB_MAX_DAMAGE
 	if is_fragment:
 		return FRAGMENT_MAX_DAMAGE
 	if is_cluster_parent:
@@ -175,6 +189,8 @@ func _max_damage() -> float:
 
 
 func _min_damage() -> float:
+	if is_dash_bomb:
+		return DASH_BOMB_MIN_DAMAGE
 	if is_fragment:
 		return FRAGMENT_MIN_DAMAGE
 	return MIN_DAMAGE
@@ -187,6 +203,8 @@ func _arm_delay() -> float:
 
 
 func _fuse_time() -> float:
+	if is_dash_bomb:
+		return DASH_BOMB_FUSE
 	if is_fragment:
 		return FRAGMENT_FUSE
 	return FUSE
@@ -196,6 +214,10 @@ func _physics_process(delta: float) -> void:
 		return
 	_age += delta
 	if not multiplayer.is_server():
+		return
+	if is_dash_bomb:
+		if _age >= DASH_BOMB_FUSE:
+			_explode()
 		return
 	if is_mine:
 		if _age >= MINE_LIFETIME:
@@ -212,6 +234,8 @@ func _on_body_entered(_body: Node) -> void:
 	if _age < _arm_delay():
 		return
 	if is_mine:
+		return
+	if is_dash_bomb:
 		return
 	_explode()
 
@@ -233,6 +257,8 @@ func detonate() -> void:
 		return
 	if is_mine:
 		_disarm()
+		return
+	if is_dash_bomb:
 		return
 	_explode()
 
