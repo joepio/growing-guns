@@ -3,7 +3,7 @@ extends Node3D
 # Sky-drop power-up. Server spawns via Game._spawn_pickup_item; all peers run
 # the same fall physics, server alone handles collection.
 
-const KINDS: PackedStringArray = ["heart", "mushroom", "bomb", "plus_one", "laser", "dice"]
+const KINDS: PackedStringArray = ["heart", "mushroom", "bomb", "plus_one", "laser", "dice", "air_strike"]
 
 const FALL_GRAVITY := 28.0
 const MAX_FALL_SPEED := 55.0
@@ -42,6 +42,8 @@ static func beam_color(p_kind: String) -> Color:
 			return Color(0.35, 1.0, 0.45)
 		"laser":
 			return Color(0.25, 0.95, 1.0)
+		"air_strike":
+			return Color(1.0, 0.45, 0.12)
 		_:
 			return Color(0.85, 0.95, 1.0)
 
@@ -51,7 +53,7 @@ static func display_info(p_kind: String) -> Dictionary:
 		"heart":
 			return {"title": "HEART", "subtitle": "+50 HP (overheal)", "color": beam_color(p_kind)}
 		"mushroom":
-			return {"title": "MUSHROOM", "subtitle": "3× size & damage", "color": beam_color(p_kind)}
+			return {"title": "MUSHROOM", "subtitle": "+100 HP, big body", "color": beam_color(p_kind)}
 		"bomb":
 			return {"title": "BOMB", "subtitle": "2× explosive rounds", "color": beam_color(p_kind)}
 		"plus_one":
@@ -60,6 +62,8 @@ static func display_info(p_kind: String) -> Dictionary:
 			return {"title": "LASER RIFLE", "subtitle": "A lot of crazy fast pew pews", "color": beam_color(p_kind)}
 		"dice":
 			return {"title": "DICE", "subtitle": "Random stat ×2 and ×½", "color": Color(0.95, 0.85, 1.0)}
+		"air_strike":
+			return {"title": "AIR STRIKE", "subtitle": "Next RMB: rocket on crosshair", "color": beam_color(p_kind)}
 		_:
 			return {"title": "PICKUP", "subtitle": "", "color": beam_color(p_kind)}
 
@@ -249,8 +253,20 @@ func _build_visual() -> void:
 		"dice":
 			_add_box(_visual, Vector3(0.34, 0.34, 0.34), Color(0.95, 0.92, 1.0), 4.5)
 			_add_sphere(_visual, 0.05, Color(0.15, 0.15, 0.2), 3.0, Vector3(0.1, 0.12, 0.18))
+		"air_strike":
+			_build_air_strike_rocket(_visual)
 		_:
 			_add_sphere(_visual, 0.25, Color.WHITE, 2.0)
+
+
+func _build_air_strike_rocket(parent: Node3D) -> void:
+	var body_color := Color(0.95, 0.72, 0.38)
+	var hot := Color(1.0, 0.55, 0.12)
+	_add_cylinder(parent, 0.06, 0.075, 0.34, body_color, 4.2)
+	_add_cylinder(parent, 0.02, 0.06, 0.11, Color(1.0, 0.96, 0.88), 5.5, Vector3(0.0, 0.225, 0.0))
+	_add_cylinder(parent, 0.095, 0.045, 0.11, hot, 7.0, Vector3(0.0, -0.225, 0.0))
+	_add_box(parent, Vector3(0.16, 0.02, 0.04), body_color, 2.8, Vector3(0.0, -0.1, 0.0))
+	_add_box(parent, Vector3(0.04, 0.02, 0.16), body_color, 2.8, Vector3(0.0, -0.1, 0.0))
 
 
 func _add_sphere(parent: Node3D, radius: float, color: Color, energy: float, pos: Vector3 = Vector3.ZERO) -> void:

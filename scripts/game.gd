@@ -138,6 +138,8 @@ var _extend_button: Button = null
 var _exit_to_menu_button: Button = null
 var _rematch_requested: bool = false
 var _match_end_votes: Dictionary = {} # id -> "rematch" | "extend"
+const REMATCH_VOTE_DELAY := 1.0
+var _rematch_vote_unlock_timer: Timer = null
 
 # --- Dev panel (`.`) ---
 # Owned by scripts/dev_panel.gd, instantiated in _ready and added under $HUD.
@@ -1282,7 +1284,7 @@ func _apply_gun_swap(round_players: Array[Node]) -> void:
 		return
 	var card_sets: Array = []
 	for p in round_players:
-		card_sets.append(p.weapon.applied_cards.duplicate())
+		card_sets.append(p._owned_cards.duplicate())
 	var order := _gun_swap_permutation(round_players.size())
 	for i in round_players.size():
 		round_players[i].apply_swapped_cards.rpc(card_sets[order[i]])
@@ -2606,17 +2608,45 @@ func _build_rematch_overlay() -> void:
 	_exit_to_menu_button.pressed.connect(_quit_game)
 	vb.add_child(_exit_to_menu_button)
 
+	_rematch_vote_unlock_timer = Timer.new()
+	_rematch_vote_unlock_timer.name = "RematchVoteUnlockTimer"
+	_rematch_vote_unlock_timer.one_shot = true
+	_rematch_vote_unlock_timer.timeout.connect(_unlock_rematch_vote_buttons)
+	add_child(_rematch_vote_unlock_timer)
+
+
 func _show_rematch_overlay(_winner_id: int) -> void:
 	if _rematch_overlay == null:
 		_build_rematch_overlay()
 	_rematch_requested = false
 	if _rematch_button:
-		_rematch_button.disabled = false
+		_rematch_button.disabled = true
 		_rematch_button.text = "REMATCH"
-	_extend_button.disabled = false
-	_extend_button.text = "5 MORE ROUNDS"
+	if _extend_button:
+		_extend_button.disabled = true
+		_extend_button.text = "5 MORE ROUNDS"
+	if _exit_to_menu_button:
+		_exit_to_menu_button.disabled = true
 	_rematch_overlay.visible = true
-	_grab_first_menu_focus(_rematch_overlay)
+	if _rematch_vote_unlock_timer:
+		_rematch_vote_unlock_timer.start(REMATCH_VOTE_DELAY)
+
+
+func _grab_rematch_overlay_focus() -> void:
+	if _extend_button and is_instance_valid(_extend_button) and not _extend_button.disabled:
+		_extend_button.grab_focus()
+
+
+func _unlock_rematch_vote_buttons() -> void:
+	if _rematch_overlay == null or not _rematch_overlay.visible:
+		return
+	if _rematch_button and _rematch_button.text == "REMATCH":
+		_rematch_button.disabled = false
+	if _extend_button and _extend_button.text == "5 MORE ROUNDS":
+		_extend_button.disabled = false
+	if _exit_to_menu_button:
+		_exit_to_menu_button.disabled = false
+	call_deferred("_grab_rematch_overlay_focus")
 
 var _retro_material: ShaderMaterial = null
 
@@ -3183,6 +3213,8 @@ func _set_rounds_to_win(count: int) -> void:
 
 @rpc("authority", "call_local", "reliable")
 func _hide_rematch_overlay() -> void:
+	if _rematch_vote_unlock_timer and _rematch_vote_unlock_timer.time_left > 0.0:
+		_rematch_vote_unlock_timer.stop()
 	if _rematch_overlay:
 		_rematch_overlay.visible = false
 	_rematch_requested = false
@@ -3193,6 +3225,8 @@ func _hide_rematch_overlay() -> void:
 	if _extend_button:
 		_extend_button.disabled = false
 		_extend_button.text = "5 MORE ROUNDS"
+	if _exit_to_menu_button:
+		_exit_to_menu_button.disabled = false
 
 @rpc("authority", "call_local", "reliable")
 func _broadcast_scores(scores: Dictionary) -> void:

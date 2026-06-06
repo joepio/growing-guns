@@ -355,16 +355,16 @@ func _build_rocket_visual() -> Node3D:
 	_core_light = OmniLight3D.new()
 	_core_light.name = "EngineCoreLight"
 	_core_light.light_color = Color(1.0, 0.82, 0.42)
-	_core_light.light_energy = 70.0
-	_core_light.omni_range = 85.0
+	_core_light.light_energy = 50.0
+	_core_light.omni_range = 72.0
 	_core_light.position = Vector3(0.0, -2.0, 0.0)
 	root.add_child(_core_light)
 
 	_engine_light = OmniLight3D.new()
 	_engine_light.name = "EngineLight"
 	_engine_light.light_color = Color(1.0, 0.62, 0.16)
-	_engine_light.light_energy = 95.0
-	_engine_light.omni_range = 180.0
+	_engine_light.light_energy = 70.0
+	_engine_light.omni_range = 155.0
 	_engine_light.position = Vector3(0.0, -3.0, 0.0)
 	root.add_child(_engine_light)
 
@@ -395,11 +395,11 @@ func _process(delta: float) -> void:
 		_core_plume_mat.emission_energy_multiplier = (lerpf(180.0, 360.0, approach) + pulse * 20.0) * dist_boost
 	if _plume:
 		_plume.scale = Vector3(1.0, lerpf(0.85, 2.4, approach), 1.0)
-	var light_boost := lerpf(1.0, 1.22, clampf(dist_boost - 1.0, 0.0, 1.0))
+	var light_boost := lerpf(1.0, 1.12, clampf(dist_boost - 1.0, 0.0, 1.0))
 	if _core_light:
-		_core_light.light_energy = (lerpf(70.0, 145.0, approach) + pulse * 14.0) * light_boost
+		_core_light.light_energy = (lerpf(50.0, 105.0, approach) + pulse * 10.0) * light_boost
 	if _engine_light:
-		_engine_light.light_energy = (lerpf(95.0, 195.0, approach) + pulse * 16.0) * light_boost
+		_engine_light.light_energy = (lerpf(70.0, 148.0, approach) + pulse * 12.0) * light_boost
 	if is_instance_valid(_rocket):
 		var start_dist: float = maxf(float(_rocket.get_meta("flare_start_dist", sky_from.distance_to(target_pos))), 1.0)
 		var remaining: float = _rocket.global_position.distance_to(target_pos)
@@ -458,4 +458,4 @@ func _engine_distance_boost() -> float:
 	if cam:
 		dist_to_cam = cam.global_position.distance_to(_rocket.global_position)
 	# Brighten when far, but never inflate mesh size into obvious shapes.
-	return clampf(dist_to_cam / 180.0, 1.0, 1.45)
+	return clampf(dist_to_cam / 180.0, 1.0, 1.28)

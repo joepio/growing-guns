@@ -855,27 +855,47 @@ static func _spawn_blast_dense_shell(scene: Node, pos: Vector3, radius: float, c
 static func _spawn_blast_flash_light(scene: Node, pos: Vector3, radius: float) -> void:
 	var flash := OmniLight3D.new()
 	flash.light_color = Color(1.0, 0.98, 0.92)
-	flash.light_energy = 100.0 + radius * 14.0
-	flash.omni_range = maxf(40.0, radius * 6.0)
+	var peak := 180.0 + radius * 22.0
+	flash.light_energy = peak
+	flash.omni_range = clampf(radius * 6.2, 55.0, 185.0)
 	flash.shadow_enabled = false
 	_attach_world_3d(scene, flash, pos)
 	var ftw := flash.create_tween()
-	ftw.tween_property(flash, "light_energy", 0.0, 0.06)\
-		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+	ftw.tween_property(flash, "light_energy", peak * 0.82, 0.03)\
+		.set_trans(Tween.TRANS_LINEAR)
+	ftw.tween_property(flash, "light_energy", 0.0, 0.15)\
+		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_IN)
 	ftw.tween_callback(flash.queue_free)
+
+
+static func _spawn_blast_env_light(scene: Node, pos: Vector3, radius: float, color: Color) -> void:
+	# Wide env wash — bright spike, short tail.
+	var env := OmniLight3D.new()
+	env.light_color = color.lerp(Color(1.0, 0.82, 0.42), 0.62)
+	var peak := clampf(130.0 + radius * 6.2, 130.0, 320.0)
+	env.light_energy = peak
+	env.omni_range = clampf(radius * 6.0, 70.0, 185.0)
+	env.shadow_enabled = false
+	_attach_world_3d(scene, env, pos)
+	var tw := env.create_tween()
+	tw.tween_property(env, "light_energy", peak * 0.68, 0.035)\
+		.set_trans(Tween.TRANS_LINEAR)
+	tw.tween_property(env, "light_energy", 0.0, clampf(0.12 + radius * 0.005, 0.14, 0.22))\
+		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_IN)
+	tw.tween_callback(env.queue_free)
 
 
 static func _spawn_blast_core_light(scene: Node, pos: Vector3, radius: float, color: Color, energy_mult: float = 1.0) -> void:
 	var core_light := OmniLight3D.new()
 	core_light.light_color = color.lerp(Color(1.0, 0.95, 0.78), 0.7)
-	core_light.light_energy = (60.0 + radius * 8.0) * energy_mult
-	core_light.omni_range = maxf(8.0, radius * 1.4)
+	core_light.light_energy = (92.0 + radius * 11.0) * energy_mult
+	core_light.omni_range = clampf(radius * 2.5, 14.0, 78.0)
 	core_light.shadow_enabled = false
 	_attach_world_3d(scene, core_light, pos)
 	var ctlw := core_light.create_tween()
-	ctlw.tween_property(core_light, "light_color", color.lerp(Color(1.0, 0.55, 0.18), 0.5), 0.12)\
+	ctlw.tween_property(core_light, "light_color", color.lerp(Color(1.0, 0.55, 0.18), 0.5), 0.06)\
 		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
-	ctlw.parallel().tween_property(core_light, "light_energy", 0.0, 0.32)\
+	ctlw.parallel().tween_property(core_light, "light_energy", 0.0, 0.17)\
 		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
 	ctlw.tween_callback(core_light.queue_free)
 
@@ -928,25 +948,23 @@ static func spawn_bullet_blast(scene: Node, pos: Vector3, radius: float, color: 
 	# briefly opaque wall rather than a faint transparent puff.
 	_spawn_blast_dense_shell(scene, pos, radius, color)
 
-	# Brief scene-wide flash — way brighter than the warm-ember decay light
-	# below, but only ~60 ms so it reads as the moment-of-detonation spike.
+	# Brief scene-wide flash — hot spike, then a wide env fill that lingers.
 	_spawn_blast_flash_light(scene, pos, radius)
+	_spawn_blast_env_light(scene, pos, radius, color)
 
-	# Bright core glow — small range, longer duration than the scene flash.
-	# Reads as the white-hot fireball center hanging around as the blast
-	# evolves, distinct from the scene-wide initial spike.
+	# Bright core glow — tighter hot center as the fireball evolves.
 	_spawn_blast_core_light(scene, pos, radius, color)
 
-	# 3) Explosion light — extremely bright at ignition, then it collapses fast.
+	# 3) Explosion light — warm decay tail on the blast center.
 	var light := OmniLight3D.new()
 	var hot_color := color.lerp(Color(1.0, 0.98, 0.9), 0.72)
 	var warm_color := color.lerp(Color(1.0, 0.6, 0.18), 0.5)
 	var ember_color := color.lerp(Color(0.9, 0.16, 0.04), 0.38)
 	light.light_color = hot_color
-	light.light_energy = clampf(20.0 + radius * 4.5, 20.0, 48.0)
-	light.omni_range = radius * 4.2
+	light.light_energy = clampf(78.0 + radius * 7.2, 78.0, 220.0)
+	light.omni_range = clampf(radius * 5.0, 32.0, 125.0)
 	_attach_world_3d(scene, light, pos)
-	var light_dur := clampf(0.1 + radius * 0.012, 0.1, 0.22)
+	var light_dur := clampf(0.08 + radius * 0.007, 0.08, 0.2)
 	var ltw := light.create_tween()
 	ltw.set_parallel(true)
 	ltw.tween_property(light, "light_color", warm_color, light_dur * 0.28)\
