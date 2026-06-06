@@ -319,18 +319,15 @@ func _handle_collision(result: Dictionary) -> void:
 			_ray_query.exclude = excluded_rids
 		return # Continue through ghosts
 
+	var body_ricochet_bounce := false
 	if hit_player:
 		var is_head: bool = bool(shooter_node.call("_is_head_hit", collider))
 		if not is_head:
 			var victim_weapon: Weapon = hit_player.get("weapon") as Weapon
 			var body_bounces: int = victim_weapon.body_ricochet_count if victim_weapon else 0
 			if body_bounces > body_ricochets_done:
+				body_ricochet_bounce = true
 				body_ricochets_done += 1
-				velocity = velocity.bounce(normal)
-				direction = velocity.normalized() if velocity.length_squared() > 0.0001 else direction
-				look_at(global_position + direction)
-				global_position += direction * 0.05
-				return
 
 	# Visuals on all peers
 	if hit_player:
@@ -434,6 +431,18 @@ func _handle_collision(result: Dictionary) -> void:
 				_ray_query.exclude = excluded_rids
 		global_position = hit_pos + direction * 0.12
 		distance_traveled += 0.12
+		return
+
+	# Body ricochet (Bouncy Castle): damage lands, then the bullet reflects.
+	if hit_player and body_ricochet_bounce:
+		velocity = velocity.bounce(normal)
+		direction = velocity.normalized() if velocity.length_squared() > 0.0001 else direction
+		look_at(global_position + direction)
+		global_position += direction * 0.05
+		var victim_rids: Array = hit_player.call("get_hitbox_rids") if hit_player.has_method("get_hitbox_rids") else [hit_player.get_rid()]
+		excluded_rids.append_array(victim_rids)
+		if _ray_query:
+			_ray_query.exclude = excluded_rids
 		return
 
 	# Ricochet logic
