@@ -48,6 +48,7 @@ const MAX_SHOT_FX_PER_FRAME := 1
 const MAX_THIRD_PERSON_CASINGS_PER_FRAME := 3
 const GRENADE_RELOAD := 3.0
 const AIR_STRIKE_RELOAD := 12.0
+const ION_CANNON_RELOAD := 14.0
 const AIR_STRIKE_AIM_RANGE := 800.0
 const GRENADE_LAUNCH_SPEED := 22.0
 const GRENADE_LAUNCH_LIFT := 4.0
@@ -1726,6 +1727,8 @@ func _use_special() -> void:
 			grenade_cooldown = MELEE_RELOAD * mult
 		Weapon.SPECIAL_AIR_STRIKE:
 			grenade_cooldown = AIR_STRIKE_RELOAD * mult
+		Weapon.SPECIAL_ION_CANNON:
+			grenade_cooldown = ION_CANNON_RELOAD * mult
 		_:
 			grenade_cooldown = GRENADE_RELOAD * mult
 	# Snapshot for HUD progress display — _update_hud divides current cooldown
@@ -1753,6 +1756,8 @@ func _activate_special_effect() -> void:
 			_swing_melee()
 		Weapon.SPECIAL_AIR_STRIKE:
 			_call_air_strike()
+		Weapon.SPECIAL_ION_CANNON:
+			_call_ion_cannon()
 		_:
 			_fire_grenade()
 
@@ -1929,6 +1934,32 @@ func _spawn_player_air_strike(target: Vector3) -> void:
 	var game := get_tree().current_scene
 	if game and game.has_method("begin_player_air_strike"):
 		game.begin_player_air_strike(target, player_id)
+
+
+func _call_ion_cannon() -> void:
+	var target := _air_strike_target()
+	if multiplayer.is_server():
+		_spawn_player_ion_cannon(target)
+	else:
+		_request_ion_cannon.rpc_id(1, target)
+
+
+@rpc("any_peer", "reliable")
+func _request_ion_cannon(target: Vector3) -> void:
+	if not multiplayer.is_server():
+		return
+	var sender := multiplayer.get_remote_sender_id()
+	if sender == 0:
+		sender = int(get_multiplayer_authority())
+	if sender != int(get_multiplayer_authority()):
+		return
+	_spawn_player_ion_cannon(target)
+
+
+func _spawn_player_ion_cannon(target: Vector3) -> void:
+	var game := get_tree().current_scene
+	if game and game.has_method("begin_player_ion_cannon"):
+		game.begin_player_ion_cannon(target, player_id)
 
 
 func _use_teleport() -> void:
@@ -2985,10 +3016,10 @@ func _bot_physics(delta: float) -> void:
 	if move_dir.length() > 1.0:
 		move_dir = move_dir.normalized()
 
-	var strike_dist := _bot_nearest_air_strike_flat_dist()
+	var strike_dist := _bot_nearest_strike_flat_dist()
 	var flee_dir := Vector3.ZERO
 	if strike_dist < BOT_AIR_STRIKE_FLEE_RADIUS:
-		flee_dir = _bot_air_strike_flee_dir()
+		flee_dir = _bot_strike_flee_dir()
 		if flee_dir.length_squared() > 0.01:
 			move_dir = flee_dir
 			chase = 0.0
@@ -3155,44 +3186,46 @@ func _bot_lava_safe_move_dir(preferred: Vector3) -> Vector3:
 	return Vector3.ZERO
 
 
-func _bot_nearest_air_strike_flat_dist() -> float:
+func _bot_nearest_strike_flat_dist() -> float:
 	var best := INF
-	for node in get_tree().get_nodes_in_group("air_strike_markers"):
-		if not is_instance_valid(node):
-			continue
-		if not node.has_method("get"):
-			continue
-		var target_pos_val: Variant = node.get("target_pos")
-		if typeof(target_pos_val) != TYPE_VECTOR3:
-			continue
-		var target: Vector3 = target_pos_val
-		var flat_dist: float = Vector2(
-			global_position.x - target.x,
-			global_position.z - target.z,
-		).length()
-		best = minf(best, flat_dist)
+	for group_name in ["air_strike_markers", "ion_cannon_markers"]:
+		for node in get_tree().get_nodes_in_group(group_name):
+			if not is_instance_valid(node):
+				continue
+			if not node.has_method("get"):
+				continue
+			var target_pos_val: Variant = node.get("target_pos")
+			if typeof(target_pos_val) != TYPE_VECTOR3:
+				continue
+			var target: Vector3 = target_pos_val
+			var flat_dist: float = Vector2(
+				global_position.x - target.x,
+				global_position.z - target.z,
+			).length()
+			best = minf(best, flat_dist)
 	return best
 
 
-func _bot_air_strike_flee_dir() -> Vector3:
+func _bot_strike_flee_dir() -> Vector3:
 	var best_target: Vector3 = Vector3.ZERO
 	var best_dist := INF
-	for node in get_tree().get_nodes_in_group("air_strike_markers"):
-		if not is_instance_valid(node):
-			continue
-		if not node.has_method("get"):
-			continue
-		var target_pos_val: Variant = node.get("target_pos")
-		if typeof(target_pos_val) != TYPE_VECTOR3:
-			continue
-		var target: Vector3 = target_pos_val
-		var flat_dist: float = Vector2(
-			global_position.x - target.x,
-			global_position.z - target.z,
-		).length()
-		if flat_dist < best_dist:
-			best_dist = flat_dist
-			best_target = target
+	for group_name in ["air_strike_markers", "ion_cannon_markers"]:
+		for node in get_tree().get_nodes_in_group(group_name):
+			if not is_instance_valid(node):
+				continue
+			if not node.has_method("get"):
+				continue
+			var target_pos_val: Variant = node.get("target_pos")
+			if typeof(target_pos_val) != TYPE_VECTOR3:
+				continue
+			var target: Vector3 = target_pos_val
+			var flat_dist: float = Vector2(
+				global_position.x - target.x,
+				global_position.z - target.z,
+			).length()
+			if flat_dist < best_dist:
+				best_dist = flat_dist
+				best_target = target
 	if best_dist >= BOT_AIR_STRIKE_FLEE_RADIUS:
 		return Vector3.ZERO
 	var away := global_position - best_target

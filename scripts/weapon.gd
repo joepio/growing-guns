@@ -26,6 +26,7 @@ const SPECIAL_TELEPORT := "teleport"
 const SPECIAL_ZOOM := "zoom"
 const SPECIAL_SWORD := "sword"
 const SPECIAL_AIR_STRIKE := "air_strike"
+const SPECIAL_ION_CANNON := "ion_cannon"
 
 # --- Multiplicative modifiers (cards multiply) ---
 @export var damage_mult: float = 1.0

@@ -504,6 +504,15 @@ static func all() -> Array:
 				w.special = Weapon.SPECIAL_AIR_STRIKE,
 		},
 		{
+			"id": "ion_cannon",
+			"name": "ION CANNON",
+			"desc": "RMB: orbital beam on your crosshair",
+			"rarity": "rare",
+			"color": Color(0.35, 0.72, 1.0),
+			"apply": func(w: Weapon) -> void:
+				w.special = Weapon.SPECIAL_ION_CANNON,
+		},
+		{
 			"id": "bazooka",
 			"name": "BAZOOKA",
 			"desc": "Slow rocket-like shots with a massive explosion",
