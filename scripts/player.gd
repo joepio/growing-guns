@@ -125,6 +125,20 @@ var tilt_enabled: bool = true
 # until the server flips this back off. Distinct from `frozen` because we DO
 # want gravity + move_and_slide to run while it's on.
 var launching: bool = false
+var _phoenix_ascending: bool = false
+var _phoenix_start_pos: Vector3 = Vector3.ZERO
+var _phoenix_start_ms: int = 0
+var _phoenix_finish_requested: bool = false
+var _phoenix_column_root: Node3D = null
+var _phoenix_column: MeshInstance3D = null
+var _phoenix_light: OmniLight3D = null
+const PHOENIX_ASCENT_HEIGHT := 10.0
+const PHOENIX_ASCENT_DURATION := 2.0
+const PHOENIX_ALPHA_START := 0.5
+const PHOENIX_ALPHA_END := 0.0
+const PHOENIX_LIGHT_ENERGY := 22.0
+const PHOENIX_COLUMN_HEIGHT := 360.0
+const PHOENIX_COLUMN_RADIUS := 0.5
 var ghost_mode: bool = false
 var is_zooming: bool = false
 var _poison_damage_left: float = 0.0
@@ -476,8 +490,12 @@ func _process(delta: float) -> void:
 		camera.global_transform = _ragdoll_head.global_transform
 		return
 
+	if _phoenix_ascending:
+		_update_phoenix_ascent()
+
 	if not is_multiplayer_authority():
-		_interpolate_remote_state(delta)
+		if not _phoenix_ascending:
+			_interpolate_remote_state(delta)
 	_update_blob_motion(delta)
 	if _hit_face_timer > 0.0:
 		_hit_face_timer = maxf(0.0, _hit_face_timer - delta)
@@ -616,6 +634,9 @@ func _update_blob_motion(delta: float) -> void:
 func _apply_ghost_visuals() -> void:
 	if body_model == null:
 		return
+	if _phoenix_ascending:
+		_apply_phoenix_visuals()
+		return
 	body_model.visible = (is_bot or split_screen_local or not is_multiplayer_authority())
 	name_label.visible = not ghost_mode and (is_bot or (not split_screen_local and not is_multiplayer_authority()))
 	# Hide both first-person muzzle gun and third-person gun while ghosting —
@@ -647,8 +668,136 @@ func _apply_ghost_visuals() -> void:
 		else:
 			mesh.material_override = _body_materials.get(mesh, mesh.material_override)
 
+
+func _apply_phoenix_visuals(body_alpha: float = PHOENIX_ALPHA_START) -> void:
+	if body_model == null:
+		return
+	body_model.visible = body_alpha > 0.01
+	name_label.visible = false
+	muzzle.visible = false
+	if _third_person_gun:
+		_third_person_gun.visible = false
+	if blade:
+		blade.transparency = 0.0
+	for mesh in _body_meshes():
+		var mat := StandardMaterial3D.new()
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.albedo_color = Color(1.0, 1.0, 1.0, body_alpha)
+		mat.metallic = 0.0
+		mat.roughness = 0.55
+		mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		mesh.material_override = mat
+
+
+func _phoenix_elapsed_s() -> float:
+	if _phoenix_start_ms <= 0:
+		return 0.0
+	return maxf(0.0, (Time.get_ticks_msec() - _phoenix_start_ms) / 1000.0)
+
+
+func _phoenix_progress() -> float:
+	return clampf(_phoenix_elapsed_s() / PHOENIX_ASCENT_DURATION, 0.0, 1.0)
+
+
+func _phoenix_rise_amount() -> float:
+	return PHOENIX_ASCENT_HEIGHT * _phoenix_progress()
+
+
+func _update_phoenix_ascent() -> void:
+	var progress := _phoenix_progress()
+	var rise := _phoenix_rise_amount()
+	var pos := _phoenix_start_pos + Vector3(0.0, rise, 0.0)
+	global_position = pos
+	var body_alpha := lerpf(PHOENIX_ALPHA_START, PHOENIX_ALPHA_END, progress)
+	_apply_phoenix_visuals(body_alpha)
+	_tick_phoenix_column(progress)
+	if is_multiplayer_authority():
+		var game := get_tree().current_scene
+		if game and game.has_method("set_phoenix_fade"):
+			game.set_phoenix_fade(player_id, progress)
+		velocity = Vector3.ZERO
+		_last_sync_pos = global_position
+		_last_sync_yaw = rotation.y
+		_broadcast_state.rpc(global_position, rotation.y)
+		if progress >= 1.0 and not _phoenix_finish_requested:
+			_phoenix_finish_requested = true
+			if game and game.has_method("finish_phoenix_revive"):
+				if multiplayer.is_server():
+					game.finish_phoenix_revive(player_id)
+				else:
+					game.finish_phoenix_revive.rpc_id(1, player_id)
+	else:
+		_remote_target_pos = pos
+		_remote_target_yaw = rotation.y
+		_remote_has_target = true
+		_visual_prev_pos = pos
+
+
+func _spawn_phoenix_column(at_world: Vector3) -> void:
+	_clear_phoenix_fx()
+	var scene := get_tree().current_scene
+	if scene == null:
+		return
+	var anchor := Node3D.new()
+	anchor.name = "PhoenixColumnAnchor"
+	var column := MeshInstance3D.new()
+	column.name = "PhoenixColumn"
+	var mesh := CylinderMesh.new()
+	mesh.height = PHOENIX_COLUMN_HEIGHT
+	mesh.top_radius = PHOENIX_COLUMN_RADIUS * 0.88
+	mesh.bottom_radius = PHOENIX_COLUMN_RADIUS
+	mesh.radial_segments = 20
+	mesh.rings = 1
+	column.mesh = mesh
+	var mat := StandardMaterial3D.new()
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.albedo_color = Color(1.0, 1.0, 1.0, 0.18)
+	mat.emission_enabled = true
+	mat.emission = Color(1.0, 1.0, 1.0)
+	mat.emission_energy_multiplier = 14.0
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	column.material_override = mat
+	anchor.add_child(column)
+	var light := OmniLight3D.new()
+	light.name = "PhoenixLight"
+	light.light_color = Color(1.0, 1.0, 1.0)
+	light.light_energy = PHOENIX_LIGHT_ENERGY
+	light.omni_range = 28.0
+	light.omni_attenuation = 0.4
+	light.shadow_enabled = false
+	column.add_child(light)
+	light.position = Vector3.ZERO
+	Violence._attach_world_3d(scene, anchor, at_world)
+	_phoenix_column_root = anchor
+	_phoenix_column = column
+	_phoenix_light = light
+
+
+func _clear_phoenix_fx() -> void:
+	if _phoenix_column_root and is_instance_valid(_phoenix_column_root):
+		_phoenix_column_root.queue_free()
+	_phoenix_column_root = null
+	_phoenix_column = null
+	_phoenix_light = null
+
+
+func _tick_phoenix_column(progress: float) -> void:
+	if _phoenix_column == null or not is_instance_valid(_phoenix_column):
+		return
+	var pulse := 1.0 + 0.25 * sin(Time.get_ticks_msec() * 0.016)
+	var fade := 1.0 - progress * progress
+	_phoenix_column.visible = fade > 0.02
+	if _phoenix_light and is_instance_valid(_phoenix_light):
+		_phoenix_light.light_energy = PHOENIX_LIGHT_ENERGY * pulse * fade
+	var mat := _phoenix_column.material_override as StandardMaterial3D
+	if mat:
+		mat.emission_energy_multiplier = 12.0 * pulse * fade
+		mat.albedo_color.a = 0.22 * fade
+
 func _apply_chill_visual() -> void:
-	if body_model == null or ghost_mode:
+	if body_model == null or ghost_mode or _phoenix_ascending:
 		return
 	var active := _chill_vfx_timer > 0.0 and _chill_vfx_strength > 0.01
 	if not active and not _chill_visual_active:
@@ -707,7 +856,7 @@ func _physics_process(delta: float) -> void:
 		return
 	_tick_status_effects(delta)
 
-	if health <= 0:
+	if health <= 0 and not _phoenix_ascending:
 		velocity = Vector3.ZERO
 		return
 
@@ -747,6 +896,36 @@ func _physics_process(delta: float) -> void:
 
 	if frozen:
 		velocity = Vector3.ZERO
+		return
+
+	if _phoenix_ascending:
+		rifle_cooldown = max(0.0, rifle_cooldown - delta)
+		grenade_cooldown = max(0.0, grenade_cooldown - delta)
+		melee_cooldown = max(0.0, melee_cooldown - delta)
+		recoil_pitch = lerp(recoil_pitch, 0.0, delta * 9.0)
+		_recoil_spread = lerp(_recoil_spread, 0.0, clampf(delta * RECOIL_DECAY_RATE, 0.0, 1.0))
+		shake_amt = lerp(shake_amt, 0.0, delta * 14.0)
+		_view_punch_pos = _view_punch_pos.lerp(Vector3.ZERO, delta * 12.0)
+		_view_punch_rot = _view_punch_rot.lerp(Vector3.ZERO, delta * 12.0)
+		if _can_accept_gameplay_input() and (local_input_device >= 0 or not split_screen_local):
+			var look_device := local_input_device if local_input_device >= 0 else 0
+			var look_input := Vector2(
+				Input.get_joy_axis(look_device, JOY_AXIS_RIGHT_X),
+				Input.get_joy_axis(look_device, JOY_AXIS_RIGHT_Y)
+			)
+			if look_input.length() > CONTROLLER_LOOK_DEADZONE:
+				var look_mag := inverse_lerp(CONTROLLER_LOOK_DEADZONE, 1.0, minf(look_input.length(), 1.0))
+				var look_dir := look_input.normalized() * look_mag
+				var sens := CONTROLLER_LOOK_SENS
+				if is_zooming:
+					sens *= 0.4
+				rotate_y(-look_dir.x * sens * delta)
+				look_pitch = clamp(look_pitch - look_dir.y * sens * delta, -1.4, 1.4)
+		camera.rotation.x = look_pitch + recoil_pitch + _view_punch_rot.x
+		camera.rotation.y = _view_punch_rot.y
+		camera.rotation.z = deg_to_rad(tilt_z) + _view_punch_rot.z
+		if not is_bot and camera:
+			camera.fov = 30.0 if is_zooming else 75.0
 		return
 
 	rifle_cooldown = max(0.0, rifle_cooldown - delta)
@@ -1017,7 +1196,7 @@ func handle_environmental_death(_reason: String = "void") -> void:
 	# inventing a fake from_id.
 	if not is_multiplayer_authority():
 		return
-	if ghost_mode or god_mode or health <= 0 or frozen or launching:
+	if ghost_mode or god_mode or health <= 0 or frozen or launching or _phoenix_ascending:
 		return
 	var lethal_amount: int = max(health, MAX_HEALTH)
 	_apply_damage(lethal_amount, player_id)
@@ -1026,7 +1205,7 @@ func handle_environmental_death(_reason: String = "void") -> void:
 func kill_environmental(_reason: String = "hazard") -> void:
 	if not is_multiplayer_authority():
 		return
-	if ghost_mode or god_mode or health <= 0:
+	if ghost_mode or god_mode or health <= 0 or _phoenix_ascending:
 		return
 	_sync_launching.rpc(false)
 	if _reason == "lava_fall":
@@ -1047,7 +1226,7 @@ func kill_environmental(_reason: String = "hazard") -> void:
 func apply_environmental_damage(amount: int, _reason: String = "hazard") -> void:
 	if not is_multiplayer_authority():
 		return
-	if ghost_mode or god_mode or health <= 0 or frozen or launching:
+	if ghost_mode or god_mode or health <= 0 or frozen or launching or _phoenix_ascending:
 		return
 	if _reason == "lava":
 		var now := Time.get_ticks_msec()
@@ -2329,7 +2508,7 @@ func _apply_damage(
 	blast_severity: float = 0.0,
 	is_head: bool = false,
 ) -> void:
-	if ghost_mode or frozen or health <= 0 or god_mode:
+	if ghost_mode or frozen or health <= 0 or god_mode or _phoenix_ascending:
 		return
 	health = max(0, health - amount)
 	var game_scene := get_tree().current_scene
@@ -2421,13 +2600,6 @@ func _apply_damage(
 			_ragdoll.rpc(push, force_origin, ctx_force, blast_radius, blast_severity, is_head)
 		died.emit(from_id)
 		_report_death.rpc_id(1, from_id)
-
-@rpc("authority", "call_local", "reliable")
-func _phoenix_fx(pos: Vector3) -> void:
-	var scene := get_tree().current_scene
-	if scene == null:
-		return
-	_spawn_bullet_blast(pos + Vector3.UP * 0.8, 5.0, Color(1.0, 0.55, 0.15), true)
 
 @rpc("any_peer", "call_local", "unreliable")
 func _play_hurt_sound(pos: Vector3) -> void:
@@ -2524,31 +2696,82 @@ func server_respawn(pos: Vector3, yaw: float = 0.0) -> void:
 	_last_sync_yaw = rotation.y
 
 @rpc("any_peer", "call_local", "reliable")
-func phoenix_revive_at(sky_pos: Vector3, yaw: float, _fx_pos: Vector3) -> void:
-	if multiplayer.get_remote_sender_id() != 1 and multiplayer.get_remote_sender_id() != 0:
+func begin_phoenix_ascension(revive_pos: Vector3, start_ms: int = 0) -> void:
+	var sender := multiplayer.get_remote_sender_id()
+	if sender != 1 and sender != 0:
 		return
-	if not is_multiplayer_authority():
-		return
-	global_position = sky_pos
-	rotation.y = yaw
-	velocity = Vector3.ZERO
-	health = max(1, int(float(MAX_HEALTH + weapon.max_hp_bonus) * 0.35))
-	_poison_damage_left = 0.0
-	_poison_dps = 0.0
-	_poison_tick_accum = 0.0
-	_slow_timer = 0.0
-	_slow_mult = 1.0
-	_clear_chill_visual()
-	_ragdoll_head = null
-	if camera:
-		camera.transform = Transform3D(Basis.IDENTITY, _camera_rest_pos)
+	Violence.clear_ragdoll(self)
+	_set_dead_visuals(false)
+	_phoenix_ascending = true
+	_phoenix_finish_requested = false
+	_phoenix_start_pos = revive_pos
+	_phoenix_start_ms = start_ms if start_ms > 0 else Time.get_ticks_msec()
+	health = maxi(1, int(float(MAX_HEALTH + weapon.max_hp_bonus) * 0.35))
+	_spawn_phoenix_column(revive_pos)
+	_apply_phoenix_visuals(PHOENIX_ALPHA_START)
 	var scene := get_tree().current_scene
 	if scene and scene.has_method("show_death_effect_for"):
 		scene.show_death_effect_for(player_id, false)
+	global_position = revive_pos
+	velocity = Vector3.ZERO
+	if is_multiplayer_authority():
+		var game_start := get_tree().current_scene
+		if game_start and game_start.has_method("set_phoenix_fade"):
+			game_start.set_phoenix_fade(player_id, 0.0)
+		_poison_damage_left = 0.0
+		_poison_dps = 0.0
+		_poison_tick_accum = 0.0
+		_slow_timer = 0.0
+		_slow_mult = 1.0
+		_clear_chill_visual()
+		_ragdoll_head = null
+		if camera:
+			camera.transform = Transform3D(Basis.IDENTITY, _camera_rest_pos)
+		_last_sync_pos = global_position
+		_last_sync_yaw = rotation.y
+		_broadcast_state.rpc(global_position, rotation.y)
+	else:
+		_remote_target_pos = revive_pos
+		_remote_target_yaw = rotation.y
+		_remote_has_target = true
+		_visual_prev_pos = revive_pos
+
+
+@rpc("any_peer", "call_local", "reliable")
+func _finish_phoenix_ascension(spawn_pos: Vector3, spawn_yaw: float = 0.0) -> void:
+	if not _phoenix_ascending:
+		return
+	var sender := multiplayer.get_remote_sender_id()
+	if sender != 1 and sender != 0:
+		return
+	_phoenix_ascending = false
+	_phoenix_finish_requested = false
+	_phoenix_start_ms = 0
+	_clear_phoenix_fx()
+	for mesh in _body_meshes():
+		mesh.material_override = _body_materials.get(mesh, mesh.material_override)
+	global_position = spawn_pos
+	rotation.y = spawn_yaw
+	if is_multiplayer_authority():
+		velocity = Vector3.ZERO
+		_ragdoll_head = null
+		if camera:
+			camera.transform = Transform3D(Basis.IDENTITY, _camera_rest_pos)
+		var game := get_tree().current_scene
+		if game and game.has_method("begin_phoenix_fade_out"):
+			game.begin_phoenix_fade_out(player_id)
+	_refresh_authority_view()
 	_apply_ghost_visuals()
-	_broadcast_state.rpc(global_position, rotation.y)
-	_last_sync_pos = global_position
-	_last_sync_yaw = rotation.y
+	if is_multiplayer_authority():
+		_last_sync_pos = global_position
+		_last_sync_yaw = rotation.y
+		_broadcast_state.rpc(global_position, rotation.y)
+	else:
+		_remote_target_pos = spawn_pos
+		_remote_target_yaw = spawn_yaw
+		_remote_has_target = true
+		_visual_prev_pos = spawn_pos
+
 
 @rpc("any_peer", "call_local", "reliable")
 func set_ghost_mode(enabled: bool) -> void:

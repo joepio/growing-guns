@@ -1,6 +1,6 @@
 extends PanelContainer
 
-# F1 dev panel — read-mostly inspector for the local-or-targeted player,
+# `.` dev panel — read-mostly inspector for the local-or-targeted player,
 # plus quick-action buttons (apply/remove cards, godmode, passive AI).
 #
 # Lives as a child of $HUD on the Game node. All calls back into Game state
@@ -25,8 +25,8 @@ func _ready() -> void:
 	anchor_right = 0.5
 	anchor_top = 0.0
 	anchor_bottom = 1.0
-	offset_left = -420.0
-	offset_right = 420.0
+	offset_left = -300.0
+	offset_right = 300.0
 	offset_top = 30.0
 	offset_bottom = -30.0
 	var style := StyleBoxFlat.new()
@@ -41,6 +41,8 @@ func _ready() -> void:
 	add_theme_stylebox_override("panel", style)
 	var scroll := ScrollContainer.new()
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	add_child(scroll)
 	_content = VBoxContainer.new()
 	_content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -76,7 +78,7 @@ func _sync_host_mouse_mode() -> void:
 
 
 # Resolve the currently-targeted player. Used by Game's keybindings so
-# F1-driven actions (G/1-5) hit whichever player the panel has selected.
+# `.`-driven actions (G/1-5) hit whichever player the panel has selected.
 func get_target() -> Node:
 	if _target_id == 0:
 		var lp = _game.local_player if _game else null
@@ -113,7 +115,7 @@ func show_help() -> void:
 		"7: Big Mag  ·  Shift+7: remove\n" + \
 		"8: Precision  ·  Shift+8: remove\n" + \
 		"9: Fast Rounds  ·  Shift+9: remove\n" + \
-		"F1: Full Dev Panel"
+		".: Full Dev Panel"
 	# Use smaller font size (24) for the help block
 	_game._announce.rpc(help_text, 10.0, 24)
 
@@ -125,8 +127,8 @@ func _refresh() -> void:
 		return
 	for c in _content.get_children():
 		c.queue_free()
-	_heading("DEV  ·  F1 to close", Color(0.5, 0.9, 1.0), 20)
-	_note("Quick shortcuts: G (god), P (passive AI), M (restart), L (lava), K (air strike), J (ion cannon), I (drop pickup), 0 (reset), 1-9 (cards, Shift removes), ? (help)")
+	_heading("DEV  ·  . to close", Color(0.5, 0.9, 1.0), 16)
+	_note("G god · P passive AI · M restart · L lava · K air strike · J ion cannon · I pickup · 0 reset · 1-9 cards (Shift removes) · ? help")
 	_toggle_row("Passive AI (stationary, no shooting)", _game.bots_hold_fire, func(v: bool) -> void:
 		_game.bots_hold_fire = v
 		call_deferred("_refresh"))
@@ -215,6 +217,8 @@ func _player_picker() -> void:
 func _heading(text: String, color: Color, font_size: int) -> void:
 	var lbl := Label.new()
 	lbl.text = text
+	lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	lbl.add_theme_color_override("font_color", color)
 	lbl.add_theme_font_size_override("font_size", font_size)
 	_content.add_child(lbl)
@@ -222,13 +226,17 @@ func _heading(text: String, color: Color, font_size: int) -> void:
 
 func _stat(stat_name: String, value: String) -> void:
 	var hbox := HBoxContainer.new()
+	hbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	var n := Label.new()
 	n.text = stat_name
-	n.custom_minimum_size = Vector2(220, 0)
+	n.custom_minimum_size = Vector2(140, 0)
+	n.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
 	n.add_theme_color_override("font_color", Color(0.7, 0.7, 0.85))
 	hbox.add_child(n)
 	var v := Label.new()
 	v.text = value
+	v.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	v.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	v.add_theme_color_override("font_color", Color(1, 1, 1))
 	hbox.add_child(v)
 	_content.add_child(hbox)
@@ -237,7 +245,10 @@ func _stat(stat_name: String, value: String) -> void:
 func _note(text: String) -> void:
 	var lbl := Label.new()
 	lbl.text = text
+	lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	lbl.add_theme_color_override("font_color", Color(0.6, 0.6, 0.7))
+	lbl.add_theme_font_size_override("font_size", 12)
 	_content.add_child(lbl)
 
 
@@ -257,7 +268,9 @@ func _card_row(card: Dictionary, count: int) -> void:
 
 	var n := Label.new()
 	n.text = "%s  —  %s" % [card.name, card.desc]
+	n.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	n.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	n.size_flags_stretch_ratio = 1.0
 	n.add_theme_color_override("font_color", card.color)
 	n.add_theme_font_size_override("font_size", 12)
 	hbox.add_child(n)

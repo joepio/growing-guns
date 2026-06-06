@@ -139,7 +139,7 @@ var _exit_to_menu_button: Button = null
 var _rematch_requested: bool = false
 var _match_end_votes: Dictionary = {} # id -> "rematch" | "extend"
 
-# --- Dev panel (F1) ---
+# --- Dev panel (`.`) ---
 # Owned by scripts/dev_panel.gd, instantiated in _ready and added under $HUD.
 # Stays null in release builds (no --dev flag) — cheats are unreachable.
 var _dev_panel: Node = null
@@ -206,6 +206,10 @@ var _flash_alpha_vel: float = 0.0
 # tears visibly with vsync off (a single frame jumping 0 -> 0.8 splits the
 # screen). Ramping over a couple frames keeps per-frame change small.
 var _flash_alpha_target: float = 0.0
+var _phoenix_fade_overlay: ColorRect = null
+var _phoenix_fade_alpha: float = 0.0
+var _phoenix_fade_out_per_s: float = 0.0
+const PHOENIX_FADE_OUT_SECONDS := 0.9
 
 var _last_input_was_controller := false
 var _last_controller_device: int = -1
@@ -255,6 +259,7 @@ func _ready() -> void:
 	_build_rematch_overlay()
 	_build_custom_cursor()
 	_build_explosion_flash_overlay()
+	_build_phoenix_fade_overlay()
 	_build_retro_filter()
 	_build_network_status_panel()
 	_build_kill_feed()
@@ -275,9 +280,9 @@ func _ready() -> void:
 	# newer than the build the user is running.
 	add_child(preload("res://scripts/version_check.gd").new())
 	_build_tab_overlay()
-	# Dev panel (F1) — cheats. Only built in debug runs (editor + debug
+	# Dev panel (`.`) — cheats. Only built in debug runs (editor + debug
 	# exports) or when --dev is on the command line. Released zips ship
-	# without it so the F1 panel + G/P/M/1-5 cheat hotkeys are dormant.
+	# without it so the `.` panel + G/P/M/1-5 cheat hotkeys are dormant.
 	if _dev_tools_enabled():
 		_dev_panel = DEV_PANEL_SCRIPT.new()
 		_dev_panel.setup(self)
@@ -532,6 +537,7 @@ func _on_join_timeout() -> void:
 
 func _process(delta: float) -> void:
 	_update_explosion_sidechain(delta)
+	_update_phoenix_fade(delta)
 	_sync_mouse_mode()
 	_update_ping_monitor(delta)
 	if _tab_root and _tab_root.visible:
@@ -643,7 +649,7 @@ func _input(event: InputEvent) -> void:
 			_hide_tab_overlay()
 		get_viewport().set_input_as_handled()
 		return
-	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_F1:
+	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_PERIOD:
 		if _dev_panel != null:
 			_dev_panel.toggle()
 			_sync_mouse_mode()
@@ -823,13 +829,22 @@ func execute_phoenix_revive(player_id: int, fx_pos: Vector3) -> void:
 	var p := players_root.get_node_or_null(str(player_id))
 	if p == null or not is_instance_valid(p):
 		return
+	p.clear_ragdoll.rpc()
+	p.begin_phoenix_ascension.rpc(fx_pos, Time.get_ticks_msec())
+	p.set_frozen.rpc(false)
+
+
+@rpc("any_peer", "call_local", "reliable")
+func finish_phoenix_revive(player_id: int) -> void:
+	if not multiplayer.is_server():
+		return
+	var p := players_root.get_node_or_null(str(player_id))
+	if p == null or not is_instance_valid(p):
+		return
 	var pick := _pick_spawn(_current_player_positions())
 	var sky_pos: Vector3 = pick["pos"] + Vector3(0.0, 60.0, 0.0)
-	p.clear_ragdoll.rpc()
-	p.phoenix_revive_at.rpc(sky_pos, pick["yaw"], fx_pos)
-	p.set_frozen.rpc(false)
+	p._finish_phoenix_ascension.rpc(sky_pos, pick["yaw"])
 	p.set_launching.rpc(true, 80.0)
-	p._phoenix_fx.rpc(fx_pos)
 
 
 func _arena_spawnpoints() -> Array:
@@ -2776,6 +2791,48 @@ func _build_explosion_flash_overlay() -> void:
 	_explosion_flash_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_explosion_flash_overlay.color = Color(1.0, 0.96, 0.88, 0.0)
 	flash_layer.add_child(_explosion_flash_overlay)
+
+
+func _build_phoenix_fade_overlay() -> void:
+	var fade_layer := CanvasLayer.new()
+	fade_layer.name = "PhoenixFadeLayer"
+	fade_layer.layer = 51
+	add_child(fade_layer)
+	_phoenix_fade_overlay = ColorRect.new()
+	_phoenix_fade_overlay.name = "PhoenixFadeOverlay"
+	_phoenix_fade_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_phoenix_fade_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_phoenix_fade_overlay.color = Color(1.0, 1.0, 1.0, 0.0)
+	fade_layer.add_child(_phoenix_fade_overlay)
+
+
+func set_phoenix_fade(player_id: int, alpha: float) -> void:
+	if player_id not in _local_view_player_ids():
+		return
+	_phoenix_fade_out_per_s = 0.0
+	_phoenix_fade_alpha = clampf(alpha, 0.0, 1.0)
+	if _phoenix_fade_overlay:
+		_phoenix_fade_overlay.color = Color(1.0, 1.0, 1.0, _phoenix_fade_alpha)
+
+
+func begin_phoenix_fade_out(player_id: int) -> void:
+	if player_id not in _local_view_player_ids():
+		return
+	if _phoenix_fade_alpha <= 0.001:
+		return
+	_phoenix_fade_out_per_s = _phoenix_fade_alpha / PHOENIX_FADE_OUT_SECONDS
+
+
+func _update_phoenix_fade(delta: float) -> void:
+	if _phoenix_fade_overlay == null:
+		return
+	if _phoenix_fade_out_per_s > 0.0:
+		_phoenix_fade_alpha = move_toward(_phoenix_fade_alpha, 0.0, _phoenix_fade_out_per_s * delta)
+		if _phoenix_fade_alpha <= 0.001:
+			_phoenix_fade_alpha = 0.0
+			_phoenix_fade_out_per_s = 0.0
+		_phoenix_fade_overlay.color = Color(1.0, 1.0, 1.0, _phoenix_fade_alpha)
+
 
 func _build_network_status_panel() -> void:
 	if _network_status_panel != null:
