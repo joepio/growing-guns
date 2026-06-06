@@ -101,6 +101,7 @@ var gun_barrel: MeshInstance3D = null
 var gun_magazine: MeshInstance3D = null
 var _procedural_gun: Node3D = null
 var _ragdoll_pieces: Array[Node] = []
+var _blood_wounds: Array[Node] = []
 
 var jumps_left := 2
 var dash_timer := 0.0
@@ -650,7 +651,10 @@ func _apply_ghost_visuals() -> void:
 	if _phoenix_ascending:
 		_apply_phoenix_visuals()
 		return
-	body_model.visible = (is_bot or split_screen_local or not is_multiplayer_authority())
+	var show_body := is_bot or split_screen_local or not is_multiplayer_authority()
+	if health <= 0 and not ghost_mode:
+		show_body = false
+	body_model.visible = show_body
 	name_label.visible = not ghost_mode and (is_bot or (not split_screen_local and not is_multiplayer_authority()))
 	# Hide both first-person muzzle gun and third-person gun while ghosting —
 	# spectators shouldn't see their weapon, and other players shouldn't see
@@ -1939,6 +1943,15 @@ func _spawn_impact(pos: Vector3, color: Color = Color(1.0, 0.9, 0.3), scale_f: f
 func _spawn_blood(pos: Vector3, dir: Vector3, dmg_ratio: float) -> void:
 	Violence.spawn_blood(get_tree().current_scene, pos, dir, dmg_ratio, VFX_MAX_BLOOD_DROPS)
 
+func _spawn_blood_wound(
+	hit_pos: Vector3,
+	normal: Vector3,
+	dir: Vector3,
+	collider: Node,
+	strength: float,
+) -> void:
+	Violence.spawn_player_blood_wound(self, collider, hit_pos, normal, dir, strength)
+
 func _spawn_laser_tracer(from: Vector3, to: Vector3) -> void:
 	Violence.spawn_laser_tracer(get_tree().current_scene, from, to)
 
@@ -1952,8 +1965,13 @@ func _ragdoll(
 	blast_radius: float = 0.0,
 	blast_severity: float = 0.0,
 	is_head: bool = false,
+	overkill_disintegrate: bool = false,
+	overkill_severity: float = 0.0,
 ) -> void:
-	Violence.do_ragdoll(self, push_dir, force_origin, gib_force, blast_radius, blast_severity, is_head)
+	Violence.do_ragdoll(
+		self, push_dir, force_origin, gib_force, blast_radius, blast_severity, is_head,
+		overkill_disintegrate, overkill_severity,
+	)
 
 
 @rpc("any_peer", "call_local", "reliable")
@@ -2677,7 +2695,12 @@ func _apply_damage(
 		return
 	if _dash_iframe_timer > 0.0:
 		return
-	health = max(0, health - amount)
+	var new_health := health - amount
+	var overkill_disintegrate := new_health <= Violence.OVERKILL_DISINTEGRATE_HEALTH
+	var overkill_severity := 0.0
+	if overkill_disintegrate:
+		overkill_severity = clampf(float(-new_health - Violence.OVERKILL_DISINTEGRATE_HEALTH) / 50.0, 0.4, 2.5)
+	health = maxi(0, new_health)
 	var game_scene := get_tree().current_scene
 	if game_scene and game_scene.has_method("_report_player_damage"):
 		if multiplayer.is_server():
@@ -2764,7 +2787,16 @@ func _apply_damage(
 		if suppress_death_ragdoll:
 			_burn_death.rpc()
 		else:
-			_ragdoll.rpc(push, force_origin, ctx_force, blast_radius, blast_severity, is_head)
+			_ragdoll.rpc(
+				push,
+				force_origin,
+				ctx_force,
+				blast_radius,
+				blast_severity,
+				is_head,
+				overkill_disintegrate,
+				overkill_severity,
+			)
 		died.emit(from_id)
 		_report_death.rpc_id(1, from_id)
 

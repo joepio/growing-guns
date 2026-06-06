@@ -334,7 +334,19 @@ func _handle_collision(result: Dictionary) -> void:
 
 	# Visuals on all peers
 	if hit_player:
-		shooter_node.call("_spawn_blood", hit_pos, direction, dmg_ratio)
+		var is_head_hit: bool = bool(shooter_node.call("_is_head_hit", collider))
+		var blood_ratio: float = dmg_ratio * (1.7 if is_head_hit else 1.0)
+		shooter_node.call("_spawn_blood", hit_pos, direction, blood_ratio)
+		hit_player.call(
+			"_spawn_blood_wound",
+			hit_pos,
+			normal,
+			direction,
+			collider,
+			clampf(blood_ratio * 0.75, 0.45, 1.2),
+		)
+		if is_head_hit:
+			Violence.spawn_headshot_spray(get_tree().current_scene, hit_pos, direction, blood_ratio)
 	else:
 		shooter_node.call("_spawn_impact", hit_pos, weapon_stats.bullet_color, weapon_stats.get_bullet_scale(), dmg_ratio, normal, weapon_stats.explosive_radius, collider)
 		SFX.impact(hit_pos, dmg_ratio)
