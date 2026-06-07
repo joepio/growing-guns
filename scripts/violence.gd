@@ -6,6 +6,11 @@ class_name Violence extends RefCounted
 const GIB_CHUNK_COUNT := 5
 # Killing blow that would leave health here or lower → full body disintegrate.
 const OVERKILL_DISINTEGRATE_HEALTH := -50
+# Screen-space heat-shimmer + shockwave distortion read the framebuffer (a
+# back-buffer copy) — expensive, and barely visible on small rapid blasts. Only
+# spawn them for big "hero" blasts (airstrike-class); explosive-round / grenade
+# spam (radius ≈ 6) skips them entirely, which is the bulk of the cost.
+const BLAST_DISTORTION_MIN_RADIUS := 16.0
 
 # Single home for all death / ragdoll / impact / gore logic. Player.gd keeps
 # RPC entry points (must live on the Node) as thin pass-throughs and exposes
@@ -155,6 +160,11 @@ static func warmup_blast_materials(scene: Node) -> void:
 	proj.shader = _get_blast_projectile_shader()
 	proj.set_shader_parameter("anim", 0.3)
 	_warmup_mm_material(scene, proj)
+	# Screen-space heat-shimmer + shockwave (hint_screen_texture) — only big
+	# blasts use them, but the back-buffer-reading PSO is pricey to compile, so
+	# warm it with sub-pixel (invisible) instances so the first airstrike is smooth.
+	spawn_heat_distortion(scene, Vector3.ZERO, 0.005, 0.25, 0.01)
+	spawn_shockwave_ring(scene, Vector3.ZERO, 0.005)
 
 
 # Like warmup_material but compiles the instanced (MultiMesh) PSO variant.
@@ -1574,6 +1584,7 @@ const _BILLOW_MM_CODE := "
 	varying float v_heat;
 	varying vec3 v_body;
 	varying float v_opk;
+	varying float v_shade;   // per-region darkness variation (free — reuses lump noise)
 	void vertex() {
 		float seed = INSTANCE_CUSTOM.x;
 		float delay = INSTANCE_CUSTOM.y;
@@ -1586,6 +1597,10 @@ const _BILLOW_MM_CODE := "
 		float s = seed * 100.0;
 		float a = sin(VERTEX.x * 6.3 + s) * sin(VERTEX.y * 5.1 + s * 1.7) * sin(VERTEX.z * 7.2 + s * 0.9);
 		float b = sin(VERTEX.x * 13.0 + s * 2.1) * sin(VERTEX.z * 11.0 + s * 1.3);
+		// Finer-frequency octave used only for shading so darkness varies across
+		// the puff surface (mixed with the lump shape).
+		float c = sin(VERTEX.x * 21.0 + s * 3.3) * sin(VERTEX.y * 18.0 + s * 2.1) * sin(VERTEX.z * 25.0 + s * 1.5);
+		v_shade = (a * 0.7 + b * 0.3) * 0.55 + c * 0.45;
 		VERTEX += NORMAL * (a * 0.7 + b * 0.3) * lump_amount;
 		// Growth 0.35 -> 1.0 at a CONSTANT rate (linear — keeps expanding, no
 		// ease-out settling at the end). The slow fade is the alpha's job.
@@ -1606,7 +1621,11 @@ const _BILLOW_MM_CODE := "
 			vec3 body = mix(hot * 0.3, vec3(0.45, 0.16, 0.04), fres);
 			ALBEDO = body + hot * glow * facing;   // unshaded ignores EMISSION; HDR via ALBEDO
 		} else {
-			vec3 body = mix(v_body, v_body * 0.1, fres);
+			// Darkness varies across the surface — some patches near-black, some
+			// lighter — for turbulent, non-uniform smoke.
+			float shade = 0.45 + 0.85 * (v_shade * 0.5 + 0.5);
+			vec3 base = v_body * shade;
+			vec3 body = mix(base, base * 0.1, fres);
 			float glow = v_heat * (1.0 - smoothstep(0.0, 0.45, v_age));  // v_heat = subtle warm underglow
 			ALBEDO = body + warm_glow * glow * facing;
 		}
@@ -1661,7 +1680,7 @@ static func _spawn_blast_billow(scene: Node, pos: Vector3, radius: float, count:
 			# Dark, dense neutral-grey smoke (one grey value with a fixed slight
 			# warm bias — NOT independent per-channel randomness, which produced
 			# random red/green/purple tints).
-			var g := rng.randf_range(0.12, 0.24)
+			var g := rng.randf_range(0.07, 0.26)
 			body = Color(g * 1.08, g, g * 0.9)
 			opk = rng.randf_range(0.6, 0.85)
 		mm.set_instance_color(i, Color(body.r, body.g, body.b, opk))
@@ -1805,9 +1824,11 @@ static func spawn_bullet_blast(scene: Node, pos: Vector3, radius: float, color: 
 	if not full_blast:
 		_spawn_cheap_blast_flare(scene, pos, radius, color)
 		return
-	var expand_time := blast_expand_time(radius)
-	spawn_heat_distortion(scene, pos, radius, expand_time, clampf(radius * 0.012, 0.025, 0.06))
-	spawn_shockwave_ring(scene, pos, radius)
+	# Screen-space distortion (back-buffer read) only on big hero blasts — strong
+	# and visible there, skipped entirely on small/rapid spam (perf).
+	if radius >= BLAST_DISTORTION_MIN_RADIUS:
+		spawn_heat_distortion(scene, pos, radius, clampf(0.3 + radius * 0.012, 0.3, 0.7), clampf(radius * 0.014, 0.06, 0.14))
+		spawn_shockwave_ring(scene, pos, radius)
 	# Drop scorch rings on every nearby surface (floor under midair blasts,
 	# walls beside corner blasts, ceiling above ground-level pops).
 	spawn_blast_scorches(scene, pos, radius)
@@ -1996,7 +2017,7 @@ static func spawn_heat_distortion(scene: Node, pos: Vector3, radius: float, dura
 
 			void fragment() {
 				vec3 n = normalize((VIEW_MATRIX * vec4(NORMAL, 0.0)).xyz);
-				float fresnel = pow(1.0 - abs(dot(normalize(VIEW), NORMAL)), 2.4);
+				float fresnel = pow(1.0 - abs(dot(normalize(VIEW), NORMAL)), 1.6);
 				vec2 offset = n.xy * distortion_strength * fresnel;
 				vec2 zoom = (SCREEN_UV - vec2(0.5)) * zoom_strength * fresnel;
 				vec2 uv = SCREEN_UV - zoom + offset;
@@ -2007,9 +2028,10 @@ static func spawn_heat_distortion(scene: Node, pos: Vector3, radius: float, dura
 		"""
 	var mat := ShaderMaterial.new()
 	mat.shader = _heat_shader
-	mat.set_shader_parameter("distortion_strength", strength * 2.4)
-	mat.set_shader_parameter("zoom_strength", strength * 0.9)
-	mat.set_shader_parameter("opacity", 0.34)
+	var heat_distort := strength * 3.0
+	mat.set_shader_parameter("distortion_strength", heat_distort)
+	mat.set_shader_parameter("zoom_strength", strength * 1.4)
+	mat.set_shader_parameter("opacity", 0.85)
 	shell.material_override = mat
 	_attach_world_3d(scene, shell, pos)
 
@@ -2019,21 +2041,21 @@ static func spawn_heat_distortion(scene: Node, pos: Vector3, radius: float, dura
 		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
 	tw.tween_method(
 		func(v: float) -> void: mat.set_shader_parameter("distortion_strength", v),
-		strength,
+		heat_distort,
 		0.0,
-		duration * 0.85
+		duration * 0.9
 	).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
 	tw.tween_method(
 		func(v: float) -> void: mat.set_shader_parameter("zoom_strength", v),
-		strength * 0.35,
+		strength * 1.4,
 		0.0,
-		duration * 0.85
+		duration * 0.9
 	).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
 	tw.tween_method(
 		func(v: float) -> void: mat.set_shader_parameter("opacity", v),
-		0.34,
+		0.85,
 		0.0,
-		duration * 0.72
+		duration * 0.8
 	).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
 	tw.chain().tween_callback(shell.queue_free)
 
@@ -2075,27 +2097,27 @@ static func spawn_shockwave_ring(scene: Node, pos: Vector3, radius: float) -> vo
 		"""
 	var mat := ShaderMaterial.new()
 	mat.shader = _shock_shader
-	mat.set_shader_parameter("distortion_strength", 0.05)
-	mat.set_shader_parameter("ring_thickness", 7.0)
-	mat.set_shader_parameter("opacity", 0.9)
+	mat.set_shader_parameter("distortion_strength", 0.16)
+	mat.set_shader_parameter("ring_thickness", 4.0)
+	mat.set_shader_parameter("opacity", 0.95)
 	shell.material_override = mat
 	_attach_world_3d(scene, shell, pos)
-	# Sound-speed expansion (matches audio delay) with 30 ms minimum so
-	# tiny blasts remain visible.
-	var dur: float = maxf(0.03, radius / 343.0)
+	# Roughly sound-speed expansion, slowed a touch + 0.12s floor so the shock
+	# front is actually visible rather than a single-frame flicker.
+	var dur: float = maxf(0.12, radius / 343.0 * 1.6)
 	var target_scale := Vector3.ONE * maxf(0.01, (radius * 1.05) / _shock_mesh.radius)
 	var tw := shell.create_tween().set_parallel(true)
 	tw.tween_property(shell, "scale", target_scale, dur)\
 		.set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_OUT)
 	tw.tween_method(
 		func(v: float) -> void: mat.set_shader_parameter("distortion_strength", v),
-		0.05,
+		0.16,
 		0.0,
 		dur
 	).set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_OUT)
 	tw.tween_method(
 		func(v: float) -> void: mat.set_shader_parameter("opacity", v),
-		0.9,
+		0.95,
 		0.0,
 		dur * 0.9
 	).set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_OUT)

@@ -225,7 +225,7 @@ func _boom() -> void:
 	if _stress_rate < 8.0:
 		SFX.explosion(pos, _radius)
 	if _fx.heat:
-		Violence.spawn_heat_distortion(self, pos, _radius, Violence.blast_expand_time(_radius), clampf(_radius * 0.012, 0.025, 0.06))
+		Violence.spawn_heat_distortion(self, pos, _radius, clampf(0.3 + _radius * 0.012, 0.3, 0.7), clampf(_radius * 0.014, 0.06, 0.14))
 	if _fx.shock:
 		Violence.spawn_shockwave_ring(self, pos, _radius)
 	if _fx.lights:
