@@ -542,6 +542,48 @@ func warmup_async(weapons: Array, radii: Array) -> void:
 			await get_tree().process_frame
 
 
+# One-time warmup (called once at game boot from Game._ready) for the
+# procedurally-synthesized effect sounds that warmup_async — shots + explosions,
+# re-run each round — doesn't cover. Each first synth is otherwise a main-thread
+# hitch the first time the effect fires; the ion charge is the worst (a 3.8s
+# buffer). One synth per frame, like warmup_async, so boot doesn't spike. The
+# keys/buckets mirror the live call sites — keep them in sync if those change.
+func warmup_specials() -> void:
+	# Ion cannon. Charge bucket from IonCannon.CHARGE_SECONDS (3.8); detonation
+	# from BLAST_RADIUS (38) — its burst zap plus the bucket-24 explosion boom
+	# it layers on top (radius 38 clamps to the bang/rumble bucket 24, which the
+	# [4,6,8,10] per-round warmup never reaches).
+	_cached_wav("ion_cannon_charge:3.80", Callable(self, "_synth_ion_cannon_charge").bind(3.8))
+	await get_tree().process_frame
+	for v in 3:
+		_cached_wav("ion_cannon_burst:38:%d" % v, Callable(self, "_synth_ion_cannon_burst").bind(38.0, v))
+		await get_tree().process_frame
+	for v in EXPLOSION_VARIANTS:
+		_cached_wav("explosion_bang:24:%d" % v, Callable(self, "_synth_explosion").bind(24.0, v))
+		await get_tree().process_frame
+		_cached_wav("explosion_rumble:24:%d" % v, Callable(self, "_synth_explosion_rumble").bind(24.0, v))
+		await get_tree().process_frame
+	# Air strike inbound whistle. Bucket from AirStrike.ROCKET_TRAVEL_SECONDS
+	# (2.3 → 2.25); warm both the near and distant timbre.
+	for distant in [0, 1]:
+		_cached_wav("air_strike_inbound:2.25:%d" % distant,
+			Callable(self, "_synth_air_strike_inbound").bind(2.25, distant == 1))
+		await get_tree().process_frame
+	# Lava sizzle — contact + fall, 3 variants each.
+	for fall in [false, true]:
+		var mode := "fall" if fall else "contact"
+		for v in 3:
+			_cached_wav("lava_sizzle2:%s:%d" % [mode, v], Callable(self, "_synth_lava_sizzle").bind(v, fall))
+			await get_tree().process_frame
+	# Brass casing pings — every shot drops one, but warm the pool so the very
+	# first casing of the match doesn't synth mid-frame either.
+	for v in CASING_VARIANTS:
+		_cached_wav("casing_drop:%d" % v, Callable(self, "_synth_casing_drop").bind(v))
+		await get_tree().process_frame
+	# Proximity-mine arm beep.
+	_cached_samples("mine_plant", Callable(self, "_synth_mine_plant"))
+
+
 func _shot_cache_key(w: Weapon, variant: int) -> String:
 	if w == null:
 		return "shot:default:%d" % variant
