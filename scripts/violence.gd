@@ -104,6 +104,47 @@ static func prewarm_disintegration_cache() -> void:
 	bot_head.size = Vector3(0.78, 0.78, 0.78)
 	gib_warm_sync(bot_head, GIB_CHUNK_COUNT)
 
+
+# Force the GPU to compile `mat`'s render pipeline (PSO) now, during a quiet
+# window (round start), instead of synchronously on the material's first
+# in-fight draw — that first draw stalls the render thread for ~100-250ms.
+# Renders the material on a sub-pixel sphere at the scene origin for a few
+# frames, then self-frees. Mirrors grenade.gd's warmup_shaders; the per-effect
+# warmers (warmup_blast_materials, IonCannon.warmup_shaders,
+# Player.warmup_phoenix_shaders) build their real materials and route them here.
+static func warmup_material(scene: Node, mat: Material) -> void:
+	if scene == null or mat == null:
+		return
+	var mi := MeshInstance3D.new()
+	var sphere := SphereMesh.new()
+	sphere.radius = 0.001
+	sphere.height = 0.002
+	mi.mesh = sphere
+	mi.material_override = mat
+	# Park at the origin so it's actually rendered (compiles the PSO) but at
+	# sub-pixel scale so it's invisible.
+	_attach_world_3d(scene, mi, Vector3.ZERO)
+	var t := Timer.new()
+	t.wait_time = 0.4
+	t.one_shot = true
+	t.process_mode = Node.PROCESS_MODE_ALWAYS
+	mi.add_child(t)
+	t.start()
+	t.timeout.connect(mi.queue_free)
+
+
+# Pre-compile the explosion fireball material PSO. The screen-space heat +
+# shock distortion shaders are warmed separately by grenade.warmup_shaders;
+# this covers the additive emissive shell every blast spawns via
+# _spawn_blast_fireball. (The cluster-pop core + phoenix column share their PSO
+# with the phoenix-column material, warmed in Player.warmup_phoenix_shaders.)
+static func warmup_blast_materials(scene: Node) -> void:
+	if scene == null:
+		return
+	var fireball := StandardMaterial3D.new()
+	_configure_blast_fireball_mat(fireball, Color(1.0, 0.78, 0.42), 0.88, 16.0)
+	warmup_material(scene, fireball)
+
 static func _gib_warm_task(mesh: Mesh, chunk_count: int) -> void:
 	var variants: Array = _gib_build_variants(mesh, chunk_count)
 	_gib_cache_mutex.lock()

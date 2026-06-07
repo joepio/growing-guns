@@ -1394,7 +1394,14 @@ func _start_round_now() -> void:
 	_hide_rematch_overlay.rpc()
 	_warmup_round_audio()
 	if has_node("Arena"):
-		preload("res://scripts/grenade.gd").warmup_shaders($Arena)
+		var arena := $Arena
+		# Compile every effect's GPU pipelines now, in this quiet window, so the
+		# first explosion / ion cannon / phoenix revive of the match doesn't
+		# stall the render thread (~200ms) compiling them mid-fight.
+		preload("res://scripts/grenade.gd").warmup_shaders(arena)   # heat + shock distortion shaders
+		Violence.warmup_blast_materials(arena)                      # explosion fireball shell
+		ION_CANNON_SCRIPT.warmup_shaders(arena)                     # ion beam / motes / detonation
+		preload("res://scripts/player.gd").warmup_phoenix_shaders(arena)  # phoenix body + column
 	_announce.rpc("", 0)
 	if multiplayer.is_server() and ROUND_MODIFIERS_SCRIPT.needs_air_strikes(current_round_modifier):
 		_air_strikes_armed = true
