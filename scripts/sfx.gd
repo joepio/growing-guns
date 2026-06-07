@@ -1793,8 +1793,8 @@ func _synth_ion_cannon_burst(radius: float, variant: int) -> PackedVector2Array:
 	# of the regular explosion bang. Two slightly-detuned saws (fundamental +
 	# octave) give weight without mud; the raw saw edge is tamed by a one-pole
 	# low-pass so it reads as a round, chest-thumping boom rather than a buzz. A
-	# brief noise crack adds the initial zap transient, and a downward pitch
-	# sweep settles it into a thud. Waveshaped through tanh — loud, never clips.
+	# brief noise crack adds the initial zap transient. Steady pitch (no sweep).
+	# Waveshaped through tanh — loud, never clips.
 	var rng := RandomNumberGenerator.new()
 	rng.seed = hash([radius, variant, "ion_burst"])
 	var r_norm: float = clampf(radius / 38.0, 0.6, 1.4)
@@ -1813,10 +1813,8 @@ func _synth_ion_cannon_burst(radius: float, variant: int) -> PackedVector2Array:
 	for i in range(n):
 		var t: float = float(i) / MIX_RATE
 		var u: float = t / dur
-		# Pitch starts ~18% high and settles to the fundamental over the head.
-		var sweep: float = lerpf(1.18, 1.0, smoothstep(0.0, 0.55, u))
-		ph0 = fmod(ph0 + TAU * f0 * sweep / MIX_RATE, TAU)
-		ph1 = fmod(ph1 + TAU * f1 * sweep / MIX_RATE, TAU)
+		ph0 = fmod(ph0 + TAU * f0 / MIX_RATE, TAU)
+		ph1 = fmod(ph1 + TAU * f1 / MIX_RATE, TAU)
 		var saw: float = (ph0 / PI - 1.0) * 0.85 + (ph1 / PI - 1.0) * 0.3
 		# One-pole low-pass rounds off the saw's buzzy upper harmonics.
 		lp = lerpf(lp, saw, 0.45)
