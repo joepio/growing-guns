@@ -1250,31 +1250,42 @@ static func _animate_blast_fireball(
 ) -> void:
 	var grow: float = timing.grow
 	var fade: float = timing.fade
+	var life: float = grow + fade
 	var start_hot := hot.lerp(Color(1.0, 1.0, 0.98), 0.65)
 	var mid_hot := hot.lerp(Color(1.0, 0.48, 0.08), 0.5)
-	var end_hot := hot.lerp(Color(1.0, 0.32, 0.05), 0.35)
+	var end_hot := hot.lerp(Color(1.0, 0.30, 0.04), 0.45)
 	_configure_blast_fireball_mat(mat, start_hot, 0.88, 16.0)
 	ball.scale = Vector3.ONE * maxf(0.01, target_scale * 0.28)
 
-	var color_tw := ball.create_tween().set_parallel(true)
-	color_tw.tween_property(mat, "emission", mid_hot, grow * 0.55)\
-		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
-	color_tw.tween_property(mat, "emission", end_hot, grow * 0.45 + fade)\
-		.set_delay(grow * 0.55).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
-	color_tw.tween_property(mat, "albedo_color", Color(mid_hot.r, mid_hot.g, mid_hot.b, 0.4), grow * 0.55)\
-		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
-	color_tw.tween_property(mat, "albedo_color", Color(end_hot.r, end_hot.g, end_hot.b, 0.26), grow * 0.45 + fade)\
-		.set_delay(grow * 0.55).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	# One sphere, one tween per property — nothing animates the same property
+	# twice, so it reads as a single fireball easing white→orange while getting
+	# steadily dimmer and more transparent. (The old version ran two overlapping
+	# albedo tweens whose alpha fought near the end, popping an orange ghost
+	# sphere back into view as it died.)
+	# Scale: expand linearly for the whole lifetime — constant rate, no easing
+	# slowdown and no plateau (keeps growing right up until it's freed).
+	ball.create_tween().tween_property(ball, "scale", Vector3.ONE * target_scale, life)\
+		.set_trans(Tween.TRANS_LINEAR)
 
-	var tw := ball.create_tween()
-	tw.tween_property(ball, "scale", Vector3.ONE * target_scale, grow)\
-		.set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_IN_OUT)
-	tw.chain().set_parallel(true)
-	tw.tween_property(mat, "emission_energy_multiplier", 0.0, fade)\
-		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_IN)
-	tw.tween_property(mat, "albedo_color", Color(end_hot.r, end_hot.g, end_hot.b, 0.0), fade)\
+	# Emission hue: white → orange → deep orange across the full life.
+	var col_tw := ball.create_tween()
+	col_tw.tween_property(mat, "emission", mid_hot, life * 0.45)\
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	col_tw.tween_property(mat, "emission", end_hot, life * 0.55)\
 		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
-	tw.chain().tween_callback(ball.queue_free)
+
+	# Albedo carries the same hue and a single clean alpha sweep 0.88 → 0 — one
+	# front-loaded ease (no mid-life plateau), so transparency rises smoothly and
+	# fast all the way to fully see-through.
+	var alb_tw := ball.create_tween()
+	alb_tw.tween_property(mat, "albedo_color", Color(end_hot.r, end_hot.g, end_hot.b, 0.0), life)\
+		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+
+	# Emission energy: a hot flash decaying to nothing (the "less emissive" part).
+	var em_tw := ball.create_tween()
+	em_tw.tween_property(mat, "emission_energy_multiplier", 0.0, life)\
+		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+	em_tw.tween_callback(ball.queue_free)
 
 
 static func _spawn_blast_fireball(scene: Node, pos: Vector3, radius: float, color: Color = Color.WHITE) -> void:
