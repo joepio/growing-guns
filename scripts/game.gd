@@ -218,6 +218,7 @@ var _flash_adsr_release_end_ms: int = 0
 var _phoenix_fade_overlay: ColorRect = null
 var _phoenix_fade_alpha: float = 0.0
 var _phoenix_fade_out_per_s: float = 0.0
+var _loading_overlay: ColorRect = null
 const PHOENIX_FADE_OUT_SECONDS := 0.9
 
 var _last_input_was_controller := false
@@ -233,6 +234,10 @@ var _audio_panel: AudioSettingsPanel = null
 func _ready() -> void:
 	ProceduralMusic.set_energy(1, true)
 	_install_controller_input_map()
+	# Show the loading overlay immediately so no garbage is visible while
+	# the arena, players, and shaders all get set up.
+	_build_loading_overlay()
+	_show_loading_overlay()
 	# Splitscreen manager: builds a CanvasLayer + per-device viewports if the
 	# NetworkManager flag is set. Inert otherwise (still a Node, but no UI).
 	_splitscreen = SPLITSCREEN_MANAGER_SCRIPT.new()
@@ -372,6 +377,27 @@ func _ready() -> void:
 		var requested_count: int = int(NetworkManager.get_meta("bot_count_on_start", 1)) if bot_requested else 0
 		if bot_requested:
 			_spawn_bots(requested_count)
+		# Warm up GPU pipelines before the first round. Everything (arena,
+		# players, gun) is now in the scene tree. The loading overlay hides
+		# whatever garbage the GPU draws while compiling. We add warmup
+		# meshes for every effect shader, then force the render thread to
+		# process all pending draws synchronously via
+		# RenderingServer.force_draw(). This blocks until the GPU driver has
+		# compiled all PSOs — no guessing, no timer.
+		if not _effect_shaders_warmed and has_node("Arena"):
+			_effect_shaders_warmed = true
+			var arena := $Arena
+			preload("res://scripts/grenade.gd").warmup_shaders(arena)
+			Violence.warmup_blast_materials(arena)
+			ION_CANNON_SCRIPT.warmup_shaders(arena)
+			preload("res://scripts/player.gd").warmup_phoenix_shaders(arena)
+			# Let one frame render so the loading overlay is visible, then force
+			# the GPU to compile all PSOs synchronously while the overlay hides it.
+			await get_tree().process_frame
+			RenderingServer.force_draw()
+			_hide_loading_overlay()
+		else:
+			_hide_loading_overlay()
 		_maybe_start_match()
 
 		# Solo-vs-AI fallback: with the main menu gone, every fresh launch
@@ -1384,7 +1410,6 @@ func _start_round_now() -> void:
 		# at the end of the previous round) before kicking off the launch —
 		# otherwise the player lands and can't move.
 		p.set_frozen.rpc(false)
-		p.set_launching.rpc(true, 80.0)
 		p.clear_ragdoll.rpc()
 	_clear_projectiles.rpc()
 	_clear_craters.rpc()
@@ -1402,19 +1427,9 @@ func _start_round_now() -> void:
 		_trigger_lava_leak(LAVA_LEAK_SPREAD_SECONDS)
 	_hide_rematch_overlay.rpc()
 	_warmup_round_audio()
-	# Compile every effect's GPU pipelines once, in this quiet window with the
-	# arena + camera live (needed: a PSO only compiles when actually drawn), so
-	# the first explosion / ion cannon / phoenix revive of the match doesn't
-	# stall the render thread (~200ms) compiling them mid-fight. A compiled PSO
-	# is cached process-wide, so this only needs to happen once per session.
-	if not _effect_shaders_warmed and has_node("Arena"):
-		_effect_shaders_warmed = true
-		var arena := $Arena
-		preload("res://scripts/grenade.gd").warmup_shaders(arena)   # heat + shock distortion shaders
-		Violence.warmup_blast_materials(arena)                      # explosion fireball shell
-		ION_CANNON_SCRIPT.warmup_shaders(arena)                     # ion beam / motes / detonation
-		preload("res://scripts/player.gd").warmup_phoenix_shaders(arena)  # phoenix body + column
-	_announce.rpc("", 0)
+	# Now launch players into the fight.
+	for p in round_players:
+		p.set_launching.rpc(true, 80.0)
 	if multiplayer.is_server() and ROUND_MODIFIERS_SCRIPT.needs_air_strikes(current_round_modifier):
 		_air_strikes_armed = true
 		_air_strike_timer = randf_range(0.5, 1.25)
@@ -2877,6 +2892,40 @@ func _build_phoenix_fade_overlay() -> void:
 	_phoenix_fade_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_phoenix_fade_overlay.color = Color(1.0, 1.0, 1.0, 0.0)
 	fade_layer.add_child(_phoenix_fade_overlay)
+
+
+func _build_loading_overlay() -> void:
+	var load_layer := CanvasLayer.new()
+	load_layer.name = "LoadingLayer"
+	load_layer.layer = 100
+	add_child(load_layer)
+	_loading_overlay = ColorRect.new()
+	_loading_overlay.name = "LoadingOverlay"
+	_loading_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_loading_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_loading_overlay.color = Color(0.0, 0.0, 0.0, 0.85)
+	_loading_overlay.visible = false
+	load_layer.add_child(_loading_overlay)
+	var label := Label.new()
+	label.name = "LoadingLabel"
+	label.text = "LOADING SHADERS…"
+	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	label.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	label.add_theme_color_override("font_color", Color(1.0, 1.0, 1.0, 0.9))
+	label.add_theme_font_size_override("font_size", 36)
+	label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_loading_overlay.add_child(label)
+
+
+func _show_loading_overlay() -> void:
+	if _loading_overlay:
+		_loading_overlay.visible = true
+
+
+func _hide_loading_overlay() -> void:
+	if _loading_overlay:
+		_loading_overlay.visible = false
 
 
 func set_phoenix_fade(player_id: int, alpha: float) -> void:
