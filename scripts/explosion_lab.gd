@@ -206,6 +206,14 @@ func _build_ui() -> void:
 		func(v: float) -> void:
 			_repeat_interval = v
 			_repeat_accum = 0.0)
+	_add_slider(vb, "Smoke clouds ×", 0.0, 3.0, Violence.blast_smoke_count_scale, 0.1,
+		func(v: float) -> void: Violence.blast_smoke_count_scale = v)
+	_add_slider(vb, "Fire clouds ×", 0.0, 3.0, Violence.blast_fire_cloud_count_scale, 0.1,
+		func(v: float) -> void: Violence.blast_fire_cloud_count_scale = v)
+	_add_slider(vb, "Flame shards ×", 0.0, 3.0, Violence.blast_shard_count_scale, 0.1,
+		func(v: float) -> void: Violence.blast_shard_count_scale = v)
+	_add_slider(vb, "Embers ×", 0.0, 3.0, Violence.blast_ember_count_scale, 0.1,
+		func(v: float) -> void: Violence.blast_ember_count_scale = v)
 
 	var sep2 := HSeparator.new()
 	vb.add_child(sep2)
