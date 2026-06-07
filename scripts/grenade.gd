@@ -391,10 +391,17 @@ func _do_vfx() -> void:
 	# the 6 cardinal directions and drops a soot crater on each surface hit.
 	Violence.spawn_blast_scorches(scene, pos, radius)
 
-	Violence._spawn_blast_fireball(scene, pos, radius, Color(1.0, 0.9, 0.32))
+	var col := Color(1.0, 0.9, 0.32)
+	Violence._spawn_blast_fireball(scene, pos, radius, col)
+	# Fused fire/smoke body + flame shards + embers — the same stylized layers
+	# explosive bullet blasts use (Violence.spawn_bullet_blast), so grenades match.
+	Violence.spawn_blast_fire_smoke(scene, pos, radius, col)
+	Violence.spawn_blast_fire_clouds(scene, pos, radius, col)
+	Violence.spawn_blast_flame_shards(scene, pos, radius, col)
+	Violence.spawn_blast_embers(scene, pos, radius, col)
 
 	Violence._spawn_blast_flash_light(scene, pos, radius)
-	Violence._spawn_blast_core_light(scene, pos, radius, Color(1.0, 0.9, 0.32), 0.85)
+	Violence._spawn_blast_core_light(scene, pos, radius, col, 0.85)
 
 	# --- Local camera shake with distance falloff
 	var lp: Node = scene.get("local_player")
