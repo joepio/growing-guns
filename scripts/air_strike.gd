@@ -224,13 +224,18 @@ func _orient_along_path(node: Node3D, from: Vector3, to: Vector3) -> void:
 
 
 func _orient_rocket_nose_first(node: Node3D, from: Vector3, to: Vector3) -> void:
+	# Face along the flight direction (from→to). Aim at a point offset from the
+	# node's own position rather than at `to` directly: on a straight lerp path
+	# the node reaches `to` on the final frame, and look_at(to) from there is
+	# degenerate ("origin and target in same position"). Offsetting by the unit
+	# direction is identical for all earlier frames and never degenerates.
 	var dir := (to - from).normalized()
 	if dir.length_squared() < 0.0001:
 		return
 	var side := Vector3.UP
 	if absf(dir.dot(side)) > 0.99:
 		side = Vector3.RIGHT
-	node.look_at(to, side)
+	node.look_at(node.global_position + dir, side)
 	node.rotate_object_local(Vector3.RIGHT, -PI * 0.5)
 
 

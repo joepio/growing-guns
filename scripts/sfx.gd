@@ -59,12 +59,12 @@ var shot_pitch_per_double: float = 0.20  # 0..1; pitch drop per damage doubling
 var explosion_bang_db: float = 12.0
 var explosion_rumble_db: float = 10.0
 var footstep_db: float = -30.0
-var jump_db: float = -10.5
+var jump_db: float = -7.5
 var landing_max_db: float = 5.0
-var hurt_self_db: float = -28.0
-var hurt_world_db: float = -20.5
-var death_self_db: float = -24.0
-var death_world_db: float = -18.5
+var hurt_self_db: float = -25.0
+var hurt_world_db: float = -17.5
+var death_self_db: float = -21.0
+var death_world_db: float = -15.5
 var lava_sizzle_db: float = -18.0
 var lava_fall_sizzle_db: float = -32.0
 var hit_received_db: float = -12.0
@@ -1252,42 +1252,6 @@ func _synth_explosion(radius: float, variant: int) -> PackedVector2Array:
 		# Final mix wrapped in tanh — same trick as shot. Drives the layered
 		# sum into saturation for a thick, dense character.
 		var s := tanh((thwack + lp * 0.5 * lp_env + kick * kick_gain + sub * 0.7) * env * 1.4)
-		out[i] = Vector2(s, s)
-	return out
-
-# Distance-driven high-Q bandpass click. Real air absorption shifts an
-# explosion's perceived peak frequency downward as you move away — close = a
-# sharp 3 kHz crack, far = a low 200 Hz thud. Quantised into 5 buckets so
-# we cache one synth per (bucket, variant) pair instead of synthesising
-# fresh per call.
-const EX_CLICK_FREQS: Array = [3200.0, 1500.0, 700.0, 350.0, 220.0]
-
-func _synth_distance_click(bucket: int, variant: int) -> PackedVector2Array:
-	var b: int = clampi(bucket, 0, 4)
-	var rng := RandomNumberGenerator.new()
-	rng.seed = hash([b, variant, "ex_click"])
-	var freq: float = EX_CLICK_FREQS[b] * lerpf(0.85, 1.15, rng.randf())
-	# State-variable filter (Chamberlin) coefficients. Lower q_factor = higher
-	# Q, sharper ring. 0.06 is very sharp.
-	var f_coef: float = 2.0 * sin(PI * freq / float(MIX_RATE))
-	var q_factor: float = 0.06
-	var dur: float = 0.045
-	var n: int = int(dur * MIX_RATE)
-	var out := PackedVector2Array()
-	out.resize(n)
-	var lp_s: float = 0.0
-	var bp_s: float = 0.0
-	for i in range(n):
-		var t: float = float(i) / MIX_RATE
-		# Sharper noise impulse (~2 ms) excites the resonator harder.
-		var noise: float = rng.randf_range(-1.0, 1.0) * exp(-t * 480.0)
-		var hp: float = noise - lp_s - q_factor * bp_s
-		bp_s += f_coef * hp
-		lp_s += f_coef * bp_s
-		# Heavy tanh saturation (drive 14 vs 6) — much more harmonic content,
-		# distorted "pop" / "rip" character instead of a smooth ring. Output
-		# gain bumped to 1.1 (was 0.7) for more presence.
-		var s: float = tanh(bp_s * 14.0) * 1.1 * exp(-t * 80.0)
 		out[i] = Vector2(s, s)
 	return out
 

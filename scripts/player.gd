@@ -970,33 +970,7 @@ func _physics_process(delta: float) -> void:
 		return
 
 	if launching:
-		# Rocket-spawn descent. Constant downward velocity (set in
-		# set_launching), no gravity ramp, no input, no combat. Apply the
-		# tilt-down camera + shake jitter every frame; on the first floor
-		# contact we end the launch ourselves and play the existing landing
-		# thump scaled by impact velocity.
-		var pre_impact_y: float = velocity.y
-		move_and_slide()
-		if not is_bot:
-			camera.rotation.x = look_pitch + recoil_pitch + _view_punch_rot.x
-			camera.position = _camera_rest_pos + Vector3(
-				randf_range(-1.0, 1.0) * shake_amt,
-				randf_range(-1.0, 1.0) * shake_amt,
-				0.0,
-			)
-		if is_on_floor():
-			if launching:
-				_sync_launching.rpc(false)
-			_rocket_descent_player = null
-			if not is_bot:
-				SFX.landing(absf(pre_impact_y), global_position)
-		elif global_position.y < -30.0:
-			# If a spawn point is ever invalid, do not leave the player alive in
-			# launch state forever. Launch state gates shooting/movement, and
-			# environmental damage intentionally ignores it during valid descents.
-			if launching:
-				_sync_launching.rpc(false)
-			_handle_fell_off_map()
+		_physics_launching(delta)
 		return
 
 	if frozen:
@@ -1004,38 +978,67 @@ func _physics_process(delta: float) -> void:
 		return
 
 	if _phoenix_ascending:
-		rifle_cooldown = max(0.0, rifle_cooldown - delta)
-		grenade_cooldown = max(0.0, grenade_cooldown - delta)
-		melee_cooldown = max(0.0, melee_cooldown - delta)
-		recoil_pitch = lerp(recoil_pitch, 0.0, delta * 9.0)
-		_recoil_spread = lerp(_recoil_spread, 0.0, clampf(delta * RECOIL_DECAY_RATE, 0.0, 1.0))
-		shake_amt = lerp(shake_amt, 0.0, delta * 14.0)
-		_view_punch_pos = _view_punch_pos.lerp(Vector3.ZERO, delta * 12.0)
-		_view_punch_rot = _view_punch_rot.lerp(Vector3.ZERO, delta * 12.0)
-		if _can_accept_gameplay_input() and (local_input_device >= 0 or not split_screen_local):
-			var look_device := local_input_device if local_input_device >= 0 else 0
-			var look_input := Vector2(
-				Input.get_joy_axis(look_device, JOY_AXIS_RIGHT_X),
-				Input.get_joy_axis(look_device, JOY_AXIS_RIGHT_Y)
-			)
-			if look_input.length() > CONTROLLER_LOOK_DEADZONE:
-				var look_mag := inverse_lerp(CONTROLLER_LOOK_DEADZONE, 1.0, minf(look_input.length(), 1.0))
-				var look_dir := look_input.normalized() * look_mag
-				var sens := CONTROLLER_LOOK_SENS
-				if is_zooming:
-					sens *= 0.4
-				rotate_y(-look_dir.x * sens * delta)
-				look_pitch = clamp(look_pitch - look_dir.y * sens * delta, -1.4, 1.4)
-		camera.rotation.x = look_pitch + recoil_pitch + _view_punch_rot.x
-		camera.rotation.y = _view_punch_rot.y
-		camera.rotation.z = deg_to_rad(tilt_z) + _view_punch_rot.z
-		if not is_bot and camera:
-			camera.fov = 30.0 if is_zooming else 75.0
+		_physics_phoenix(delta)
 		return
 
+	_tick_cooldowns(delta)
+	_decay_view_recoil(delta)
+	_apply_controller_look(delta)
+	_apply_camera_aim_rotation()
+	_update_gun_feel(delta)
+	_update_gravity_and_landing(delta)
+	_update_jump_and_dash()
+	_update_movement(delta)
+	_handle_combat_input()
+	_handle_fell_off_map()
+
+func _physics_launching(delta: float) -> void:
+	# Rocket-spawn descent. Constant downward velocity (set in set_launching),
+	# no gravity ramp, no input, no combat. Apply the tilt-down camera + shake
+	# jitter every frame; on the first floor contact we end the launch ourselves
+	# and play the existing landing thump scaled by impact velocity.
+	var pre_impact_y: float = velocity.y
+	move_and_slide()
+	if not is_bot:
+		camera.rotation.x = look_pitch + recoil_pitch + _view_punch_rot.x
+		camera.position = _camera_rest_pos + Vector3(
+			randf_range(-1.0, 1.0) * shake_amt,
+			randf_range(-1.0, 1.0) * shake_amt,
+			0.0,
+		)
+	if is_on_floor():
+		if launching:
+			_sync_launching.rpc(false)
+		_rocket_descent_player = null
+		if not is_bot:
+			SFX.landing(absf(pre_impact_y), global_position)
+	elif global_position.y < -30.0:
+		# If a spawn point is ever invalid, do not leave the player alive in
+		# launch state forever. Launch state gates shooting/movement, and
+		# environmental damage intentionally ignores it during valid descents.
+		if launching:
+			_sync_launching.rpc(false)
+		_handle_fell_off_map()
+
+func _physics_phoenix(delta: float) -> void:
+	# Revive ascent: float upward, no movement/combat. We still tick weapon
+	# cooldowns and decay recoil/shake so the player resumes in a clean state.
+	# (muzzle_kick_z / _landing_bump_y also decay here but are invisible — the
+	# gun-feel block that consumes them is skipped during the ascent.)
+	_tick_weapon_cooldowns(delta)
+	_decay_view_recoil(delta)
+	_apply_controller_look(delta)
+	_apply_camera_aim_rotation()
+	if not is_bot and camera:
+		camera.fov = 30.0 if is_zooming else 75.0
+
+func _tick_weapon_cooldowns(delta: float) -> void:
 	rifle_cooldown = max(0.0, rifle_cooldown - delta)
 	grenade_cooldown = max(0.0, grenade_cooldown - delta)
 	melee_cooldown = max(0.0, melee_cooldown - delta)
+
+func _tick_cooldowns(delta: float) -> void:
+	_tick_weapon_cooldowns(delta)
 	wall_jump_cooldown = max(0.0, wall_jump_cooldown - delta)
 	# Dash charges recharge one at a time while below max.
 	if dash_charges < MAX_DASH_CHARGES:
@@ -1051,17 +1054,18 @@ func _physics_process(delta: float) -> void:
 		reloading = false
 	cooldowns_changed.emit()
 
+func _decay_view_recoil(delta: float) -> void:
 	# Recoil decay + apply
 	recoil_pitch = lerp(recoil_pitch, 0.0, delta * 9.0)
 	muzzle_kick_z = lerp(muzzle_kick_z, 0.0, delta * 14.0)
 	_recoil_spread = lerp(_recoil_spread, 0.0, clampf(delta * RECOIL_DECAY_RATE, 0.0, 1.0))
 	shake_amt = lerp(shake_amt, 0.0, delta * 14.0)
 	_landing_bump_y = lerp(_landing_bump_y, 0.0, delta * 10.0) # Smooth recovery
-
 	# View punch decay
 	_view_punch_pos = _view_punch_pos.lerp(Vector3.ZERO, delta * 12.0)
 	_view_punch_rot = _view_punch_rot.lerp(Vector3.ZERO, delta * 12.0)
 
+func _apply_controller_look(delta: float) -> void:
 	if _can_accept_gameplay_input() and (local_input_device >= 0 or not split_screen_local):
 		var look_device := local_input_device if local_input_device >= 0 else 0
 		var look_input := Vector2(
@@ -1077,10 +1081,12 @@ func _physics_process(delta: float) -> void:
 			rotate_y(-look_dir.x * sens * delta)
 			look_pitch = clamp(look_pitch - look_dir.y * sens * delta, -1.4, 1.4)
 
+func _apply_camera_aim_rotation() -> void:
 	camera.rotation.x = look_pitch + recoil_pitch + _view_punch_rot.x
 	camera.rotation.y = _view_punch_rot.y
 	camera.rotation.z = deg_to_rad(tilt_z) + _view_punch_rot.z
 
+func _update_gun_feel(delta: float) -> void:
 	# --- Gun feel: walk bob, jump bump, strafe tilt ---
 	# Phase advances by π per STEP_STRIDE meters travelled — one bob per
 	# footstep, so the gun visibly thumps in sync with the step audio.
@@ -1114,6 +1120,8 @@ func _physics_process(delta: float) -> void:
 		cam_y + randf_range(-1.0, 1.0) * shake_amt,
 		_camera_rest_pos.z,
 	) + _view_punch_pos # Apply hit punch offset
+
+func _update_gravity_and_landing(delta: float) -> void:
 	# --- Gravity ---
 	if not is_on_floor():
 		velocity.y -= GRAVITY * _gravity_mult() * delta
@@ -1131,19 +1139,13 @@ func _physics_process(delta: float) -> void:
 
 	_was_on_floor = is_on_floor()
 
+func _update_jump_and_dash() -> void:
 	# --- Jump / wall-jump / double-jump ---
 	# Wall-jump takes priority over double-jump so you can chain WJ → WJ → dash → WJ
 	# to climb a building. Each WJ imparts strong up + gentle outward push, so the
 	# player must strafe/dash back toward the wall to chain.
 	var jump_pressed := _action_just_pressed_local("jump")
 	var dash_pressed := _action_just_pressed_local("dash")
-	var shoot_pressed := _action_pressed_local("shoot")
-	var shoot_just_pressed := _action_just_pressed_local("shoot")
-	var reload_pressed := _action_just_pressed_local("reload")
-	var special_pressed := _action_just_pressed_local("shoot_grenade")
-	# Zoom is hold-to-aim (sniper scope), not a toggle — track held state so
-	# is_zooming follows the button instead of flipping each press.
-	var special_held := _action_pressed_local("shoot_grenade")
 
 	if jump_pressed:
 		if is_on_floor():
@@ -1170,6 +1172,7 @@ func _physics_process(delta: float) -> void:
 	if dash_pressed and dash_charges > 0:
 		_start_dash(_input_vector())
 
+func _update_movement(delta: float) -> void:
 	# --- Movement ---
 	# Camera roll keys off lateral velocity so tilt fades when the player is
 	# blocked, slows naturally with momentum carryover, and amps up during a
@@ -1220,8 +1223,17 @@ func _physics_process(delta: float) -> void:
 	_maybe_broadcast_state()
 	_tick_footsteps(delta)
 
+func _handle_combat_input() -> void:
 	# --- Combat actions ---
 	# Hold LMB to keep firing — the weapon's fire_interval gates the cadence.
+	var shoot_pressed := _action_pressed_local("shoot")
+	var shoot_just_pressed := _action_just_pressed_local("shoot")
+	var reload_pressed := _action_just_pressed_local("reload")
+	var special_pressed := _action_just_pressed_local("shoot_grenade")
+	# Zoom is hold-to-aim (sniper scope), not a toggle — track held state so
+	# is_zooming follows the button instead of flipping each press.
+	var special_held := _action_pressed_local("shoot_grenade")
+
 	var can_fire := _can_accept_gameplay_input()
 	var fire_input := shoot_pressed and can_fire
 	if ghost_mode:
@@ -1239,9 +1251,11 @@ func _physics_process(delta: float) -> void:
 		var fi: float = weapon.get_fire_interval()
 		if fi >= 0.18:
 			var click_delay: float = minf(fi * 0.45, 0.13)
-			get_tree().create_timer(click_delay).timeout.connect(func() -> void:
-				if is_instance_valid(self) and muzzle:
-					SFX.next_round(muzzle.global_position))
+			# Connect a method, NOT a self-capturing lambda: the signal
+			# auto-disconnects if this player frees before the timer fires
+			# (death/respawn), so a freed shooter is a silent no-op instead of a
+			# "Lambda capture was freed" error.
+			get_tree().create_timer(click_delay).timeout.connect(_play_bolt_click)
 		if mag <= 0:
 			_start_reload()
 	elif shoot_just_pressed and can_fire and not ghost_mode and (reloading or mag <= 0):
@@ -1260,9 +1274,6 @@ func _physics_process(delta: float) -> void:
 	if weapon.special != Weapon.SPECIAL_ZOOM:
 		is_zooming = false # Auto-cancel zoom if weapon special changes (e.g. card reset)
 
-	# --- Fell off the map ---
-	_handle_fell_off_map()
-
 func _input_vector() -> Vector3:
 	var input := _move_vector()
 	var dir := (global_transform.basis * Vector3(input.x, 0.0, input.y))
@@ -1276,6 +1287,13 @@ func _can_accept_gameplay_input() -> bool:
 	if g and g.has_method("is_modal_blocking_player") and g.is_modal_blocking_player(player_id):
 		return false
 	return split_screen_local or Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
+
+# Players are named by their peer id under a shared parent ("Players" in game,
+# whatever container the labs use). Look up a sibling player by id — returns
+# null if absent (freed mid-flight, not yet spawned, etc.).
+func _sibling_player(id: int) -> Node3D:
+	var parent := get_parent()
+	return parent.get_node_or_null(str(id)) as Node3D if parent else null
 
 func _handle_fell_off_map() -> void:
 	if global_position.y >= -30.0:
@@ -1463,20 +1481,31 @@ func _fire_rifle() -> void:
 			var r: float = spread * randf() * randf()
 			dir = base_dir.rotated(cam_up, r * cos(theta)).rotated(cam_right, r * sin(theta)).normalized()
 		_rifle_fired.rpc(origin, dir, player_id, last_in_mag)
+	_cycle_first_person_gun(shots)
+
+# First-person gun mechanics: heat glow, bolt cycle, brass ejection. These are
+# cosmetic and FIRST-PERSON ONLY, so _bot_shoot deliberately does NOT call this
+# (bots have a _procedural_gun too, but ejecting physical casings per shot is a
+# real per-tick cost the perf bench tracks — see AGENTS.md). Anything that must
+# affect gameplay for BOTH humans and bots belongs in _rifle_fired (the shared,
+# call_local RPC sink), NOT here and NOT in either fire path.
+func _cycle_first_person_gun(shots: int) -> void:
+	if not _procedural_gun:
+		return
 	# Barrel overheating — pump in heat per shot, scaled by damage. Cooldown
 	# happens passively in procedural_gun._process. Heavy / fast builds
 	# steady-state into a red glow; the base gun stays under the threshold.
-	if _procedural_gun and _procedural_gun.has_method("add_heat"):
+	if _procedural_gun.has_method("add_heat"):
 		_procedural_gun.add_heat(weapon.damage_mult * float(shots))
 	# Cycle the bolt — charging handles on the receiver snap back on every
 	# trigger pull and slide forward over the fire interval, arriving at
 	# rest exactly as the next shot snaps them back again.
-	if _procedural_gun and _procedural_gun.has_method("cycle_bolt"):
+	if _procedural_gun.has_method("cycle_bolt"):
 		_procedural_gun.cycle_bolt(weapon.get_fire_interval())
 	# Eject one brass casing per bullet — multi-barrel / multi-shot weapons
 	# spit out a small capped burst from the same ejection port. The cap keeps
 	# stacked miniguns from turning every projectile into a physics body.
-	if _procedural_gun and _procedural_gun.has_method("eject_casing"):
+	if _procedural_gun.has_method("eject_casing"):
 		for _i in mini(shots, MAX_FIRST_PERSON_CASINGS_PER_TRIGGER):
 			_procedural_gun.eject_casing()
 
@@ -1494,7 +1523,7 @@ func _rifle_fired(
 		var game_scene: Node = get_tree().current_scene
 		if game_scene and game_scene.has_method("_on_player_shot"):
 			game_scene._on_player_shot()
-	var shooter_node: Node3D = get_parent().get_node_or_null(str(shooter_id))
+	var shooter_node: Node3D = _sibling_player(shooter_id)
 	var w: Weapon = shooter_node.weapon if shooter_node else Weapon.new()
 	# `is_self` = the local human is the shooter. Their copy plays a 2D
 	# variant with its own volume curve (no 3D bus reverb / distance shaping).
@@ -1530,6 +1559,10 @@ func _rifle_fired(
 	if spawn_shot_fx and not local_first_person:
 		_spawn_third_person_casing(w)
 
+func _play_bolt_click() -> void:
+	if muzzle:
+		SFX.next_round(muzzle.global_position)
+
 func _consume_shot_fx_budget() -> bool:
 	var frame := Engine.get_physics_frames()
 	if _shot_fx_frame != frame:
@@ -1542,7 +1575,7 @@ func _consume_shot_fx_budget() -> bool:
 
 func _apply_bullet_splash(pos: Vector3, radius: float, damage: float, shooter_id: int) -> void:
 	var kb_mult := 1.0
-	var shooter := get_parent().get_node_or_null(str(shooter_id))
+	var shooter := _sibling_player(shooter_id)
 	if shooter and shooter.get("weapon") != null:
 		kb_mult = shooter.weapon.knockback_mult
 	Blast.apply(
@@ -1584,7 +1617,7 @@ func _apply_artillery_splash(
 	bottom_y: float,
 	top_y: float,
 ) -> void:
-	var shooter := get_parent().get_node_or_null(str(shooter_id))
+	var shooter := _sibling_player(shooter_id)
 	for p: Node3D in get_tree().get_nodes_in_group("players"):
 		if not is_instance_valid(p):
 			continue
@@ -1905,10 +1938,10 @@ func _spawn_third_person_casing(w: Weapon) -> void:
 		randf_range(-10.0, 10.0),
 		randf_range(-10.0, 10.0),
 	)
-	var cleanup := get_tree().create_timer(4.0)
-	cleanup.timeout.connect(func() -> void:
-		if is_instance_valid(rb):
-			rb.queue_free())
+	# Bind the casing's own queue_free: if the casing is freed earlier (round
+	# reset clears the world), the timeout connection auto-disconnects instead
+	# of firing a lambda whose captured `rb` was already freed.
+	get_tree().create_timer(4.0).timeout.connect(rb.queue_free)
 
 @rpc("any_peer", "call_local", "reliable")
 func _hit_confirm(is_headshot: bool, dmg: int = 0, hit_pos: Vector3 = Vector3.INF) -> void:
@@ -2057,9 +2090,13 @@ func _use_special() -> void:
 	_activate_special_effect()
 	for i in weapon.special_echo_count:
 		var delay := 0.16 * float(i + 1)
-		get_tree().create_timer(delay).timeout.connect(func() -> void:
-			if is_instance_valid(self) and not ghost_mode and health > 0:
-				_activate_special_effect())
+		# Method connection (not a self-capturing lambda) so a player freed
+		# before the echo fires auto-disconnects rather than erroring.
+		get_tree().create_timer(delay).timeout.connect(_activate_special_echo)
+
+func _activate_special_echo() -> void:
+	if not ghost_mode and health > 0:
+		_activate_special_effect()
 
 func _activate_special_effect() -> void:
 	match weapon.special:
@@ -2445,7 +2482,7 @@ func _request_mine(pos: Vector3) -> void:
 	var sender := multiplayer.get_remote_sender_id()
 	if sender == 0:
 		sender = player_id
-	var p := get_parent().get_node_or_null(str(sender))
+	var p := _sibling_player(sender)
 	if p == null or p.get("ghost_mode") != true:
 		return
 	var uname := "M_%d_%d" % [sender, Time.get_ticks_usec()]
@@ -2475,7 +2512,7 @@ func _spawn_mine(pos: Vector3, shooter: int, uname: String) -> void:
 		mat.emission_energy_multiplier = 0.45
 		(mesh as MeshInstance3D).material_override = mat
 
-	var shooter_node: Node3D = get_parent().get_node_or_null(str(shooter))
+	var shooter_node: Node3D = _sibling_player(shooter)
 	if shooter_node == null or shooter_node.get("ghost_mode") != true:
 		SFX.mine_plant(pos)
 
@@ -2494,7 +2531,7 @@ func _swing_melee() -> void:
 
 @rpc("any_peer", "call_local", "reliable")
 func _melee_swung(origin: Vector3, dir: Vector3, attacker_id: int, damage_mult: float = 1.0, range_mult: float = 1.0) -> void:
-	var shooter_node := get_parent().get_node_or_null(str(attacker_id))
+	var shooter_node := _sibling_player(attacker_id)
 	var w: Weapon = shooter_node.weapon if shooter_node else Weapon.new()
 
 	SFX.melee(origin, int(float(w.get_melee_damage()) * damage_mult))
@@ -2721,7 +2758,7 @@ func _apply_damage(
 
 		# View punch: shift camera in the direction of the hit, scaled by
 		# the same intensity so poison ticks stop yanking the camera.
-		var attacker := get_parent().get_node_or_null(str(from_id))
+		var attacker := _sibling_player(from_id)
 		if attacker and is_multiplayer_authority():
 			var attacker_hit_dir: Vector3 = (attacker.global_position - global_position).normalized()
 			# Transform world hit dir to local space
@@ -2770,7 +2807,7 @@ func _apply_damage(
 			push = hit_dir.normalized()
 			if push.y < 0.15:
 				push.y = 0.15
-		var killer := get_parent().get_node_or_null(str(from_id))
+		var killer := _sibling_player(from_id)
 		if killer and killer is Node3D and hit_dir.length_squared() <= 0.001:
 			push = (global_position - killer.global_position).normalized() + Vector3.UP * 0.6
 		var launch_max := 8.0
@@ -2821,7 +2858,7 @@ func apply_knockback(impulse: Vector3) -> void:
 	Violence.apply_knockback(self, impulse)
 
 func _notify_damage_source(from_id: int) -> void:
-	var attacker := get_parent().get_node_or_null(str(from_id))
+	var attacker := _sibling_player(from_id)
 	if not attacker:
 		return
 	var g := get_tree().current_scene
@@ -3811,6 +3848,9 @@ func _bot_shoot() -> bool:
 		var pitch := randf_range(-spread, spread)
 		shot_dir = shot_dir.rotated(Vector3.UP, yaw).rotated(right, pitch)
 		_rifle_fired.rpc(from, shot_dir.normalized(), player_id, last_in_mag)
+	# NOTE: intentionally no _cycle_first_person_gun() here — bots skip the
+	# first-person heat/bolt/casing-eject for perf. All shared gameplay effects
+	# (bullet spawn, damage, music, third-person casing, SFX) live in _rifle_fired.
 	if mag <= 0:
 		_start_reload()
 	return true

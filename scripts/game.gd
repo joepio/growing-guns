@@ -3495,9 +3495,13 @@ func _toggle_pause_menu() -> void:
 		get_tree().paused = false
 		_sync_mouse_mode()
 
-func _build_pause_menu() -> void:
+# Shared modal scaffold for the pause + settings screens: a full-screen dimmer
+# with a centered, bordered panel. Adds the root under $HUD and returns
+# {root, vb} — populate `vb`, store/show `root`. Keeps both screens visually
+# identical (see _menu_panel_style / _make_menu_title for the shared theming).
+func _build_modal_scaffold(node_name: String, vb_separation: int) -> Dictionary:
 	var root := Control.new()
-	root.name = "PauseMenu"
+	root.name = node_name
 	root.anchor_right = 1.0
 	root.anchor_bottom = 1.0
 	root.mouse_filter = Control.MOUSE_FILTER_STOP
@@ -3516,6 +3520,16 @@ func _build_pause_menu() -> void:
 	root.add_child(center)
 
 	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", _menu_panel_style())
+	center.add_child(panel)
+
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", vb_separation)
+	panel.add_child(vb)
+
+	return {"root": root, "vb": vb}
+
+func _menu_panel_style() -> StyleBoxFlat:
 	var sb := StyleBoxFlat.new()
 	sb.bg_color = Color(0.08, 0.08, 0.1, 0.95)
 	sb.border_color = Color(0.35, 0.7, 1.0)
@@ -3525,21 +3539,25 @@ func _build_pause_menu() -> void:
 	sb.content_margin_right = 28
 	sb.content_margin_top = 22
 	sb.content_margin_bottom = 22
-	panel.add_theme_stylebox_override("panel", sb)
-	center.add_child(panel)
+	return sb
 
-	var vb := VBoxContainer.new()
-	vb.add_theme_constant_override("separation", 12)
-	panel.add_child(vb)
-
-	# Game title — readable from across the room.
+func _make_menu_title(text: String, font_size: int, outline_size: int) -> Label:
 	var title := Label.new()
-	title.text = "GROWING GUNS"
-	title.add_theme_font_size_override("font_size", 36)
+	title.text = text
+	title.add_theme_font_size_override("font_size", font_size)
 	title.add_theme_color_override("font_color", Color(1, 0.9, 0.45))
 	title.add_theme_color_override("font_outline_color", Color(0.4, 0.0, 0.1))
-	title.add_theme_constant_override("outline_size", 6)
+	title.add_theme_constant_override("outline_size", outline_size)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	return title
+
+func _build_pause_menu() -> void:
+	var scaffold := _build_modal_scaffold("PauseMenu", 12)
+	var root: Control = scaffold["root"]
+	var vb: VBoxContainer = scaffold["vb"]
+
+	# Game title — readable from across the room.
+	var title := _make_menu_title("GROWING GUNS", 36, 6)
 	vb.add_child(title)
 
 	# Spacer to separate title from the multiplayer rows.
@@ -3767,50 +3785,12 @@ func _close_settings() -> void:
 func _build_settings_panel() -> void:
 	# Mirrors the visual style of _build_pause_menu so the two screens read
 	# as part of the same flow. Toggles persist immediately on change.
-	var root := Control.new()
-	root.name = "SettingsPanel"
-	root.anchor_right = 1.0
-	root.anchor_bottom = 1.0
-	root.mouse_filter = Control.MOUSE_FILTER_STOP
-	root.process_mode = Node.PROCESS_MODE_ALWAYS
-	$HUD.add_child(root)
-
-	var bg := ColorRect.new()
-	bg.color = Color(0, 0, 0, 0.55)
-	bg.anchor_right = 1.0
-	bg.anchor_bottom = 1.0
-	root.add_child(bg)
-
-	var center := CenterContainer.new()
-	center.anchor_right = 1.0
-	center.anchor_bottom = 1.0
-	root.add_child(center)
-
-	var panel := PanelContainer.new()
-	var sb := StyleBoxFlat.new()
-	sb.bg_color = Color(0.08, 0.08, 0.1, 0.95)
-	sb.border_color = Color(0.35, 0.7, 1.0)
-	sb.set_border_width_all(2)
-	sb.set_corner_radius_all(8)
-	sb.content_margin_left = 28
-	sb.content_margin_right = 28
-	sb.content_margin_top = 22
-	sb.content_margin_bottom = 22
-	panel.add_theme_stylebox_override("panel", sb)
-	center.add_child(panel)
-
-	var vb := VBoxContainer.new()
-	vb.add_theme_constant_override("separation", 14)
+	var scaffold := _build_modal_scaffold("SettingsPanel", 14)
+	var root: Control = scaffold["root"]
+	var vb: VBoxContainer = scaffold["vb"]
 	vb.custom_minimum_size = Vector2(420, 0)
-	panel.add_child(vb)
 
-	var title := Label.new()
-	title.text = "SETTINGS"
-	title.add_theme_font_size_override("font_size", 30)
-	title.add_theme_color_override("font_color", Color(1, 0.9, 0.45))
-	title.add_theme_color_override("font_outline_color", Color(0.4, 0.0, 0.1))
-	title.add_theme_constant_override("outline_size", 5)
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	var title := _make_menu_title("SETTINGS", 30, 5)
 	vb.add_child(title)
 
 	var spacer1 := Control.new()
