@@ -144,11 +144,43 @@ static func warmup_blast_materials(scene: Node) -> void:
 	var fireball := StandardMaterial3D.new()
 	_configure_blast_fireball_mat(fireball, Color(1.0, 0.78, 0.42), 0.88, 16.0)
 	warmup_material(scene, fireball)
-	# Fused fire/smoke billow shader (rim-darkened) is its own PSO.
-	var smoke := ShaderMaterial.new()
-	smoke.shader = _get_smoke_billow_shader()
-	smoke.set_shader_parameter("opacity", 0.5)
-	warmup_material(scene, smoke)
+	# Fused fire/smoke billow runs on a MultiMesh — instanced rendering is its own
+	# PSO, so warm it with an actual (sub-pixel) MultiMesh, not a plain mesh.
+	var billow := ShaderMaterial.new()
+	billow.shader = _get_billow_mm_shader()
+	billow.set_shader_parameter("anim", 0.3)
+	_warmup_mm_material(scene, billow)
+	# Additive MultiMesh projectile shader (embers + shards) — its own PSO.
+	var proj := ShaderMaterial.new()
+	proj.shader = _get_blast_projectile_shader()
+	proj.set_shader_parameter("anim", 0.3)
+	_warmup_mm_material(scene, proj)
+
+
+# Like warmup_material but compiles the instanced (MultiMesh) PSO variant.
+static func _warmup_mm_material(scene: Node, mat: Material) -> void:
+	if scene == null or mat == null:
+		return
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.use_colors = true
+	mm.use_custom_data = true
+	mm.mesh = _get_smoke_billow_mesh()
+	mm.instance_count = 1
+	mm.set_instance_transform(0, Transform3D(Basis.IDENTITY.scaled(Vector3.ONE * 0.001), Vector3.ZERO))
+	mm.set_instance_color(0, Color(1, 1, 1, 0.5))
+	mm.set_instance_custom_data(0, Color(0.5, 0.0, 0.5, 0.0))
+	var mmi := MultiMeshInstance3D.new()
+	mmi.multimesh = mm
+	mmi.material_override = mat
+	_attach_world_3d(scene, mmi, Vector3.ZERO)
+	var t := Timer.new()
+	t.wait_time = 0.4
+	t.one_shot = true
+	t.process_mode = Node.PROCESS_MODE_ALWAYS
+	mmi.add_child(t)
+	t.start()
+	t.timeout.connect(mmi.queue_free)
 
 static func _gib_warm_task(mesh: Mesh, chunk_count: int) -> void:
 	var variants: Array = _gib_build_variants(mesh, chunk_count)
@@ -1241,8 +1273,9 @@ static func blast_expand_time(radius: float) -> float:
 
 
 static func _blast_fireball_timing(radius: float) -> Dictionary:
-	var grow := blast_expand_time(radius)
-	var fade := clampf(0.08 + radius * 0.003, 0.08, 0.16)
+	# Bigger blasts flash bigger AND a touch longer (grenade ~0.27s, airstrike ~0.55s).
+	var grow := clampf(0.12 + radius * 0.007, 0.12, 0.45)
+	var fade := clampf(0.08 + radius * 0.005, 0.08, 0.28)
 	return {"grow": grow, "fade": fade}
 
 
@@ -1357,98 +1390,145 @@ static func _get_blast_ember_mesh() -> Mesh:
 	return _blast_ember_mesh
 
 
+# Additive "projectile" layer (embers + flame shards) as a MultiMesh. Each
+# instance flies outward from the blast centre to its travel target
+# (decelerating) and fades. Orientation, scale, streak, growth and the fly-out
+# are ALL computed in the shader from per-instance data, so the instance
+# transform is plain identity and nothing depends on MODEL_MATRIX (which doesn't
+# reliably expose the per-instance transform for MultiMesh). One draw call, one
+# material, one tween for the whole burst.
+#   INSTANCE_CUSTOM = (travel.xyz world-offset from centre, delay)
+#   COLOR           = (size01, elong01, grow_start, brightness_jitter)
+static var _blast_projectile_shader: Shader = null
+
+const _BLAST_PROJECTILE_CODE := "
+	shader_type spatial;
+	render_mode unshaded, cull_disabled, depth_draw_never, shadows_disabled, blend_add;
+	uniform float anim = 0.0;
+	uniform vec3 tint : source_color = vec3(1.0, 0.7, 0.3);
+	uniform float brightness = 6.0;
+	uniform float size_scale = 1.0;
+	uniform float elong_max = 8.0;
+	uniform float fade_start = 0.35;
+	varying float v_b;
+	void vertex() {
+		vec3 travel = INSTANCE_CUSTOM.xyz;     // world target offset from blast centre
+		float delay = INSTANCE_CUSTOM.w;
+		float size = COLOR.r * size_scale;
+		float elong = 1.0 + COLOR.g * (elong_max - 1.0);
+		float grow_start = COLOR.b;
+		float age = clamp((anim - delay) / max(1.0 - delay, 0.001), 0.0, 1.0);
+		float prog = 1.0 - pow(1.0 - age, 2.0);   // decelerating
+		float dist = length(travel);
+		vec3 dir = dist > 0.0001 ? travel / dist : vec3(0.0, 1.0, 0.0);
+		// Orthonormal frame with Y aligned to the travel direction.
+		vec3 upv = abs(dir.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+		vec3 ex = normalize(cross(upv, dir));
+		vec3 ez = cross(dir, ex);
+		float grow = mix(grow_start, 1.0, prog);
+		vec3 v = VERTEX;
+		v.x *= size * grow;
+		v.z *= size * grow;
+		v.y *= size * grow * mix(1.0, elong, prog);   // stretch into a streak/petal as it flies
+		// Orient (mesh Y -> dir) then fly outward from centre to target.
+		VERTEX = ex * v.x + dir * v.y + ez * v.z + travel * prog;
+		v_b = (1.0 - smoothstep(fade_start, 1.0, age)) * COLOR.a;
+	}
+	void fragment() {
+		ALBEDO = tint * brightness;   // additive (blend_add); HDR brightness blooms
+		ALPHA = v_b;                  // fade modulates the added light
+	}
+"
+
+static func _get_blast_projectile_shader() -> Shader:
+	if _blast_projectile_shader == null:
+		_blast_projectile_shader = Shader.new()
+		_blast_projectile_shader.code = _BLAST_PROJECTILE_CODE
+	return _blast_projectile_shader
+
+static func _finish_projectile_layer(scene: Node, mm: MultiMesh, pos: Vector3, tint: Color, brightness: float, life: float, aabb_extent: float, size_scale: float, elong_max: float) -> void:
+	var mmi := MultiMeshInstance3D.new()
+	mmi.multimesh = mm
+	mmi.custom_aabb = AABB(Vector3.ONE * (-aabb_extent), Vector3.ONE * (2.0 * aabb_extent))
+	var mat := ShaderMaterial.new()
+	mat.shader = _get_blast_projectile_shader()
+	mat.set_shader_parameter("anim", 0.0)
+	mat.set_shader_parameter("tint", tint)
+	mat.set_shader_parameter("brightness", brightness)
+	mat.set_shader_parameter("size_scale", size_scale)
+	mat.set_shader_parameter("elong_max", elong_max)
+	mmi.material_override = mat
+	_attach_world_3d(scene, mmi, pos)
+	var tw := mmi.create_tween()
+	tw.tween_property(mat, "shader_parameter/anim", 1.0, life).set_trans(Tween.TRANS_LINEAR)
+	tw.tween_callback(mmi.queue_free)
+
+
 static func spawn_blast_flame_shards(scene: Node, pos: Vector3, radius: float, color: Color) -> void:
 	if scene == null or blast_shard_count_scale <= 0.0:
+		return
+	if BenchFlags.active and BenchFlags.no_explosion_visuals:
 		return
 	var count := int(round(clampi(int(radius * 0.9), 5, 14) * blast_shard_count_scale))
 	if count <= 0:
 		return
-	var hot := color.lerp(Color(1.0, 0.82, 0.45), 0.4)
-	# One shared additive material for the whole burst — same config (and PSO)
-	# as the fireball, faded once below.
-	var mat := StandardMaterial3D.new()
-	_configure_blast_fireball_mat(mat, hot.lerp(Color(1.0, 1.0, 0.95), 0.55), 0.92, 13.0)
-	var root := Node3D.new()
-	_attach_world_3d(scene, root, pos)
-	var life := clampf(0.18 + radius * 0.012, 0.18, 0.42)
 	var rng := RandomNumberGenerator.new()
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.use_colors = true
+	mm.use_custom_data = true
+	mm.mesh = _get_blast_shard_mesh()
+	mm.instance_count = count
+	var size_scale := radius * 0.11   # max thick → COLOR.r is thick normalised to [0,1]
 	for i in count:
-		var shard := MeshInstance3D.new()
-		shard.mesh = _get_blast_shard_mesh()
-		shard.material_override = mat
-		# Outward + upward biased direction; orient the cone's +Y axis along it.
 		var theta := rng.randf() * TAU
 		var elev := rng.randf_range(-0.35, 1.3)
 		var dir := Vector3(cos(theta) * cos(elev), sin(elev), sin(theta) * cos(elev)).normalized()
-		shard.transform.basis = _basis_from_y(dir)
 		var thick := radius * rng.randf_range(0.05, 0.11)
 		var length := radius * rng.randf_range(0.6, 1.25)
-		# Each shard starts as a small round nub clustered at the core...
-		var seed_sz := thick * 1.3
-		shard.position = Vector3.ZERO
-		shard.scale = Vector3(seed_sz, seed_sz, seed_sz)
-		root.add_child(shard)
-		# ...then, after a staggered delay, launches outward while stretching into
-		# a petal — so the whole thing reads as a ball erupting into shards.
-		var delay := life * rng.randf_range(0.0, 0.28)
-		var grow := life * rng.randf_range(0.45, 0.7)
-		var launch := dir * length * rng.randf_range(0.4, 0.75)
-		var stw := shard.create_tween().set_parallel(true)
-		stw.tween_property(shard, "scale", Vector3(thick, length, thick), grow)\
-			.set_delay(delay).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
-		stw.tween_property(shard, "position", launch, grow)\
-			.set_delay(delay).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-	_fade_and_free_blast_layer(root, mat, hot, life)
+		var travel := dir * length * rng.randf_range(0.4, 0.75)   # how far the petal launches
+		mm.set_instance_transform(i, Transform3D.IDENTITY)
+		# COLOR = (size01, elong01, grow_start, brightness_jitter)
+		mm.set_instance_color(i, Color(thick / size_scale, clampf((length / thick - 1.0) / 24.0, 0.0, 1.0), 0.35, rng.randf_range(0.75, 1.0)))
+		# CUSTOM = (travel.xyz, delay)
+		mm.set_instance_custom_data(i, Color(travel.x, travel.y, travel.z, rng.randf_range(0.0, 0.28)))
+	var hot := color.lerp(Color(1.0, 0.92, 0.7), 0.5)
+	_finish_projectile_layer(scene, mm, pos, hot, 7.0, 0.2 + radius * 0.025, radius * 2.5, size_scale, 25.0)
 
 
 static func spawn_blast_embers(scene: Node, pos: Vector3, radius: float, color: Color) -> void:
 	if scene == null or blast_ember_count_scale <= 0.0:
 		return
+	if BenchFlags.active and BenchFlags.no_explosion_visuals:
+		return
 	var count := int(round(clampi(int(radius * 5.0), 30, 110) * blast_ember_count_scale))
 	if count <= 0:
 		return
-	var hot := color.lerp(Color(1.0, 0.86, 0.5), 0.35)
-	var mat := StandardMaterial3D.new()
-	_configure_blast_fireball_mat(mat, hot.lerp(Color(1.0, 1.0, 0.92), 0.45), 0.95, 18.0)
-	var root := Node3D.new()
-	_attach_world_3d(scene, root, pos)
-	var life := clampf(0.34 + radius * 0.02, 0.34, 0.72)
 	var rng := RandomNumberGenerator.new()
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.use_colors = true
+	mm.use_custom_data = true
+	mm.mesh = _get_blast_ember_mesh()
+	mm.instance_count = count
+	var size_scale := 1.2   # max sz → COLOR.r normalised to [0,1]
 	for i in count:
-		var ember := MeshInstance3D.new()
-		ember.mesh = _get_blast_ember_mesh()
-		ember.material_override = mat
 		var theta := rng.randf() * TAU
 		var elev := rng.randf_range(-0.2, 1.35)
 		var dir := Vector3(cos(theta) * cos(elev), sin(elev), sin(theta) * cos(elev)).normalized()
 		var dist := radius * rng.randf_range(0.8, 2.0)
-		# Decelerating outward burst with gravity baked into the endpoint —
-		# reads as a thrown-spark arc without a per-frame integrator.
 		var drop := radius * rng.randf_range(0.2, 0.7)
-		var target := dir * dist + Vector3.DOWN * drop
-		# Stretch the ember into a streak along its travel so it traces through
-		# the air; faster/farther sparks trail longer.
+		var travel := dir * dist + Vector3.DOWN * drop
+		# Streak along travel (faster/farther sparks trail longer).
 		var sz := rng.randf_range(0.4, 1.15)
 		var streak := 1.0 + clampf(dist / radius, 0.0, 2.0) * rng.randf_range(1.6, 3.6)
-		ember.transform.basis = _basis_from_y(target.normalized())
-		ember.scale = Vector3(sz, sz * streak, sz)
-		root.add_child(ember)
-		var etw := ember.create_tween()
-		etw.tween_property(ember, "position", target, life * rng.randf_range(0.75, 1.0))\
-			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-	_fade_and_free_blast_layer(root, mat, hot, life)
-
-
-# Shared fade for a flame-shard / ember burst: one tween on the one material,
-# then frees the whole layer. Keeps per-particle work to just a transform tween.
-static func _fade_and_free_blast_layer(root: Node3D, mat: StandardMaterial3D, hot: Color, life: float) -> void:
-	var end_hot := hot.lerp(Color(1.0, 0.32, 0.06), 0.5)
-	var ftw := root.create_tween().set_parallel(true)
-	ftw.tween_property(mat, "emission_energy_multiplier", 0.0, life)\
-		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
-	ftw.tween_property(mat, "albedo_color", Color(end_hot.r, end_hot.g, end_hot.b, 0.0), life)\
-		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
-	ftw.chain().tween_callback(root.queue_free)
+		mm.set_instance_transform(i, Transform3D.IDENTITY)
+		# COLOR = (size01, elong01=streak, grow_start=1 (no grow-in), brightness_jitter)
+		mm.set_instance_color(i, Color(sz / size_scale, clampf((streak - 1.0) / 7.0, 0.0, 1.0), 1.0, rng.randf_range(0.6, 1.0)))
+		# CUSTOM = (travel.xyz, delay)
+		mm.set_instance_custom_data(i, Color(travel.x, travel.y, travel.z, rng.randf_range(0.0, 0.15)))
+	var hot := color.lerp(Color(1.0, 0.86, 0.5), 0.4)
+	_finish_projectile_layer(scene, mm, pos, hot, 5.0, 0.3 + radius * 0.03, radius * 3.5, size_scale, 8.0)
 
 
 # Orthonormal basis whose +Y axis aligns with `dir` (for orienting the shard cone).
@@ -1462,48 +1542,74 @@ static func _basis_from_y(dir: Vector3) -> Basis:
 	return Basis(x, y, z)
 
 
-# ---- Fused fire + smoke body --------------------------------------------
-# Billowing smoke puffs that read as the cauliflower body of the blast: a light
-# interior with DARK silhouette edges (fresnel-darkened, the rim you see on real
-# explosion smoke), plus a warm EMISSION glow that makes the fire look like it's
-# burning from *inside* the same mass — then cools to plain grey smoke. Cheap:
-# one shared cached shader (one PSO, warmed in warmup_blast_materials), one
-# cached low-poly sphere mesh, a handful of puffs per blast.
+# ---- Fused fire + smoke body (MultiMesh, GPU-animated) -------------------
+# Billowing cauliflower clouds: lumpy puffs with DARK fresnel-rimmed edges, the
+# fire ones emissive (hot white centre → orange outward), the smoke ones dark.
+# Performance: each cloud layer is ONE MultiMesh (one draw call for every puff),
+# ONE material, and ONE tween — all the per-puff motion (growth, fade, glow,
+# lump, stagger) is baked into the shader and driven by a single `anim` uniform
+# 0→1. Replaces the old per-puff path (~30 nodes + 30 materials + 90 tweens per
+# layer) so blasts scale to hundreds/sec. Per-instance data: COLOR = (body.rgb,
+# opacity_peak), INSTANCE_CUSTOM = (seed, delay, heat-or-glow, 0).
 static var blast_smoke_count_scale: float = 1.0
 static var blast_fire_cloud_count_scale: float = 1.0
 static var _smoke_billow_mesh: Mesh = null
-static var _smoke_billow_shader: Shader = null
+static var _billow_mm_shader: Shader = null
 
-const _SMOKE_BILLOW_CODE := "
+const _BILLOW_MM_CODE := "
 	shader_type spatial;
 	render_mode unshaded, cull_disabled, depth_draw_never, shadows_disabled;
-	uniform vec4 core_col : source_color = vec4(0.80, 0.78, 0.74, 1.0);
-	uniform vec4 edge_col : source_color = vec4(0.08, 0.07, 0.06, 1.0);
-	uniform vec4 glow_col : source_color = vec4(1.0, 0.45, 0.12, 1.0);
-	uniform float glow = 0.0;
-	uniform float opacity = 0.0;
-	uniform float edge_power = 2.2;
-	uniform float lump = 0.35;   // how irregular the puff is (kills the round-balloon look)
-	uniform float seed = 0.0;
+	uniform float anim = 0.0;          // 0..1, tweened once per layer
+	uniform float is_fire = 0.0;
+	uniform float edge_power = 2.1;
+	uniform float lump_amount = 0.32;
+	uniform float growth_min = 0.35;
+	uniform float tail_power = 1.5;    // <1 = long lingering tail, >1 = quick fade
+	uniform vec3 warm_glow : source_color = vec3(1.0, 0.45, 0.12);
+	uniform vec3 fire_cool : source_color = vec3(1.0, 0.5, 0.16);
+	uniform vec3 fire_hot : source_color = vec3(1.0, 0.97, 0.86);
+	uniform float fire_glow_lo = 14.0;
+	uniform float fire_glow_hi = 65.0;
+	varying float v_age;
+	varying float v_heat;
+	varying vec3 v_body;
+	varying float v_opk;
 	void vertex() {
-		// Displace each vertex along its normal by layered sin-noise so the puff
-		// is a lumpy clump, not a smooth sphere. Per-puff `seed` makes every one
-		// unique; overlapping lumpy puffs merge into a cauliflower mass.
-		float a = sin(VERTEX.x * 6.3 + seed) * sin(VERTEX.y * 5.1 + seed * 1.7) * sin(VERTEX.z * 7.2 + seed * 0.9);
-		float b = sin(VERTEX.x * 13.0 + seed * 2.1) * sin(VERTEX.z * 11.0 + seed * 1.3);
-		VERTEX += NORMAL * (a * 0.7 + b * 0.3) * lump;
+		float seed = INSTANCE_CUSTOM.x;
+		float delay = INSTANCE_CUSTOM.y;
+		v_heat = INSTANCE_CUSTOM.z;
+		v_body = COLOR.rgb;
+		v_opk = COLOR.a;
+		// Staggered local age so puffs don't all pop at once.
+		v_age = clamp((anim - delay) / max(1.0 - delay, 0.001), 0.0, 1.0);
+		// Per-instance lumpy displacement (seed varies every puff).
+		float s = seed * 100.0;
+		float a = sin(VERTEX.x * 6.3 + s) * sin(VERTEX.y * 5.1 + s * 1.7) * sin(VERTEX.z * 7.2 + s * 0.9);
+		float b = sin(VERTEX.x * 13.0 + s * 2.1) * sin(VERTEX.z * 11.0 + s * 1.3);
+		VERTEX += NORMAL * (a * 0.7 + b * 0.3) * lump_amount;
+		// Growth 0.35 -> 1.0 at a CONSTANT rate (linear — keeps expanding, no
+		// ease-out settling at the end). The slow fade is the alpha's job.
+		VERTEX *= mix(growth_min, 1.0, v_age);
 	}
 	void fragment() {
 		float facing = abs(dot(normalize(NORMAL), normalize(VIEW)));
 		float fres = pow(1.0 - facing, edge_power);
-		vec3 body = mix(core_col.rgb, edge_col.rgb, fres);
-		// Glow goes straight into ALBEDO — `unshaded` skips the lighting pass and
-		// therefore ignores EMISSION, but ALBEDO is output as-is and can exceed
-		// 1.0, so a big glow here blooms in HDR. Concentrated in the lit interior.
-		ALBEDO = body + glow_col.rgb * glow * facing;
-		// Feather the alpha to nothing at the silhouette so puffs blend into one
-		// another instead of each reading as a hard-edged balloon.
-		ALPHA = opacity * smoothstep(0.0, 0.5, facing);
+		float fade_in = smoothstep(0.0, 0.12, v_age);
+		float t = clamp((v_age - 0.12) / 0.88, 0.0, 1.0);
+		// Long lingering tail (tail_power < 1) but with a SOFT landing — the last
+		// stretch eases gently to zero instead of dropping off a cliff at the end.
+		float fade_out = pow(1.0 - t, tail_power) * (1.0 - smoothstep(0.5, 1.0, t));
+		ALPHA = v_opk * fade_in * fade_out * smoothstep(0.0, 0.5, facing);
+		if (is_fire > 0.5) {
+			vec3 hot = mix(fire_cool, fire_hot, v_heat);
+			float glow = mix(fire_glow_lo, fire_glow_hi, v_heat) * (1.0 - smoothstep(0.0, 0.55, v_age));
+			vec3 body = mix(hot * 0.3, vec3(0.45, 0.16, 0.04), fres);
+			ALBEDO = body + hot * glow * facing;   // unshaded ignores EMISSION; HDR via ALBEDO
+		} else {
+			vec3 body = mix(v_body, v_body * 0.1, fres);
+			float glow = v_heat * (1.0 - smoothstep(0.0, 0.45, v_age));  // v_heat = subtle warm underglow
+			ALBEDO = body + warm_glow * glow * facing;
+		}
 	}
 "
 
@@ -1517,11 +1623,73 @@ static func _get_smoke_billow_mesh() -> Mesh:
 		_smoke_billow_mesh = s
 	return _smoke_billow_mesh
 
-static func _get_smoke_billow_shader() -> Shader:
-	if _smoke_billow_shader == null:
-		_smoke_billow_shader = Shader.new()
-		_smoke_billow_shader.code = _SMOKE_BILLOW_CODE
-	return _smoke_billow_shader
+static func _get_billow_mm_shader() -> Shader:
+	if _billow_mm_shader == null:
+		_billow_mm_shader = Shader.new()
+		_billow_mm_shader.code = _BILLOW_MM_CODE
+	return _billow_mm_shader
+
+
+# Builds one cloud layer as a single MultiMesh + material + tween.
+static func _spawn_blast_billow(scene: Node, pos: Vector3, radius: float, count: int,
+		is_fire: bool, tint: Color, layer_life: float, scale_lo: float, scale_hi: float, rise: float) -> void:
+	var rng := RandomNumberGenerator.new()
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.use_colors = true
+	mm.use_custom_data = true
+	mm.mesh = _get_smoke_billow_mesh()
+	mm.instance_count = count
+	var spread := radius * (0.45 if is_fire else 0.65)
+	for i in count:
+		var ang := rng.randf() * TAU
+		var rad := rng.randf_range(0.0, spread)
+		var off := Vector3(cos(ang) * rad, rng.randf_range(-0.2, 0.6) * radius * 0.45, sin(ang) * rad)
+		var end_scale := radius * rng.randf_range(scale_lo, scale_hi)
+		mm.set_instance_transform(i, Transform3D(Basis.IDENTITY.scaled(Vector3.ONE * end_scale), off))
+		var seed := rng.randf()
+		var delay := rng.randf_range(0.0, 0.22 if is_fire else 0.12)
+		var heat: float
+		var body: Color
+		var opk: float
+		if is_fire:
+			heat = pow(1.0 - clampf(rad / maxf(spread, 0.001), 0.0, 1.0), 1.4)
+			body = Color(1, 1, 1)
+			opk = rng.randf_range(0.75, 0.95)
+		else:
+			heat = rng.randf_range(0.2, 0.55)   # warm underglow amount
+			# Dark, dense neutral-grey smoke (one grey value with a fixed slight
+			# warm bias — NOT independent per-channel randomness, which produced
+			# random red/green/purple tints).
+			var g := rng.randf_range(0.12, 0.24)
+			body = Color(g * 1.08, g, g * 0.9)
+			opk = rng.randf_range(0.6, 0.85)
+		mm.set_instance_color(i, Color(body.r, body.g, body.b, opk))
+		mm.set_instance_custom_data(i, Color(seed, delay, heat, 0.0))
+	var mmi := MultiMeshInstance3D.new()
+	mmi.multimesh = mm
+	# Generous AABB so the grown/displaced puffs aren't frustum-culled early.
+	mmi.custom_aabb = AABB(Vector3.ONE * (-radius * 2.5), Vector3.ONE * (radius * 5.0))
+	var mat := ShaderMaterial.new()
+	mat.shader = _get_billow_mm_shader()
+	mat.set_shader_parameter("anim", 0.0)
+	mat.set_shader_parameter("is_fire", 1.0 if is_fire else 0.0)
+	if is_fire:
+		mat.set_shader_parameter("tail_power", 2.2)   # fire fades fast
+		mat.set_shader_parameter("fire_cool", tint.lerp(Color(1.0, 0.5, 0.16), 0.5))
+		mat.set_shader_parameter("fire_hot", tint.lerp(Color(1.0, 0.97, 0.86), 0.7))
+	else:
+		mat.set_shader_parameter("tail_power", 0.38)   # smoke lingers with a long, slow tail
+		mat.set_shader_parameter("warm_glow", tint.lerp(Color(1.0, 0.45, 0.12), 0.6))
+	mmi.material_override = mat
+	var base := pos + Vector3.UP * (radius * 0.1)
+	_attach_world_3d(scene, mmi, base)
+	var atw := mmi.create_tween()
+	atw.tween_property(mat, "shader_parameter/anim", 1.0, layer_life).set_trans(Tween.TRANS_LINEAR)
+	atw.tween_callback(mmi.queue_free)
+	if rise > 0.0:
+		mmi.create_tween().tween_property(mmi, "position", base + Vector3.UP * rise, layer_life)\
+			.set_trans(Tween.TRANS_LINEAR)
 
 
 static func spawn_blast_fire_smoke(scene: Node, pos: Vector3, radius: float, color: Color) -> void:
@@ -1532,63 +1700,15 @@ static func spawn_blast_fire_smoke(scene: Node, pos: Vector3, radius: float, col
 	var count := int(round(clampi(int(radius * 1.1), 8, 24) * blast_smoke_count_scale))
 	if count <= 0:
 		return
-	var glow_col := color.lerp(Color(1.0, 0.45, 0.12), 0.5)
-	var ground := pos + Vector3.UP * (radius * 0.1)
-	var rng := RandomNumberGenerator.new()
-	for i in count:
-		var puff := MeshInstance3D.new()
-		puff.mesh = _get_smoke_billow_mesh()
-		var mat := ShaderMaterial.new()
-		mat.shader = _get_smoke_billow_shader()
-		mat.set_shader_parameter("core_col", Color(rng.randf_range(0.30, 0.46), rng.randf_range(0.28, 0.42), rng.randf_range(0.25, 0.38)))
-		mat.set_shader_parameter("edge_col", Color(0.04, 0.035, 0.03))
-		mat.set_shader_parameter("glow_col", glow_col)
-		# Subtle warm underlight only — the smoke must read DARK; the bright fire
-		# comes from the separate additive core/shards showing through, not from
-		# the smoke glowing.
-		mat.set_shader_parameter("glow", rng.randf_range(0.25, 0.7))
-		mat.set_shader_parameter("opacity", 0.0)
-		mat.set_shader_parameter("edge_power", rng.randf_range(1.6, 2.6))
-		mat.set_shader_parameter("lump", rng.randf_range(0.22, 0.4))
-		mat.set_shader_parameter("seed", rng.randf() * 100.0)
-		puff.material_override = mat
-		var ang := rng.randf() * TAU
-		var rad := rng.randf_range(0.0, radius * 0.65)
-		var off := Vector3(cos(ang) * rad, rng.randf_range(-0.15, 0.65) * radius * 0.5, sin(ang) * rad)
-		puff.position = ground + off
-		# Mixed sizes — a few big body clumps, many smaller detail puffs — all
-		# heavily overlapping into a cauliflower mass that's BIGGER than the hot
-		# core, so dark smoke surrounds the bright centre.
-		var end_scale := radius * rng.randf_range(0.5, 1.3)
-		puff.scale = Vector3.ONE * end_scale * 0.35
-		scene.add_child(puff)
-		var life := rng.randf_range(0.55, 1.0) + radius * 0.02
-		var rise := Vector3.UP * radius * rng.randf_range(0.35, 0.9) \
-			+ Vector3(rng.randf_range(-1.0, 1.0), 0.0, rng.randf_range(-1.0, 1.0)) * radius * 0.25
-		var mtw := puff.create_tween().set_parallel(true)
-		mtw.tween_property(puff, "scale", Vector3.ONE * end_scale, life)\
-			.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
-		mtw.tween_property(puff, "position", puff.position + rise, life)\
-			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-		# Pop in fast, then begin a gradual fade-out almost immediately (EASE_OUT
-		# so it thins early and trails off) — no long opaque lingering.
-		var otw := puff.create_tween()
-		otw.tween_property(mat, "shader_parameter/opacity", rng.randf_range(0.5, 0.75), life * 0.1)\
-			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
-		otw.tween_property(mat, "shader_parameter/opacity", 0.0, life * 0.9)\
-			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
-		otw.tween_callback(puff.queue_free)
-		# Fire glow cools to grey well before the smoke dissipates.
-		puff.create_tween().tween_property(mat, "shader_parameter/glow", 0.0, life * rng.randf_range(0.35, 0.55))\
-			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	# Lifetime scales with blast size: a small grenade (r≈6) smokes ~1.3s, a huge
+	# airstrike (r≈30) lingers ~4.4s.
+	_spawn_blast_billow(scene, pos, radius, count, false, color, 0.5 + radius * 0.13, 0.5, 1.3, radius * 0.7)
 
 
-# Fire as clouds: the SAME lumpy billow puffs as the smoke, but emissive — hot
-# white/yellow near the centre cooling to orange outward (heat → whiteness).
-# They're alpha-blended like the smoke, so they occlude and get occluded; mixed
-# in depth with the dark smoke puffs you get patches where smoke is in front
-# (dark) and patches where fire is in front (glowing), instead of one flat
-# additive blob. Short-lived — the fire cools and dies into the smoke.
+# Fire as clouds: same lumpy billow puffs, but emissive — hot white near the
+# centre cooling to orange outward. Alpha-blended like the smoke, so depth-mixed
+# you get patches where smoke is in front (dark) and patches where fire is in
+# front (glowing). Short-lived — the fire cools and dies into the smoke.
 static func spawn_blast_fire_clouds(scene: Node, pos: Vector3, radius: float, color: Color) -> void:
 	if scene == null or blast_fire_cloud_count_scale <= 0.0:
 		return
@@ -1597,51 +1717,8 @@ static func spawn_blast_fire_clouds(scene: Node, pos: Vector3, radius: float, co
 	var count := int(round(clampi(int(radius * 0.8), 6, 18) * blast_fire_cloud_count_scale))
 	if count <= 0:
 		return
-	var center := pos + Vector3.UP * (radius * 0.08)
-	var cool := color.lerp(Color(1.0, 0.5, 0.16), 0.5)
-	var rng := RandomNumberGenerator.new()
-	for i in count:
-		var puff := MeshInstance3D.new()
-		puff.mesh = _get_smoke_billow_mesh()
-		var mat := ShaderMaterial.new()
-		mat.shader = _get_smoke_billow_shader()
-		var ang := rng.randf() * TAU
-		var rad := rng.randf_range(0.0, radius * 0.5)
-		var off := Vector3(cos(ang) * rad, rng.randf_range(-0.25, 0.45) * radius * 0.4, sin(ang) * rad)
-		# Heat: 1 at the centre → 0 at the edge. Hotter = whiter + brighter.
-		var heat := pow(1.0 - clampf(rad / (radius * 0.5), 0.0, 1.0), 1.4)
-		var hot_col := cool.lerp(Color(1.0, 0.97, 0.86), heat)
-		var emit := lerpf(14.0, 65.0, heat)
-		mat.set_shader_parameter("core_col", hot_col.lerp(Color(1.0, 1.0, 1.0), 0.25))
-		mat.set_shader_parameter("edge_col", Color(0.45, 0.16, 0.04))
-		mat.set_shader_parameter("glow_col", hot_col)
-		mat.set_shader_parameter("glow", emit)
-		mat.set_shader_parameter("opacity", 0.0)
-		mat.set_shader_parameter("edge_power", rng.randf_range(1.6, 2.4))
-		mat.set_shader_parameter("lump", rng.randf_range(0.22, 0.4))
-		mat.set_shader_parameter("seed", rng.randf() * 100.0)
-		puff.material_override = mat
-		puff.position = center + off
-		var end_scale := radius * rng.randf_range(0.3, 0.7)
-		puff.scale = Vector3.ONE * end_scale * 0.4
-		scene.add_child(puff)
-		var life := rng.randf_range(0.26, 0.46) + radius * 0.015
-		var rise := Vector3.UP * radius * rng.randf_range(0.15, 0.45) \
-			+ Vector3(rng.randf_range(-1.0, 1.0), 0.0, rng.randf_range(-1.0, 1.0)) * radius * 0.2
-		var mtw := puff.create_tween().set_parallel(true)
-		mtw.tween_property(puff, "scale", Vector3.ONE * end_scale, life)\
-			.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
-		mtw.tween_property(puff, "position", puff.position + rise, life)\
-			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-		var otw := puff.create_tween()
-		otw.tween_property(mat, "shader_parameter/opacity", rng.randf_range(0.75, 0.95), life * 0.12)\
-			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
-		otw.tween_property(mat, "shader_parameter/opacity", 0.0, life * 0.88)\
-			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
-		otw.tween_callback(puff.queue_free)
-		# Cool from hot to nothing — fire clouds darken and die into the smoke.
-		puff.create_tween().tween_property(mat, "shader_parameter/glow", 0.0, life * rng.randf_range(0.55, 0.8))\
-			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	# Fire shape burns longer for bigger blasts (r≈6 → ~0.7s, r≈30 → ~2s).
+	_spawn_blast_billow(scene, pos, radius, count, true, color, 0.35 + radius * 0.055, 0.3, 0.7, radius * 0.3)
 
 
 const BLAST_LIGHT_FLASH_HOLD := 0.045   # ~1–3 rendered frames before decay
