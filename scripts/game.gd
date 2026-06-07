@@ -118,6 +118,9 @@ var _pickup_spawn_serial: int = 0
 var _air_strike_timer: float = -1.0
 var _air_strike_cancel_gen: int = 0
 var _air_strikes_armed: bool = false
+# Effect-shader (GPU pipeline) warmup runs once per session — PSOs are cached
+# process-wide once compiled, so re-warming every round is wasted work.
+var _effect_shaders_warmed: bool = false
 var _air_strike_pending: bool = false
 var _ion_cannon_timer: float = -1.0
 var _ion_cannon_cancel_gen: int = 0
@@ -309,6 +312,12 @@ func _ready() -> void:
 
 	# Voronoi gib bakes are expensive — do them once at boot, not on first kill.
 	Violence.prewarm_disintegration_cache()
+
+	# Pre-synthesize the heavy one-off effect sounds (ion cannon charge/burst,
+	# air strike, lava, casings, mine) once at boot so the first cast doesn't
+	# hitch synthesizing them mid-frame. Per-round shot/explosion variants are
+	# warmed separately in _warmup_round_audio. Fire-and-forget coroutine.
+	SFX.warmup_specials()
 
 	# Auto-host an iroh server unless we're already wired to a real peer
 	# (e.g. the user just clicked Join in the pause menu, which set up an
@@ -1393,11 +1402,14 @@ func _start_round_now() -> void:
 		_trigger_lava_leak(LAVA_LEAK_SPREAD_SECONDS)
 	_hide_rematch_overlay.rpc()
 	_warmup_round_audio()
-	if has_node("Arena"):
+	# Compile every effect's GPU pipelines once, in this quiet window with the
+	# arena + camera live (needed: a PSO only compiles when actually drawn), so
+	# the first explosion / ion cannon / phoenix revive of the match doesn't
+	# stall the render thread (~200ms) compiling them mid-fight. A compiled PSO
+	# is cached process-wide, so this only needs to happen once per session.
+	if not _effect_shaders_warmed and has_node("Arena"):
+		_effect_shaders_warmed = true
 		var arena := $Arena
-		# Compile every effect's GPU pipelines now, in this quiet window, so the
-		# first explosion / ion cannon / phoenix revive of the match doesn't
-		# stall the render thread (~200ms) compiling them mid-fight.
 		preload("res://scripts/grenade.gd").warmup_shaders(arena)   # heat + shock distortion shaders
 		Violence.warmup_blast_materials(arena)                      # explosion fireball shell
 		ION_CANNON_SCRIPT.warmup_shaders(arena)                     # ion beam / motes / detonation
