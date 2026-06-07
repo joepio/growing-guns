@@ -684,6 +684,44 @@ func _apply_ghost_visuals() -> void:
 			mesh.material_override = _body_materials.get(mesh, mesh.material_override)
 
 
+# Transparent per-pixel body material used while a player ascends (Phoenix
+# revive). Distinct PSO from the unshaded effect materials, so it gets its own
+# warmup. Rebuilt each frame as `body_alpha` fades 0.5 → 0.0.
+static func _make_phoenix_body_material(body_alpha: float) -> StandardMaterial3D:
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.albedo_color = Color(1.0, 1.0, 1.0, body_alpha)
+	mat.metallic = 0.0
+	mat.roughness = 0.55
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	return mat
+
+
+# Additive-looking emissive column that shoots skyward during the ascension.
+# Unshaded alpha-blended PSO (same variant as the grenade cluster-pop core).
+static func _make_phoenix_column_material() -> StandardMaterial3D:
+	var mat := StandardMaterial3D.new()
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.albedo_color = Color(1.0, 1.0, 1.0, 0.18)
+	mat.emission_enabled = true
+	mat.emission = Color(1.0, 1.0, 1.0)
+	mat.emission_energy_multiplier = 14.0
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	return mat
+
+
+# Pre-compile the phoenix body + column material PSOs so the first revive of
+# the match doesn't hitch. Built from the real factories and rendered sub-pixel
+# for a few frames via Violence.warmup_material.
+static func warmup_phoenix_shaders(scene: Node) -> void:
+	if scene == null:
+		return
+	Violence.warmup_material(scene, _make_phoenix_body_material(PHOENIX_ALPHA_START))
+	Violence.warmup_material(scene, _make_phoenix_column_material())
+
+
 func _apply_phoenix_visuals(body_alpha: float = PHOENIX_ALPHA_START) -> void:
 	if body_model == null:
 		return
@@ -695,14 +733,7 @@ func _apply_phoenix_visuals(body_alpha: float = PHOENIX_ALPHA_START) -> void:
 	if blade:
 		blade.transparency = 0.0
 	for mesh in _body_meshes():
-		var mat := StandardMaterial3D.new()
-		mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
-		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		mat.albedo_color = Color(1.0, 1.0, 1.0, body_alpha)
-		mat.metallic = 0.0
-		mat.roughness = 0.55
-		mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-		mesh.material_override = mat
+		mesh.material_override = _make_phoenix_body_material(body_alpha)
 
 
 func _phoenix_elapsed_s() -> float:
@@ -765,15 +796,7 @@ func _spawn_phoenix_column(at_world: Vector3) -> void:
 	mesh.radial_segments = 20
 	mesh.rings = 1
 	column.mesh = mesh
-	var mat := StandardMaterial3D.new()
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.albedo_color = Color(1.0, 1.0, 1.0, 0.18)
-	mat.emission_enabled = true
-	mat.emission = Color(1.0, 1.0, 1.0)
-	mat.emission_energy_multiplier = 14.0
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	column.material_override = mat
+	column.material_override = _make_phoenix_column_material()
 	anchor.add_child(column)
 	var light := OmniLight3D.new()
 	light.name = "PhoenixLight"

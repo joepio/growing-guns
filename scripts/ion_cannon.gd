@@ -140,7 +140,20 @@ func _column_layout() -> Dictionary:
 	}
 
 
-func _make_column_material(layer: Dictionary) -> StandardMaterial3D:
+# Pre-compile the additive ion-beam material PSOs so the first ION CANNON cast
+# of the match doesn't hitch (~200ms) while the charge column appears. The
+# charge column, ascending motes and detonation shells all share one additive
+# unshaded/fog-disabled PSO variant, so warming the column + ion-add materials
+# (built from the real factories) covers them all. Routed through
+# Violence.warmup_material, which renders them sub-pixel for a few frames.
+static func warmup_shaders(scene: Node) -> void:
+	if scene == null:
+		return
+	Violence.warmup_material(scene, _make_column_material(COLUMN_LAYERS[0]))
+	Violence.warmup_material(scene, _make_ion_add_material(ION_COLOR, 0.5, 400.0))
+
+
+static func _make_column_material(layer: Dictionary) -> StandardMaterial3D:
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
@@ -398,7 +411,7 @@ func _detonate() -> void:
 	_finish()
 
 
-func _make_ion_add_material(tint: Color, alpha: float, emission: float) -> StandardMaterial3D:
+static func _make_ion_add_material(tint: Color, alpha: float, emission: float) -> StandardMaterial3D:
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
