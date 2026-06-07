@@ -908,7 +908,12 @@ func attach_air_strike_inbound(parent: Node3D, travel_seconds: float, distant: b
 	return p
 
 
-func attach_ion_cannon_charge(parent: Node3D, charge_seconds: float) -> AudioStreamPlayer3D:
+# `world_pos` is where the charge should sound from — pass the ground-level
+# strike target. The visual column root it's parented to sits ~1km up in the
+# sky (SKY_HEIGHT), and a RaytracedAudioPlayer3D that far from the listener is
+# culled past its auto max_distance → dead silent. Parenting keeps lifetime
+# tied to the column; the explicit position keeps it audible at ground level.
+func attach_ion_cannon_charge(parent: Node3D, charge_seconds: float, world_pos: Vector3 = NO_POS) -> AudioStreamPlayer3D:
 	if parent == null:
 		return null
 	var dur_bucket: float = snappedf(clampf(charge_seconds, 2.5, 6.5), 0.1)
@@ -920,8 +925,10 @@ func attach_ion_cannon_charge(parent: Node3D, charge_seconds: float) -> AudioStr
 	p.stream = wav
 	p.volume_db = ion_cannon_charge_db
 	parent.add_child(p)
+	if world_pos != NO_POS:
+		p.global_position = world_pos
 	p.play()
-	var pos := parent.global_position
+	var pos: Vector3 = world_pos if world_pos != NO_POS else parent.global_position
 	var tail_db: float = ion_cannon_charge_db + big_tail_send_db + 10.0
 	_big_tail_intensity = maxf(_big_tail_intensity, 0.52)
 	_spawn_big_tail_send(wav, tail_db, pos, 1.0, "ion_cannon_charge")
@@ -1781,55 +1788,44 @@ func _synth_ion_cannon_charge(charge_seconds: float) -> PackedVector2Array:
 	return out
 
 
-func _soft_square(phase: float, drive: float = 3.8) -> float:
-	return tanh(sin(phase) * drive)
-
-
 func _synth_ion_cannon_burst(radius: float, variant: int) -> PackedVector2Array:
-	# Layered phased soft-square zap on top of the regular explosion bang.
+	# Deep ~40 Hz sawtooth boom — the body of the ion detonation, layered on top
+	# of the regular explosion bang. Two slightly-detuned saws (fundamental +
+	# octave) give weight without mud; the raw saw edge is tamed by a one-pole
+	# low-pass so it reads as a round, chest-thumping boom rather than a buzz. A
+	# brief noise crack adds the initial zap transient, and a downward pitch
+	# sweep settles it into a thud. Waveshaped through tanh — loud, never clips.
 	var rng := RandomNumberGenerator.new()
 	rng.seed = hash([radius, variant, "ion_burst"])
 	var r_norm: float = clampf(radius / 38.0, 0.6, 1.4)
-	var dur: float = clampf(lerpf(0.42, 0.72, r_norm) * lerpf(0.92, 1.08, rng.randf()), 0.38, 0.82)
+	var dur: float = clampf(lerpf(0.55, 0.85, r_norm) * lerpf(0.95, 1.05, rng.randf()), 0.5, 0.95)
 	var n: int = int(dur * MIX_RATE)
 	var out := PackedVector2Array()
 	out.resize(n)
-	var base_freqs: Array[float] = [92.0, 138.0, 184.0, 276.0]
-	var freqs: Array[float] = []
-	for base_hz in base_freqs:
-		freqs.append(base_hz * lerpf(0.96, 1.04, rng.randf()) * r_norm)
-	var phase_rates: Array[float] = [
-		lerpf(0.985, 1.015, rng.randf()),
-		lerpf(0.975, 1.025, rng.randf()),
-		lerpf(0.965, 1.035, rng.randf()),
-		lerpf(0.955, 1.045, rng.randf()),
-	]
-	var layer_gains: Array[float] = [0.34, 0.28, 0.22, 0.16]
-	var phases: Array[float] = []
-	phases.resize(freqs.size())
-	for j in freqs.size():
-		phases[j] = rng.randf() * TAU
-	var drives: Array[float] = []
-	for _j in freqs.size():
-		drives.append(lerpf(3.2, 4.6, rng.randf()))
-	var sq_lp: float = 0.0
-	var sq_lp2: float = 0.0
+	# ~40 Hz fundamental, a touch lower for bigger blasts; octave-up partner
+	# detuned for thickness. Small per-cast variation keeps repeats from phasing.
+	var f0: float = 40.0 * lerpf(0.97, 1.03, rng.randf()) * lerpf(1.0, 0.9, r_norm - 0.6)
+	var f1: float = f0 * 2.0 * lerpf(0.992, 1.008, rng.randf())
+	var ph0: float = rng.randf() * TAU
+	var ph1: float = rng.randf() * TAU
+	var lp: float = 0.0
 	var crack_lp: float = 0.0
 	for i in range(n):
 		var t: float = float(i) / MIX_RATE
 		var u: float = t / dur
-		var env: float = exp(-t * lerpf(5.0, 3.4, r_norm)) * pow(1.0 - u, 0.42)
-		var squares: float = 0.0
-		for j in freqs.size():
-			phases[j] += TAU * freqs[j] * phase_rates[j] / MIX_RATE
-			squares += _soft_square(phases[j], drives[j]) * layer_gains[j]
-		sq_lp = lerpf(sq_lp, squares, 0.16)
-		sq_lp2 = lerpf(sq_lp2, sq_lp, 0.12)
+		# Pitch starts ~18% high and settles to the fundamental over the head.
+		var sweep: float = lerpf(1.18, 1.0, smoothstep(0.0, 0.55, u))
+		ph0 = fmod(ph0 + TAU * f0 * sweep / MIX_RATE, TAU)
+		ph1 = fmod(ph1 + TAU * f1 * sweep / MIX_RATE, TAU)
+		var saw: float = (ph0 / PI - 1.0) * 0.85 + (ph1 / PI - 1.0) * 0.3
+		# One-pole low-pass rounds off the saw's buzzy upper harmonics.
+		lp = lerpf(lp, saw, 0.45)
 		var crack: float = rng.randf_range(-1.0, 1.0)
-		crack_lp = lerpf(crack_lp, crack, 0.28)
-		var zap: float = (sq_lp2 * 0.82 + crack_lp * 0.08) * env
-		var s: float = tanh(zap * lerpf(1.5, 2.0, r_norm)) * 0.62
-		out[i] = Vector2(s, s * 0.97)
+		crack_lp = lerpf(crack_lp, crack, 0.5)
+		var crack_env: float = exp(-t * 85.0)
+		var env: float = exp(-t * lerpf(4.6, 3.0, r_norm)) * pow(1.0 - u, 0.5)
+		var s: float = tanh((lp * 2.4 + crack_lp * crack_env * 1.1) * env) * 0.7
+		out[i] = Vector2(s, s * 0.99)
 	return out
 
 

@@ -126,7 +126,9 @@ func setup(
 	_spawn_column()
 	_spawn_lights()
 	if _column_root:
-		_charge_audio = SFX.attach_ion_cannon_charge(_column_root, CHARGE_SECONDS)
+		# Sound from the ground-level strike point, not the sky-high column root
+		# (the audio source would otherwise be ~1km up and culled to silence).
+		_charge_audio = SFX.attach_ion_cannon_charge(_column_root, CHARGE_SECONDS, target_pos)
 
 
 func _column_layout() -> Dictionary:
