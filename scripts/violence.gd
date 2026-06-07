@@ -177,9 +177,10 @@ static func gib_explode(
 		)
 		if rb == null:
 			continue
-		scene.get_tree().create_timer(lifetime).timeout.connect(func() -> void:
-			if is_instance_valid(rb):
-				rb.queue_free())
+		# Bind the body's own queue_free: an early free (round reset clears the
+		# world) auto-disconnects the connection instead of invoking a lambda
+		# whose captured `rb` was already freed ("Lambda capture was freed").
+		scene.get_tree().create_timer(lifetime).timeout.connect(rb.queue_free)
 		out.append(rb)
 	return out
 
@@ -351,9 +352,9 @@ static func gib_body_ragdoll(
 		randf_range(-spin, spin),
 		randf_range(-spin, spin),
 	)
-	scene.get_tree().create_timer(lifetime).timeout.connect(func() -> void:
-		if is_instance_valid(rb):
-			rb.queue_free())
+	# Bind the body's own queue_free so an early free auto-disconnects instead
+	# of erroring on a freed lambda capture (see other cleanup sites).
+	scene.get_tree().create_timer(lifetime).timeout.connect(rb.queue_free)
 	return rb
 
 
@@ -438,9 +439,10 @@ static func spawn_blood_gib_blobs(
 		rb.body_entered.connect(func(_body: Node) -> void:
 			_gib_on_chunk_body_entered(rb, scene, impact_blood_strength)
 		)
-		scene.get_tree().create_timer(lifetime).timeout.connect(func() -> void:
-			if is_instance_valid(rb):
-				rb.queue_free())
+		# Bind the body's own queue_free: an early free (round reset clears the
+		# world) auto-disconnects the connection instead of invoking a lambda
+		# whose captured `rb` was already freed ("Lambda capture was freed").
+		scene.get_tree().create_timer(lifetime).timeout.connect(rb.queue_free)
 		out.append(rb)
 	return out
 
@@ -1061,13 +1063,13 @@ const MAX_FULL_BLASTS_PER_FRAME := 3
 const MAX_CHEAP_BLASTS_PER_FRAME := 10
 const BLAST_CLUSTER_DIST_SQ := 9.0
 const FULL_BLAST_WINDOW_MS := 500
-const MAX_FULL_BLASTS_PER_WINDOW := 1
+const MAX_FULL_BLASTS_PER_WINDOW := 25   # ~50/sec sustained; bursts still capped by MAX_FULL_BLASTS_PER_FRAME + 3m cluster dedup
 const MAX_ACTIVE_SMOKE_PUFFS := 36
 const MAX_PENDING_SMOKE_PUFFS := 12
 const SMOKE_BURST_WINDOW_MS := 750
 const MAX_SMOKE_BURSTS_PER_WINDOW := 1
 const EXPLOSION_SFX_WINDOW_MS := 500
-const MAX_EXPLOSION_SFX_PER_WINDOW := 1
+const MAX_EXPLOSION_SFX_PER_WINDOW := 25  # explosion audio is cheap (cached WAV); allow ~50/sec so explosive-round streams still sound like explosions
 const CHEAP_LIGHT_WINDOW_MS := 180
 const MAX_CHEAP_LIGHTS_PER_WINDOW := 2
 
@@ -1163,124 +1165,148 @@ static func _claim_smoke_burst() -> bool:
 	return true
 
 
-static func _spawn_blast_core_volume(scene: Node, pos: Vector3, radius: float, expand_time: float) -> void:
-	var core := MeshInstance3D.new()
-	var cm := SphereMesh.new()
-	cm.radius = 0.25
-	cm.height = 0.5
-	core.mesh = cm
-	var cmat := StandardMaterial3D.new()
-	cmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	cmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	cmat.albedo_color = Color(1.0, 0.96, 0.86, 0.08)
-	cmat.emission_enabled = true
-	cmat.emission = Color(1.0, 0.88, 0.4)
-	cmat.emission_energy_multiplier = 14.0
-	cmat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	core.material_override = cmat
-	_attach_world_3d(scene, core, pos)
-	var ctw := core.create_tween().set_parallel(true)
-	var core_target_scale := Vector3.ONE * maxf(0.01, radius / cm.radius)
-	ctw.tween_property(core, "scale", core_target_scale, expand_time)\
-		.set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_IN_OUT)
-	ctw.tween_property(cmat, "albedo_color", Color(1.0, 0.62, 0.18, 0.34), expand_time * 0.52)\
-		.set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_IN_OUT)
-	ctw.tween_property(cmat, "albedo_color", Color(0.95, 0.12, 0.02, 0.0), expand_time * 0.48)\
-		.set_delay(expand_time * 0.52).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
-	ctw.tween_property(cmat, "emission", Color(1.0, 0.34, 0.08), expand_time * 0.65)\
-		.set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_IN_OUT)
-	ctw.tween_property(cmat, "emission_energy_multiplier", 0.0, expand_time * 0.34)\
-		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
-	ctw.chain().tween_callback(core.queue_free)
-
-
-static func _spawn_blast_dense_shell(scene: Node, pos: Vector3, radius: float, color: Color) -> void:
-	var wave := MeshInstance3D.new()
-	var wm := SphereMesh.new()
-	wm.radius = 0.2
-	wm.height = 0.4
-	wave.mesh = wm
-	var mat := StandardMaterial3D.new()
+static func _configure_blast_fireball_mat(
+	mat: StandardMaterial3D,
+	hot: Color,
+	start_alpha: float,
+	emission_mult: float = 7.5,
+) -> void:
+	# Additive unshaded shell — low alpha keeps it see-through; emission carries
+	# the brightness so it still blooms.
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.albedo_color = Color(1.0, 0.5, 0.14, 0.02)
-	mat.emission_enabled = true
-	mat.emission = color.lerp(Color(1.0, 0.45, 0.08), 0.6)
-	mat.emission_energy_multiplier = 4.0
+	mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
 	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	wave.material_override = mat
-	_attach_world_3d(scene, wave, pos)
-	var tw := wave.create_tween().set_parallel(true)
-	var wave_target_scale := Vector3.ONE * maxf(0.01, (radius * 1.08) / wm.radius)
-	# Shockwave expands at the speed of sound (343 m/s) so visual + audio
-	# arrive together at distant viewers (audio is delayed dist/343 in SFX).
-	# Min 30 ms so tiny blasts remain perceptible.
-	var wave_expand_time: float = maxf(0.03, radius / 343.0)
-	tw.tween_property(wave, "scale", wave_target_scale, wave_expand_time)\
+	mat.render_priority = 2
+	mat.albedo_color = Color(hot.r, hot.g, hot.b, start_alpha)
+	mat.emission_enabled = true
+	mat.emission = hot
+	mat.emission_energy_multiplier = emission_mult
+
+
+const BLAST_FRONT_SPEED := 343.0  # m/s — shockwave front + audio delay
+const BLAST_FIREBALL_MIN_GROW := 0.12
+const BLAST_FIREBALL_MAX_GROW := 0.32
+
+
+static func blast_expand_time(radius: float) -> float:
+	# Linear growth synced to sound speed, but clamped so small blasts stay visible.
+	return clampf(radius / BLAST_FRONT_SPEED, BLAST_FIREBALL_MIN_GROW, BLAST_FIREBALL_MAX_GROW)
+
+
+static func _blast_fireball_timing(radius: float) -> Dictionary:
+	var grow := blast_expand_time(radius)
+	var fade := clampf(0.08 + radius * 0.003, 0.08, 0.16)
+	return {"grow": grow, "fade": fade}
+
+
+static func _animate_blast_fireball(
+	ball: MeshInstance3D,
+	mat: StandardMaterial3D,
+	hot: Color,
+	target_scale: float,
+	timing: Dictionary,
+) -> void:
+	var grow: float = timing.grow
+	var fade: float = timing.fade
+	var start_hot := hot.lerp(Color(1.0, 1.0, 0.98), 0.65)
+	var mid_hot := hot.lerp(Color(1.0, 0.48, 0.08), 0.5)
+	var end_hot := hot.lerp(Color(1.0, 0.32, 0.05), 0.35)
+	_configure_blast_fireball_mat(mat, start_hot, 0.88, 16.0)
+	ball.scale = Vector3.ONE * maxf(0.01, target_scale * 0.28)
+
+	var color_tw := ball.create_tween().set_parallel(true)
+	color_tw.tween_property(mat, "emission", mid_hot, grow * 0.55)\
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	color_tw.tween_property(mat, "emission", end_hot, grow * 0.45 + fade)\
+		.set_delay(grow * 0.55).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	color_tw.tween_property(mat, "albedo_color", Color(mid_hot.r, mid_hot.g, mid_hot.b, 0.4), grow * 0.55)\
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	color_tw.tween_property(mat, "albedo_color", Color(end_hot.r, end_hot.g, end_hot.b, 0.26), grow * 0.45 + fade)\
+		.set_delay(grow * 0.55).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+
+	var tw := ball.create_tween()
+	tw.tween_property(ball, "scale", Vector3.ONE * target_scale, grow)\
 		.set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_IN_OUT)
-	tw.tween_property(mat, "albedo_color", Color(1.0, 0.42, 0.08, 0.13), wave_expand_time * 0.5)\
-		.set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_IN_OUT)
-	tw.tween_property(mat, "albedo_color", Color(0.82, 0.08, 0.01, 0.0), wave_expand_time * 0.5)\
-		.set_delay(wave_expand_time * 0.5).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
-	tw.tween_property(mat, "emission_energy_multiplier", 0.0, wave_expand_time * 0.28)\
+	tw.chain().set_parallel(true)
+	tw.tween_property(mat, "emission_energy_multiplier", 0.0, fade)\
+		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_IN)
+	tw.tween_property(mat, "albedo_color", Color(end_hot.r, end_hot.g, end_hot.b, 0.0), fade)\
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
+	tw.chain().tween_callback(ball.queue_free)
+
+
+static func _spawn_blast_fireball(scene: Node, pos: Vector3, radius: float, color: Color = Color.WHITE) -> void:
+	var ball := MeshInstance3D.new()
+	var mesh := SphereMesh.new()
+	mesh.radius = 0.25
+	mesh.height = 0.5
+	ball.mesh = mesh
+	var mat := StandardMaterial3D.new()
+	ball.material_override = mat
+	_attach_world_3d(scene, ball, pos)
+	var target_scale := maxf(0.01, (radius * 1.05) / mesh.radius)
+	var hot := color.lerp(Color(1.0, 0.78, 0.42), 0.45)
+	_animate_blast_fireball(ball, mat, hot, target_scale, _blast_fireball_timing(radius))
+
+
+const BLAST_LIGHT_FLASH_HOLD := 0.045   # ~1–3 rendered frames before decay
+const BLAST_LIGHT_FLASH_DECAY := 0.09
+const BLAST_LIGHT_CORE_HOLD := 0.03
+const BLAST_LIGHT_CORE_DECAY := 0.075
+const BLAST_LIGHT_HOT := Color(1.0, 0.995, 0.98)
+const BLAST_LIGHT_WARM := Color(1.0, 0.54, 0.12)
+
+
+static func _tween_blast_light_pop(
+	light: OmniLight3D,
+	peak_energy: float,
+	hold_s: float,
+	decay_s: float,
+	hot_color: Color = BLAST_LIGHT_HOT,
+	warm_color: Color = BLAST_LIGHT_WARM,
+) -> void:
+	# Peak is set immediately (frame 0). Hold keeps energy flat for one flash
+	# beat, then energy falls off fast while color drifts hot-white → orange.
+	light.light_color = hot_color
+	light.light_energy = peak_energy
+	var total := hold_s + decay_s
+	var ctw := light.create_tween()
+	ctw.tween_property(light, "light_color", warm_color, total)\
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
+	var etw := light.create_tween()
+	if hold_s > 0.0001:
+		etw.tween_interval(hold_s)
+	etw.tween_property(light, "light_energy", 0.0, decay_s)\
 		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
-	tw.chain().tween_callback(wave.queue_free)
+	etw.tween_callback(light.queue_free)
 
 
 static func _spawn_blast_flash_light(scene: Node, pos: Vector3, radius: float) -> void:
 	var flash := OmniLight3D.new()
-	flash.light_color = Color(1.0, 0.98, 0.92)
-	var peak := 180.0 + radius * 22.0
-	flash.light_energy = peak
-	flash.omni_range = clampf(radius * 6.2, 55.0, 185.0)
+	var peak := 45.0 + radius * 5.5
+	flash.omni_range = clampf(radius * 6.5, 55.0, 190.0)
 	flash.shadow_enabled = false
 	_attach_world_3d(scene, flash, pos)
-	var ftw := flash.create_tween()
-	ftw.tween_property(flash, "light_energy", peak * 0.82, 0.03)\
-		.set_trans(Tween.TRANS_LINEAR)
-	ftw.tween_property(flash, "light_energy", 0.0, 0.15)\
-		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_IN)
-	ftw.tween_callback(flash.queue_free)
-
-
-static func _spawn_blast_env_light(scene: Node, pos: Vector3, radius: float, color: Color) -> void:
-	# Wide env wash — bright spike, short tail.
-	var env := OmniLight3D.new()
-	env.light_color = color.lerp(Color(1.0, 0.82, 0.42), 0.62)
-	var peak := clampf(130.0 + radius * 6.2, 130.0, 320.0)
-	env.light_energy = peak
-	env.omni_range = clampf(radius * 6.0, 70.0, 185.0)
-	env.shadow_enabled = false
-	_attach_world_3d(scene, env, pos)
-	var tw := env.create_tween()
-	tw.tween_property(env, "light_energy", peak * 0.68, 0.035)\
-		.set_trans(Tween.TRANS_LINEAR)
-	tw.tween_property(env, "light_energy", 0.0, clampf(0.12 + radius * 0.005, 0.14, 0.22))\
-		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_IN)
-	tw.tween_callback(env.queue_free)
+	_tween_blast_light_pop(flash, peak, BLAST_LIGHT_FLASH_HOLD, BLAST_LIGHT_FLASH_DECAY)
 
 
 static func _spawn_blast_core_light(scene: Node, pos: Vector3, radius: float, color: Color, energy_mult: float = 1.0) -> void:
 	var core_light := OmniLight3D.new()
-	core_light.light_color = color.lerp(Color(1.0, 0.95, 0.78), 0.7)
-	core_light.light_energy = (92.0 + radius * 11.0) * energy_mult
-	core_light.omni_range = clampf(radius * 2.5, 14.0, 78.0)
+	var peak := (22.0 + radius * 2.5) * energy_mult
+	core_light.omni_range = clampf(radius * 2.2, 12.0, 65.0)
 	core_light.shadow_enabled = false
 	_attach_world_3d(scene, core_light, pos)
-	var ctlw := core_light.create_tween()
-	ctlw.tween_property(core_light, "light_color", color.lerp(Color(1.0, 0.55, 0.18), 0.5), 0.06)\
-		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
-	ctlw.parallel().tween_property(core_light, "light_energy", 0.0, 0.17)\
-		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
-	ctlw.tween_callback(core_light.queue_free)
+	var hot := color.lerp(BLAST_LIGHT_HOT, 0.55)
+	var warm := color.lerp(BLAST_LIGHT_WARM, 0.45)
+	_tween_blast_light_pop(core_light, peak, BLAST_LIGHT_CORE_HOLD, BLAST_LIGHT_CORE_DECAY, hot, warm)
 
 
 static func _spawn_cheap_blast_flare(scene: Node, pos: Vector3, radius: float, color: Color) -> void:
 	if scene == null or radius <= 0.0 or not _claim_cheap_blast():
 		return
-	var expand_time: float = clampf(0.1 + radius * 0.012, 0.12, 0.24)
-	_spawn_blast_core_volume(scene, pos, radius, expand_time)
-	_spawn_blast_dense_shell(scene, pos, radius, color)
+	var expand_time := blast_expand_time(radius)
+	_spawn_blast_fireball(scene, pos, radius, color)
 	if _claim_cheap_light():
 		_spawn_blast_flash_light(scene, pos, radius)
 		_spawn_blast_core_light(scene, pos, radius, color, 0.55)
@@ -1308,47 +1334,17 @@ static func spawn_bullet_blast(scene: Node, pos: Vector3, radius: float, color: 
 	if not full_blast:
 		_spawn_cheap_blast_flare(scene, pos, radius, color)
 		return
-	var expand_time: float = clampf(0.1 + radius * 0.012, 0.12, 0.24)
+	var expand_time := blast_expand_time(radius)
 	spawn_heat_distortion(scene, pos, radius, expand_time, clampf(radius * 0.012, 0.025, 0.06))
 	spawn_shockwave_ring(scene, pos, radius)
 	# Drop scorch rings on every nearby surface (floor under midair blasts,
 	# walls beside corner blasts, ceiling above ground-level pops).
 	spawn_blast_scorches(scene, pos, radius)
 
-	# 1) Fireball volume. Grow linearly to the effective radius while the
-	# emitted light drops fast; opacity ramps up as the blast front arrives.
-	_spawn_blast_core_volume(scene, pos, radius, expand_time)
-
-	# 2) Dense blast shell. The border of the effective radius reads as a
-	# briefly opaque wall rather than a faint transparent puff.
-	_spawn_blast_dense_shell(scene, pos, radius, color)
-
-	# Brief scene-wide flash — hot spike, then a wide env fill that lingers.
+	# Lights first, then fireball meshes on top (render_priority 2).
 	_spawn_blast_flash_light(scene, pos, radius)
-	_spawn_blast_env_light(scene, pos, radius, color)
-
-	# Bright core glow — tighter hot center as the fireball evolves.
 	_spawn_blast_core_light(scene, pos, radius, color)
-
-	# 3) Explosion light — warm decay tail on the blast center.
-	var light := OmniLight3D.new()
-	var hot_color := color.lerp(Color(1.0, 0.98, 0.9), 0.72)
-	var warm_color := color.lerp(Color(1.0, 0.6, 0.18), 0.5)
-	var ember_color := color.lerp(Color(0.9, 0.16, 0.04), 0.38)
-	light.light_color = hot_color
-	light.light_energy = clampf(78.0 + radius * 7.2, 78.0, 220.0)
-	light.omni_range = clampf(radius * 5.0, 32.0, 125.0)
-	_attach_world_3d(scene, light, pos)
-	var light_dur := clampf(0.08 + radius * 0.007, 0.08, 0.2)
-	var ltw := light.create_tween()
-	ltw.set_parallel(true)
-	ltw.tween_property(light, "light_color", warm_color, light_dur * 0.28)\
-		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
-	ltw.tween_property(light, "light_color", ember_color, light_dur * 0.72)\
-		.set_delay(light_dur * 0.28).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
-	ltw.tween_property(light, "light_energy", 0.0, light_dur)\
-		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
-	ltw.tween_callback(light.queue_free)
+	_spawn_blast_fireball(scene, pos, radius, color)
 
 	# 4) Big blasts play the full explosion SFX; smaller impacts stay visual.
 	if play_audio and radius >= 3.5:
@@ -1477,23 +1473,30 @@ static func spawn_blast_smoke(scene: Node, pos: Vector3, radius: float) -> void:
 		if not _claim_pending_smoke_puff():
 			continue
 		var delay := float(j) * 0.16
-		scene.get_tree().create_timer(delay).timeout.connect(func() -> void:
-			_pending_smoke_puffs = maxi(0, _pending_smoke_puffs - 1)
-			if not is_instance_valid(scene):
-				return
-			var ring := randf_range(0.0, radius * 0.16)
-			var ang2 := randf() * TAU
-			var col_offset := Vector3(cos(ang2) * ring, randf_range(1.0, 3.0), sin(ang2) * ring)
-			spawn_smoke_puff(
-				scene,
-				ground + col_offset,
-				randf_range(2.2, 4.5) * scale,
-				Vector3(randf_range(-0.25, 0.25), randf_range(2.8, 5.0), randf_range(-0.25, 0.25)),
-				randf_range(5.0, 8.5),
-				Color(0.34, 0.32, 0.30, randf_range(0.18, 0.30)),
-			)
-		, CONNECT_ONE_SHOT)
+		# .bind a static helper (not a capturing lambda): if `scene` frees before
+		# the timer fires (match restart), the helper still runs the budget
+		# decrement — preventing a permanent _pending_smoke_puffs leak — then
+		# bails on the freed scene. A capturing lambda would error and skip both.
+		scene.get_tree().create_timer(delay).timeout.connect(
+			_emit_delayed_smoke_puff.bind(scene, ground, radius, scale), CONNECT_ONE_SHOT)
 
+
+static func _emit_delayed_smoke_puff(scene: Node, ground: Vector3, radius: float, scale: float) -> void:
+	# Always release the budget slot first, even if the scene is already gone.
+	_pending_smoke_puffs = maxi(0, _pending_smoke_puffs - 1)
+	if not is_instance_valid(scene):
+		return
+	var ring := randf_range(0.0, radius * 0.16)
+	var ang2 := randf() * TAU
+	var col_offset := Vector3(cos(ang2) * ring, randf_range(1.0, 3.0), sin(ang2) * ring)
+	spawn_smoke_puff(
+		scene,
+		ground + col_offset,
+		randf_range(2.2, 4.5) * scale,
+		Vector3(randf_range(-0.25, 0.25), randf_range(2.8, 5.0), randf_range(-0.25, 0.25)),
+		randf_range(5.0, 8.5),
+		Color(0.34, 0.32, 0.30, randf_range(0.18, 0.30)),
+	)
 
 static func spawn_heat_distortion(scene: Node, pos: Vector3, radius: float, duration: float, strength: float) -> void:
 	if scene == null:
@@ -2549,12 +2552,14 @@ static func apply_explosion_view_punch(player: Node, pos: Vector3, radius: float
 	if delay < 0.01:
 		do_explosion_view_punch(player, pos, radius, peak)
 	else:
-		player.get_tree().create_timer(delay).timeout.connect(func() -> void:
-			if is_instance_valid(player):
-				do_explosion_view_punch(player, pos, radius, peak))
+		# .bind (not a capturing lambda) so a player freed during the speed-of-
+		# sound delay doesn't error on a freed capture; do_explosion_view_punch
+		# guards is_instance_valid(player) for that case.
+		player.get_tree().create_timer(delay).timeout.connect(
+			do_explosion_view_punch.bind(player, pos, radius, peak))
 
 static func do_explosion_view_punch(player: Node, pos: Vector3, radius: float, peak: float) -> void:
-	if player == null or player.get("camera") == null:
+	if not is_instance_valid(player) or player.get("camera") == null:
 		return
 	# Recompute distance — the player may have moved during the propagation.
 	var to_player: Vector3 = player.global_position - pos

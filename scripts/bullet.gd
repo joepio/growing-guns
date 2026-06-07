@@ -52,11 +52,9 @@ func setup(origin: Vector3, dir: Vector3, shooter: int, w: Weapon, p_last_in_mag
 	ricochet_left = w.ricochet_count
 	world_pierce_left = w.world_pierce_count
 
-	var players_root: Node = get_tree().current_scene.get_node_or_null("Players")
-	if players_root:
-		var shooter_node: Node3D = players_root.get_node_or_null(str(shooter_id))
-		if shooter_node and shooter_node.has_method("get_hitbox_rids"):
-			excluded_rids = shooter_node.call("get_hitbox_rids")
+	var shooter_node: Node3D = _shooter_node()
+	if shooter_node and shooter_node.has_method("get_hitbox_rids"):
+		excluded_rids = shooter_node.call("get_hitbox_rids")
 
 	_ray_query = PhysicsRayQueryParameters3D.new()
 	_ray_query.collision_mask = 1 | 2 | 4  # world + players + projectiles
@@ -189,8 +187,7 @@ func _do_hitscan() -> void:
 		_handle_collision(result)
 	
 	# Visual laser tracer
-	var players_root: Node = get_tree().current_scene.get_node_or_null("Players")
-	var shooter_node: Node3D = players_root.get_node_or_null(str(shooter_id)) if players_root else null
+	var shooter_node: Node3D = _shooter_node()
 	if not silenced and shooter_node and shooter_node.has_method("_spawn_laser_tracer"):
 		shooter_node.call("_spawn_laser_tracer", start_pos, hit_pos)
 	
@@ -282,12 +279,7 @@ func _handle_collision(result: Dictionary) -> void:
 		BenchFlags.inc("explosions")
 	var bench_skip_visuals: bool = BenchFlags.active and BenchFlags.no_explosion_visuals
 
-	var players_root: Node = get_tree().current_scene.get_node_or_null("Players")
-	if not players_root:
-		queue_free()
-		return
-
-	var shooter_node: Node3D = players_root.get_node_or_null(str(shooter_id))
+	var shooter_node: Node3D = _shooter_node()
 	if not shooter_node:
 		queue_free()
 		return
@@ -303,7 +295,7 @@ func _handle_collision(result: Dictionary) -> void:
 		# Bullet stops on corpse — same as hitting a wall. Explosive rounds
 		# still detonate below.
 		if weapon_stats.explosive_radius > 0.0:
-			shooter_node.call("_spawn_bullet_blast", hit_pos, weapon_stats.explosive_radius, weapon_stats.bullet_color)
+			shooter_node.call("_spawn_bullet_blast", hit_pos, weapon_stats.explosive_radius, weapon_stats.bullet_color, true)
 			if multiplayer.is_server():
 				var splash_pos: Vector3 = hit_pos + normal * 0.1
 				shooter_node.call("_apply_bullet_splash", splash_pos, weapon_stats.explosive_radius, weapon_stats.explosive_damage, shooter_id)
@@ -349,7 +341,7 @@ func _handle_collision(result: Dictionary) -> void:
 		SFX.impact(hit_pos, dmg_ratio)
 
 	if weapon_stats.explosive_radius > 0.0 and not bench_skip_visuals:
-		shooter_node.call("_spawn_bullet_blast", hit_pos, weapon_stats.explosive_radius, weapon_stats.bullet_color)
+		shooter_node.call("_spawn_bullet_blast", hit_pos, weapon_stats.explosive_radius, weapon_stats.bullet_color, true)
 
 	# Server logic
 	if multiplayer.is_server():
@@ -463,8 +455,15 @@ func _handle_collision(result: Dictionary) -> void:
 # Pick the valid enemy most "in front" of the bullet. Cone ≈ ±60° from the
 # current flight direction; outside the cone the bullet holds straight.
 # Returns the player whose direction has the highest dot with `direction`.
+func _players_root() -> Node:
+	return get_tree().current_scene.get_node_or_null("Players")
+
+func _shooter_node() -> Node3D:
+	var root := _players_root()
+	return root.get_node_or_null(str(shooter_id)) as Node3D if root else null
+
 func _find_homing_target() -> Node3D:
-	var players_root: Node = get_tree().current_scene.get_node_or_null("Players")
+	var players_root: Node = _players_root()
 	if players_root == null:
 		return null
 	var best: Node3D = null
