@@ -122,12 +122,13 @@ static func warmup_material(scene: Node, mat: Material) -> void:
 		return
 	var mi := MeshInstance3D.new()
 	var sphere := SphereMesh.new()
-	sphere.radius = 0.001
-	sphere.height = 0.002
+	sphere.radius = 0.5
+	sphere.height = 1.0
 	mi.mesh = sphere
 	mi.material_override = mat
-	# Park at the origin so it's actually rendered (compiles the PSO) but at
-	# sub-pixel scale so it's invisible.
+	# Park at the origin so it's actually rendered (compiles the PSO).
+	# Big enough to not be frustum-culled, but far below the arena floor
+	# so it's invisible to the player.
 	_attach_world_3d(scene, mi, Vector3.ZERO)
 	var t := Timer.new()
 	t.wait_time = 0.4
@@ -2201,7 +2202,7 @@ static func spawn_impact(scene: Node, pos: Vector3, color: Color = Color(1.0, 0.
 		tw.tween_property(mat, "albedo_color", Color(0.72, 0.66, 0.55, 0.0), 0.4)
 		tw.chain().tween_callback(dust.queue_free)
 
-# Brief high-intensity beam for hitscan bullets. Rendered for 1-2 frames 
+# Brief high-intensity beam for hitscan bullets. Rendered for 1-2 frames
 # as a bright white streak.
 static func spawn_laser_tracer(scene: Node, from: Vector3, to: Vector3) -> void:
 	if scene == null:
@@ -2228,7 +2229,7 @@ static func spawn_laser_tracer(scene: Node, from: Vector3, to: Vector3) -> void:
 	# Then set position and orientation.
 	scene.add_child(line)
 	line.global_position = from.lerp(to, 0.5)
-	
+
 	var dir := (to - from).normalized()
 	# If pointing straight up/down, use a different up vector for look_at.
 	if absf(dir.dot(Vector3.UP)) > 0.99:
@@ -2494,7 +2495,7 @@ static func spawn_crater(scene: Node, pos: Vector3, normal: Vector3, dmg_ratio: 
 	var rot := randf_range(-PI, PI)
 	var b := _crater_basis(n, rot)
 	var crater_scale := _crater_surface_scale(pos, b.x.normalized(), b.z.normalized(), size, collider)
-	# Random jitter on the surface offset prevents Z-fighting when multiple 
+	# Random jitter on the surface offset prevents Z-fighting when multiple
 	# shots hit the exact same spot.
 	var offset_jitter: float = randf_range(-0.002, 0.002)
 	splat.global_transform = Transform3D(b, pos + n * (0.012 + offset_jitter))

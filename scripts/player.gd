@@ -164,8 +164,10 @@ var _air_strike_charges: int = 0
 # Last broadcast state — avoids flooding the wire when idle.
 var _last_sync_pos: Vector3 = Vector3.INF
 var _last_sync_yaw: float = INF
+var _last_sync_pitch: float = INF
 var _remote_target_pos: Vector3 = Vector3.INF
 var _remote_target_yaw: float = 0.0
+var _remote_target_pitch: float = 0.0
 var _remote_has_target := false
 
 # Camera / gun feel — updated by fire, decayed per frame.
@@ -537,6 +539,8 @@ func _interpolate_remote_state(delta: float) -> void:
 		global_position = _remote_target_pos
 	if absf(angle_difference(rotation.y, _remote_target_yaw)) < 0.001:
 		rotation.y = _remote_target_yaw
+	# Interpolate pitch for third-person gun/body visual.
+	blob_rig.rotation.x = lerp_angle(blob_rig.rotation.x, _remote_target_pitch, clampf(delta * 12.0, 0.0, 1.0))
 
 func _refresh_authority_view() -> void:
 	if is_bot:
@@ -613,8 +617,19 @@ func _update_blob_motion(delta: float) -> void:
 
 	var local_vel := global_transform.basis.inverse() * planar_velocity
 	var target_roll := deg_to_rad(clampf(-local_vel.x * 1.3, -10.0, 10.0))
-	var target_pitch := deg_to_rad(clampf(-local_vel.z * 0.7 - vertical_speed * 1.6, -14.0, 14.0))
-	blob_rig.rotation.x = lerp_angle(blob_rig.rotation.x, target_pitch, clampf(delta * 8.0, 0.0, 1.0))
+	# Pitch: for bots, derive from their actual aim target (not movement tilt);
+	# for local authority humans, derive from movement (they see first-person);
+	# for remote players, keep what _interpolate_remote_state set.
+	if is_bot and _bot_target != null and is_instance_valid(_bot_target):
+		var from_y := global_position.y + 0.7
+		var to_y := _bot_target.global_position.y + 0.4
+		var aim_h := global_position.distance_to(_bot_target.global_position)
+		var bot_pitch := -atan2(to_y - from_y, aim_h)
+		blob_rig.rotation.x = lerp_angle(blob_rig.rotation.x, bot_pitch, clampf(delta * 12.0, 0.0, 1.0))
+	elif is_multiplayer_authority():
+		var target_pitch := deg_to_rad(clampf(-local_vel.z * 0.7 - vertical_speed * 1.6, -14.0, 14.0))
+		blob_rig.rotation.x = lerp_angle(blob_rig.rotation.x, target_pitch, clampf(delta * 8.0, 0.0, 1.0))
+	# else: remote player pitch is driven by _interpolate_remote_state — don't overwrite.
 	blob_rig.rotation.z = lerp_angle(blob_rig.rotation.z, target_roll, clampf(delta * 8.0, 0.0, 1.0))
 
 	var floor_squash := 0.12 * minf(speed_ratio, 1.0) + 0.16 * dash_boost
@@ -630,7 +645,9 @@ func _update_blob_motion(delta: float) -> void:
 		var nod := sin(_blob_phase * 0.5 + 0.7) * (0.02 + 0.015 * speed_ratio)
 		var head_target_pos := _head_blob_rest_pos + Vector3(0.0, nod + air_stretch * 0.04, -0.015 * speed_ratio)
 		head_blob.position = head_blob.position.lerp(head_target_pos, clampf(delta * 8.0, 0.0, 1.0))
-		head_blob.rotation.x = lerp_angle(head_blob.rotation.x, -target_pitch * 0.25, clampf(delta * 6.0, 0.0, 1.0))
+		# For head blob pitch: use blob_rig.rotation.x (which already reflects
+		# aim for bots / movement for authority / remote pitch for network).
+		head_blob.rotation.x = lerp_angle(head_blob.rotation.x, -blob_rig.rotation.x * 0.25, clampf(delta * 6.0, 0.0, 1.0))
 		head_blob.rotation.z = lerp_angle(head_blob.rotation.z, -target_roll * 0.2, clampf(delta * 6.0, 0.0, 1.0))
 		var head_scale := _head_blob_rest_scale
 		head_scale.x *= 1.0 - floor_squash * 0.18 + air_stretch * 0.12
@@ -728,6 +745,8 @@ func _apply_phoenix_visuals(body_alpha: float = PHOENIX_ALPHA_START) -> void:
 	body_model.visible = body_alpha > 0.01
 	name_label.visible = false
 	muzzle.visible = false
+	if _procedural_gun:
+		_procedural_gun.visible = false
 	if _third_person_gun:
 		_third_person_gun.visible = false
 	if blade:
@@ -758,21 +777,22 @@ func _update_phoenix_ascent() -> void:
 	var body_alpha := lerpf(PHOENIX_ALPHA_START, PHOENIX_ALPHA_END, progress)
 	_apply_phoenix_visuals(body_alpha)
 	_tick_phoenix_column(progress)
+	var game := get_tree().current_scene
 	if is_multiplayer_authority():
-		var game := get_tree().current_scene
 		if game and game.has_method("set_phoenix_fade"):
 			game.set_phoenix_fade(player_id, progress)
 		velocity = Vector3.ZERO
 		_last_sync_pos = global_position
 		_last_sync_yaw = rotation.y
-		_broadcast_state.rpc(global_position, rotation.y)
-		if progress >= 1.0 and not _phoenix_finish_requested:
-			_phoenix_finish_requested = true
-			if game and game.has_method("finish_phoenix_revive"):
-				if multiplayer.is_server():
-					game.finish_phoenix_revive(player_id)
-				else:
-					game.finish_phoenix_revive.rpc_id(1, player_id)
+		_broadcast_state.rpc(global_position, rotation.y, look_pitch)
+		_last_sync_pitch = look_pitch
+	if progress >= 1.0 and not _phoenix_finish_requested:
+		_phoenix_finish_requested = true
+		if game and game.has_method("finish_phoenix_revive"):
+			if multiplayer.is_server():
+				game.finish_phoenix_revive(player_id)
+			else:
+				game.finish_phoenix_revive.rpc_id(1, player_id)
 	else:
 		_remote_target_pos = pos
 		_remote_target_yaw = rotation.y
@@ -989,6 +1009,9 @@ func _physics_process(delta: float) -> void:
 		return
 
 	if is_bot:
+		if _phoenix_ascending:
+			_physics_phoenix(delta)
+			return
 		_bot_physics(delta)
 		return
 
@@ -2359,7 +2382,8 @@ func _use_teleport() -> void:
 	if weapon.teleport_blast_radius > 0.0:
 		_request_special_blast.rpc_id(1, from, weapon.teleport_blast_radius, 55.0, player_id, weapon.bullet_color)
 		_request_special_blast.rpc_id(1, target, weapon.teleport_blast_radius, 55.0, player_id, weapon.bullet_color)
-	_broadcast_state.rpc(global_position, rotation.y)
+	_last_sync_pitch = look_pitch
+	_broadcast_state.rpc(global_position, rotation.y, look_pitch)
 	_last_sync_pos = global_position
 	_last_sync_yaw = rotation.y
 
@@ -2951,9 +2975,10 @@ func server_respawn(pos: Vector3, yaw: float = 0.0) -> void:
 	_apply_ghost_visuals()
 	# Push the teleport to every peer immediately so they don't see us at the
 	# old position for a frame while waiting for the next _physics_process.
-	_broadcast_state.rpc(global_position, rotation.y)
+	_broadcast_state.rpc(global_position, rotation.y, look_pitch)
 	_last_sync_pos = global_position
 	_last_sync_yaw = rotation.y
+	_last_sync_pitch = look_pitch
 
 @rpc("any_peer", "call_local", "reliable")
 func begin_phoenix_ascension(revive_pos: Vector3, start_ms: int = 0) -> void:
@@ -2989,7 +3014,8 @@ func begin_phoenix_ascension(revive_pos: Vector3, start_ms: int = 0) -> void:
 			camera.transform = Transform3D(Basis.IDENTITY, _camera_rest_pos)
 		_last_sync_pos = global_position
 		_last_sync_yaw = rotation.y
-		_broadcast_state.rpc(global_position, rotation.y)
+		_last_sync_pitch = look_pitch
+		_broadcast_state.rpc(global_position, rotation.y, look_pitch)
 	else:
 		_remote_target_pos = revive_pos
 		_remote_target_yaw = rotation.y
@@ -3025,7 +3051,8 @@ func _finish_phoenix_ascension(spawn_pos: Vector3, spawn_yaw: float = 0.0) -> vo
 	if is_multiplayer_authority():
 		_last_sync_pos = global_position
 		_last_sync_yaw = rotation.y
-		_broadcast_state.rpc(global_position, rotation.y)
+		_last_sync_pitch = look_pitch
+		_broadcast_state.rpc(global_position, rotation.y, look_pitch)
 	else:
 		_remote_target_pos = spawn_pos
 		_remote_target_yaw = spawn_yaw
@@ -3063,14 +3090,16 @@ func set_ghost_mode(enabled: bool) -> void:
 
 func _maybe_broadcast_state() -> void:
 	if global_position.distance_squared_to(_last_sync_pos) < 0.0001 \
-			and absf(rotation.y - _last_sync_yaw) < 0.001:
+			and absf(rotation.y - _last_sync_yaw) < 0.001 \
+			and absf(look_pitch - _last_sync_pitch) < 0.005:
 		return
 	_last_sync_pos = global_position
 	_last_sync_yaw = rotation.y
-	_broadcast_state.rpc(global_position, rotation.y)
+	_last_sync_pitch = look_pitch
+	_broadcast_state.rpc(global_position, rotation.y, look_pitch)
 
 @rpc("authority", "unreliable_ordered")
-func _broadcast_state(pos: Vector3, yaw: float) -> void:
+func _broadcast_state(pos: Vector3, yaw: float, pitch: float) -> void:
 	if is_multiplayer_authority():
 		return
 	if not _remote_has_target or global_position.distance_to(pos) > REMOTE_SNAP_DISTANCE:
@@ -3079,6 +3108,7 @@ func _broadcast_state(pos: Vector3, yaw: float) -> void:
 		_visual_prev_pos = pos
 	_remote_target_pos = pos
 	_remote_target_yaw = yaw
+	_remote_target_pitch = pitch
 	_remote_has_target = true
 
 @rpc("any_peer", "call_local", "reliable")
