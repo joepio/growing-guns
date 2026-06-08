@@ -118,6 +118,12 @@ func get_lava_fallback_spawn_world() -> Vector3:
 	return global_position + Vector3(0.0, 5.0, 0.0)
 
 
+func get_lava_spawn_platform_at(world_pos: Vector3) -> Dictionary:
+	if generator and generator.has_method("get_lava_spawn_platform_at"):
+		return generator.get_lava_spawn_platform_at(world_pos)
+	return {}
+
+
 func start_lava_leak(spread_seconds: float = 20.0, start_elapsed: float = 0.0) -> void:
 	stop_lava_leak()
 	_lava_leak_duration = maxf(0.1, spread_seconds)
@@ -314,8 +320,4 @@ func _point_touching_lava_wall(world_xz: Vector2, world_y: float, wall_lava_heig
 
 
 func _make_lava_material() -> ShaderMaterial:
-	var sh := Shader.new()
-	sh.code = ArenaGenerator.LAVA_SHADER_CODE
-	var mat := ShaderMaterial.new()
-	mat.shader = sh
-	return mat
+	return ArenaGenerator.make_lava_shader_material()

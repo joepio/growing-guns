@@ -157,64 +157,37 @@ const LAVA_ISLAND_MAX_TOP_Y := 9.0
 const LAVA_ISLAND_MAX_HEIGHT_STEP := 2.05
 const LAVA_SPAWN_PLATFORM_INSET := 0.65  # keep the player capsule off platform edges
 
-const LAVA_SHADER_CODE := """
-shader_type spatial;
-render_mode unshaded, cull_disabled;
+const LAVA_FLOW_SHADER := preload("res://shaders/lava_flow.gdshader")
 
-varying vec3 v_world_pos;
+static var _lava_noise_texture: ImageTexture = null
 
-float hash(vec2 p) {
-	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
-}
 
-float vnoise(vec2 p) {
-	vec2 i = floor(p);
-	vec2 f = fract(p);
-	f = f * f * (3.0 - 2.0 * f);
-	return mix(
-		mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x),
-		mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x),
-		f.y
-	);
-}
+static func get_lava_noise_texture() -> ImageTexture:
+	if _lava_noise_texture != null:
+		return _lava_noise_texture
+	var fl := FastNoiseLite.new()
+	fl.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	fl.fractal_type = FastNoiseLite.FRACTAL_FBM
+	fl.frequency = 0.07
+	fl.fractal_octaves = 5
+	fl.seed = 90210
+	var size := 256
+	var img := Image.create(size, size, false, Image.FORMAT_RF)
+	for y in size:
+		for x in size:
+			var v: float = fl.get_noise_2d(float(x), float(y)) * 0.5 + 0.5
+			img.set_pixel(x, y, Color(v, 0.0, 0.0, 1.0))
+	_lava_noise_texture = ImageTexture.create_from_image(img)
+	return _lava_noise_texture
 
-float fbm(vec2 p) {
-	float v = 0.0;
-	float a = 0.5;
-	for (int i = 0; i < 5; i++) {
-		v += a * vnoise(p);
-		p *= 2.05;
-		a *= 0.5;
-	}
-	return v;
-}
 
-void vertex() {
-	// Hand the world position to fragment so noise can be sampled in world
-	// space — features stay the same physical size regardless of how big
-	// the plane is.
-	v_world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
-}
+static func make_lava_shader_material() -> ShaderMaterial:
+	var mat := ShaderMaterial.new()
+	mat.shader = LAVA_FLOW_SHADER
+	mat.set_shader_parameter("noise_texture", get_lava_noise_texture())
+	mat.set_shader_parameter("world_scale", 0.8)
+	return mat
 
-void fragment() {
-	// 1 noise unit ≈ 25m on the ground, no matter how big the plane.
-	vec2 uv = v_world_pos.xz * 0.04;
-	float t = TIME * 0.18;
-	float n1 = fbm(uv + vec2(t, t * 0.55));
-	float n2 = fbm(uv * 1.7 + vec2(-t * 0.7, t * 0.85));
-	float heat = (n1 + n2) * 0.5;
-
-	vec3 crust = vec3(0.18, 0.025, 0.01);
-	vec3 hot = vec3(0.78, 0.16, 0.02);
-	vec3 white_hot = vec3(0.95, 0.34, 0.04);
-
-	vec3 col = mix(crust, hot, smoothstep(0.30, 0.68, heat));
-	col = mix(col, white_hot, smoothstep(0.78, 0.95, heat));
-
-	ALBEDO = col;
-	EMISSION = col * 0.35;
-}
-"""
 
 var _mat_floor: StandardMaterial3D
 var _mat_wall: StandardMaterial3D
@@ -684,6 +657,26 @@ func get_lava_fallback_spawn_world() -> Vector3:
 	return global_position + Vector3(0.0, LAVA_ISLAND_TOP_Y + 1.0, 0.0)
 
 
+func get_lava_spawn_platform_at(world_pos: Vector3) -> Dictionary:
+	# Footprint of the lava platform under world_pos, for spawn-offset logic.
+	if _lava_safe_zones.is_empty():
+		return {}
+	var local := Vector2(world_pos.x - global_position.x, world_pos.z - global_position.z)
+	var local_y := world_pos.y - global_position.y
+	if local_y < LAVA_FLOOR_SURFACE_Y + LAVA_FLOOR_DAMAGE_Y + 0.5:
+		return {}
+	for entry in _lava_safe_zones:
+		var center: Vector2 = entry[0]
+		var radius: float = float(entry[1])
+		var spawn_radius := maxf(0.35, radius - LAVA_SPAWN_PLATFORM_INSET)
+		if local.distance_to(center) <= spawn_radius + 0.75:
+			return {
+				"center": global_position + Vector3(center.x, world_pos.y, center.y),
+				"spawn_radius": spawn_radius,
+			}
+	return {}
+
+
 func _prune_lava_spawn_positions() -> void:
 	if not _all_floor_lava:
 		return
@@ -901,11 +894,7 @@ func _build_lava_floor_surface() -> void:
 
 
 func _make_lava_material() -> ShaderMaterial:
-	var sh := Shader.new()
-	sh.code = LAVA_SHADER_CODE
-	var mat := ShaderMaterial.new()
-	mat.shader = sh
-	return mat
+	return make_lava_shader_material()
 
 
 func _apply_all_floor_lava_damage(delta: float) -> void:

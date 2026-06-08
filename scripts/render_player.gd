@@ -106,6 +106,7 @@ func flash_impact(world_pos: Vector3, intensity: float = 1.0) -> void:
 
 
 func show_card_pick(card_ids: Array) -> void:
+	hide_round_win()
 	_blend_death_into_card_pick()
 	_card_ids = card_ids.duplicate()
 	_card_selected_index = 0
@@ -238,6 +239,8 @@ func show_damage_direction(from_pos: Vector3) -> void:
 
 
 func show_death_effect(show: bool) -> void:
+	if show:
+		hide_round_win()
 	var death: ColorRect = _hud.death
 	if death.has_meta("tween"):
 		var old_tw: Tween = death.get_meta("tween")

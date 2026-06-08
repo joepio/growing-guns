@@ -223,6 +223,9 @@ var _melee_tween: Tween = null
 var _ragdoll_head: RigidBody3D = null
 var _suppress_next_death_sound := false
 var _suppress_next_death_ragdoll := false
+var _pending_lava_death := false
+var _pending_lava_death_fall := false
+var _lava_death_active := false
 var _rocket_descent_player: Node = null
 var _last_lava_contact_sizzle_ms: int = -10000
 var _shot_fx_frame: int = -1
@@ -357,9 +360,9 @@ func _setup_third_person_gun() -> void:
 	_third_person_gun_rest_pos = gun_root.position
 	_third_person_gun_rest_rot = gun_root.rotation
 
-func _apply_identity_cosmetics() -> void:
+func _apply_identity_skin_materials() -> StandardMaterial3D:
 	if head_blob == null:
-		return
+		return null
 	var seed := _identity_seed()
 	var hue := float(seed % 360) / 360.0
 	var sat := 0.44 + float((seed >> 3) % 24) / 100.0
@@ -370,10 +373,38 @@ func _apply_identity_cosmetics() -> void:
 	var face_mat := _make_mat(face, 0.86, 0.0)
 	if blob_core:
 		blob_core.material_override = skin_mat
+		_body_materials[blob_core] = skin_mat
 	if head_blob:
 		head_blob.material_override = skin_mat
+		_body_materials[head_blob] = skin_mat
 	if face_plate:
 		face_plate.material_override = face_mat
+		_body_materials[face_plate] = face_mat
+	return face_mat
+
+
+func restore_body_materials() -> void:
+	var lava_mat: Material = Violence.get_lava_body_material()
+	for mesh in _body_meshes():
+		if _body_materials.has(mesh):
+			mesh.material_override = _body_materials[mesh]
+		elif mesh.material_override == lava_mat:
+			mesh.material_override = null
+	if gun_body and _body_materials.has(gun_body):
+		gun_body.material_override = _body_materials[gun_body]
+	if gun_barrel and _body_materials.has(gun_barrel):
+		gun_barrel.material_override = _body_materials[gun_barrel]
+	if gun_magazine and _body_materials.has(gun_magazine):
+		gun_magazine.material_override = _body_materials[gun_magazine]
+	_apply_identity_skin_materials()
+	_apply_ghost_visuals()
+
+
+func _apply_identity_cosmetics() -> void:
+	if head_blob == null:
+		return
+	var face_mat := _apply_identity_skin_materials()
+	var seed := _identity_seed()
 
 	var eye_kind := int((seed >> 11) % 3)
 	var has_glasses := ((seed >> 15) & 1) == 1
@@ -667,7 +698,7 @@ func _apply_ghost_visuals() -> void:
 		_apply_phoenix_visuals()
 		return
 	var show_body := is_bot or split_screen_local or not is_multiplayer_authority()
-	if health <= 0 and not ghost_mode:
+	if health <= 0 and not ghost_mode and not _lava_death_active:
 		show_body = false
 	body_model.visible = show_body
 	name_label.visible = not ghost_mode and (is_bot or (not split_screen_local and not is_multiplayer_authority()))
@@ -1375,11 +1406,11 @@ func kill_environmental(_reason: String = "hazard") -> void:
 	_sync_launching.rpc(false)
 	if _reason == "lava_fall":
 		_stop_rocket_descent_audio()
-		_suppress_next_death_sound = true
+	if _reason.begins_with("lava"):
+		_pending_lava_death = true
+		_pending_lava_death_fall = (_reason == "lava_fall")
 		_suppress_next_death_ragdoll = true
 		_play_lava_sizzle.rpc(global_position, true)
-	elif _reason == "lava":
-		_play_lava_sizzle.rpc(global_position, false)
 	var saved_phoenix_charges := _phoenix_charges_left
 	_phoenix_charges_left = 0
 	var lethal_amount: int = max(health, MAX_HEALTH + weapon.max_hp_bonus)
@@ -1398,6 +1429,11 @@ func apply_environmental_damage(amount: int, _reason: String = "hazard") -> void
 		if now - _last_lava_contact_sizzle_ms > 900:
 			_last_lava_contact_sizzle_ms = now
 			_play_lava_sizzle.rpc(global_position, false)
+		if amount >= health:
+			_pending_lava_death = true
+			_pending_lava_death_fall = false
+			_suppress_next_death_ragdoll = true
+			_play_lava_sizzle.rpc(global_position, true)
 	_apply_damage(max(0, amount), 0)
 
 func _move_vector() -> Vector2:
@@ -2060,20 +2096,23 @@ func _ragdoll(
 
 
 @rpc("any_peer", "call_local", "reliable")
-func _burn_death() -> void:
+func _lava_death(fall_death: bool) -> void:
 	_ragdoll_head = null
+	_lava_death_active = true
 	_set_dead_visuals(true)
-	if body_model:
-		body_model.visible = true
 	if head_blob:
 		head_blob.rotation = Vector3.ZERO
 	if camera:
 		camera.rotation.z = 0.0
+	if body_model:
+		body_model.visible = true
 	var scene := get_tree().current_scene
-	if scene and scene.has_method("show_death_effect_for"):
-		scene.show_death_effect_for(player_id, true)
-	elif scene and scene.has_method("show_death_effect"):
-		scene.show_death_effect(true)
+	if is_multiplayer_authority() and not split_screen_local:
+		if scene and scene.has_method("show_death_effect_for"):
+			scene.show_death_effect_for(player_id, true)
+		elif scene and scene.has_method("show_death_effect"):
+			scene.show_death_effect(true)
+	Violence.play_lava_death(self, fall_death)
 
 # Hide the first-person gun mesh and turn off the hit areas so a corpse
 # can't be shot or seen with a floating gun. Wrapper kept because the
@@ -2869,8 +2908,13 @@ func _apply_damage(
 			upward_scale = 0.06
 		launch = clampf(launch, 0.15, launch_max)
 		push = push.normalized() * launch + Vector3.UP * (upward_bias + upward_scale * launch)
-		if suppress_death_ragdoll:
-			_burn_death.rpc()
+		if _pending_lava_death:
+			var fall_death: bool = _pending_lava_death_fall
+			_pending_lava_death = false
+			_pending_lava_death_fall = false
+			_lava_death.rpc(fall_death)
+		elif suppress_death_ragdoll:
+			_lava_death.rpc(true)
 		else:
 			_ragdoll.rpc(
 				push,
@@ -2934,6 +2978,8 @@ func _report_death(killer_id: int) -> void:
 func server_respawn(pos: Vector3, yaw: float = 0.0) -> void:
 	if multiplayer.get_remote_sender_id() != 1 and multiplayer.get_remote_sender_id() != 0:
 		return
+	Violence.end_lava_death(self)
+	_lava_death_active = false
 	_reset_weapon_combat_state()
 	if not is_multiplayer_authority():
 		return
@@ -3070,6 +3116,8 @@ func set_ghost_mode(enabled: bool) -> void:
 		return
 	ghost_mode = enabled
 	if enabled:
+		Violence.end_lava_death(self)
+		_lava_death_active = false
 		frozen = false
 		health = 0
 		# Detach the death-cam from the tumbling ragdoll head so the camera

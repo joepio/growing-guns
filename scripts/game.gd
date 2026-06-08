@@ -83,6 +83,7 @@ func _human_count() -> int:
 			n += 1
 	return n
 const SPAWN_MIN_SPACING := 8.0   # meters — two fresh spawns must be at least this far apart
+const SPAWN_HARD_MIN_SPACING := 2.5  # never stack closer than this, even on tiny platforms
 
 var rounds_to_win: int = 10
 
@@ -172,7 +173,6 @@ var _pause_menu: Control = null
 var _ui_cancel_frame: int = -1
 var _network_status_panel: PanelContainer = null
 var _network_status_label: Label = null
-var _network_status_hide_token: int = 0
 var _kill_feed: VBoxContainer = null
 var _pickup_toast: Label = null
 var _pickup_toast_timer: Timer = null
@@ -383,7 +383,7 @@ func _ready() -> void:
 		var bot_requested: bool = NetworkManager.has_meta("spawn_bot_on_start") and NetworkManager.get_meta("spawn_bot_on_start")
 		var requested_count: int = int(NetworkManager.get_meta("bot_count_on_start", 1)) if bot_requested else 0
 		if bot_requested:
-			_spawn_bots(requested_count)
+			_spawn_bots(requested_count, spawn_used)
 		# Warm up GPU pipelines before the first round. Everything (arena,
 		# players, gun) is now in the scene tree. The loading overlay hides
 		# whatever garbage the GPU draws while compiling. We add warmup
@@ -415,7 +415,7 @@ func _ready() -> void:
 		# device adds its own real player.
 		var host_started: bool = NetworkManager.has_meta("host_started") and NetworkManager.get_meta("host_started")
 		if not bot_requested and not host_started and not _splitscreen.is_enabled():
-			_spawn_bots.call_deferred(1)
+			_spawn_bots.call_deferred(1, spawn_used)
 
 		# Iroh host: re-show the "ID copied — share it" notice on the in-game
 		# banner. Called locally (not .rpc) so only the host sees it. Sticks
@@ -820,7 +820,6 @@ func _on_peer_disconnected(id: int) -> void:
 		_set_game_state.rpc(State.WAITING)
 		_hide_card_pick.rpc()
 		_hide_rematch_overlay.rpc()
-		_announce.rpc("WAITING FOR PLAYERS…", 99.0)
 
 @rpc("any_peer", "call_local", "reliable")
 func _request_spawn(pname: String) -> void:
@@ -941,9 +940,9 @@ func _pick_spawn(avoid: Array[Vector3] = []) -> Dictionary:
 	var best_pos: Vector3 = Vector3.ZERO
 	var best_yaw: float = 0.0
 	var best_score: float = -INF
-	var relaxed_pos: Vector3 = Vector3.ZERO
-	var relaxed_yaw: float = 0.0
-	var relaxed_min_d: float = -INF
+	var fallback_pos: Vector3 = Vector3.ZERO
+	var fallback_yaw: float = 0.0
+	var fallback_min_d: float = -INF
 	var found_clear: bool = false
 	var found_spaced: bool = false
 	for spawn in spawns:
@@ -952,23 +951,24 @@ func _pick_spawn(avoid: Array[Vector3] = []) -> Dictionary:
 			continue
 		found_clear = true
 		var min_d: float = _min_distance(pos, avoid) if not avoid.is_empty() else 100.0
+		var min_sp: float = _required_spawn_spacing(pos) if not avoid.is_empty() else 0.0
 		var height_penalty: float = absf(pos.y - target_y) * 1.5 if has_target_y else 0.0
 		var score: float = min_d - height_penalty
-		if min_d >= SPAWN_MIN_SPACING:
+		if avoid.is_empty() or min_d >= min_sp:
 			found_spaced = true
 			if score > best_score:
 				best_score = score
 				best_pos = pos
 				best_yaw = _spawn_yaw_at(pos, arena_origin)
-		elif score > relaxed_min_d:
-			relaxed_min_d = score
-			relaxed_pos = pos
-			relaxed_yaw = _spawn_yaw_at(pos, arena_origin)
+		elif min_d > fallback_min_d:
+			fallback_min_d = min_d
+			fallback_pos = pos
+			fallback_yaw = _spawn_yaw_at(pos, arena_origin)
 
 	if found_clear and found_spaced:
 		return _enforce_spawn_spacing(best_pos, best_yaw, avoid)
-	if found_clear and relaxed_min_d > -INF:
-		return _enforce_spawn_spacing(relaxed_pos, relaxed_yaw, avoid)
+	if found_clear and fallback_min_d > -INF:
+		return _enforce_spawn_spacing(fallback_pos, fallback_yaw, avoid)
 	# Last-ditch fallback: every spawn was blocked by an obstacle or failed
 	# validation. Never return a raw spawnpoint — on lava-platform maps that
 	# can land in open lava or inside cover columns.
@@ -993,15 +993,62 @@ func _min_distance(pos: Vector3, others: Array[Vector3]) -> float:
 	return best
 
 
+func _required_spawn_spacing(pos: Vector3) -> float:
+	var arena: Node = get_node_or_null("Arena")
+	if arena and arena.has_method("get_lava_spawn_platform_at"):
+		var platform: Dictionary = arena.get_lava_spawn_platform_at(pos)
+		if not platform.is_empty():
+			var spawn_r: float = float(platform.get("spawn_radius", 0.0))
+			# Small lava disks cannot fit 8 m apart — cap to what the platform allows.
+			return maxf(SPAWN_HARD_MIN_SPACING, minf(SPAWN_MIN_SPACING, spawn_r * 1.65))
+	return SPAWN_MIN_SPACING
+
+
+func _pick_lava_platform_spawn(platform: Dictionary, avoid: Array[Vector3]) -> Dictionary:
+	var center: Vector3 = platform.get("center", Vector3.ZERO)
+	var spawn_r: float = float(platform.get("spawn_radius", 0.0))
+	if spawn_r <= 0.05:
+		return {}
+	var arena: Node = get_node_or_null("Arena")
+	var arena_origin: Vector3 = (arena as Node3D).global_position if arena and arena is Node3D else Vector3.ZERO
+	var best_pos := center
+	var best_min_d := -1.0
+	for i in 24:
+		var angle := float(i) / 24.0 * TAU
+		var candidate := center + Vector3(cos(angle) * spawn_r, 0.0, sin(angle) * spawn_r)
+		if not _spawn_is_valid(candidate):
+			continue
+		var d: float = _min_distance(candidate, avoid)
+		if d > best_min_d:
+			best_min_d = d
+			best_pos = candidate
+	if best_min_d < 0.0:
+		return {}
+	if avoid.is_empty() or best_min_d >= SPAWN_HARD_MIN_SPACING:
+		return {"pos": best_pos, "yaw": _spawn_yaw_at(best_pos, arena_origin)}
+	return {}
+
+
 func _enforce_spawn_spacing(pos: Vector3, yaw: float, avoid: Array[Vector3]) -> Dictionary:
-	if avoid.is_empty() or _min_distance(pos, avoid) >= SPAWN_MIN_SPACING:
+	var min_sp := _required_spawn_spacing(pos)
+	if avoid.is_empty() or _min_distance(pos, avoid) >= min_sp:
 		if _spawn_is_valid(pos):
 			return {"pos": pos, "yaw": yaw}
 		return _lava_safe_spawn_fallback(yaw, avoid)
+
+	var arena: Node = get_node_or_null("Arena")
+	var arena_origin: Vector3 = (arena as Node3D).global_position if arena and arena is Node3D else Vector3.ZERO
+	if arena and arena.has_method("get_lava_spawn_platform_at"):
+		var platform: Dictionary = arena.get_lava_spawn_platform_at(pos)
+		if not platform.is_empty():
+			var slot: Dictionary = _pick_lava_platform_spawn(platform, avoid)
+			if not slot.is_empty():
+				return slot
+
 	var out := pos
 	var out_yaw := yaw
 	for _attempt in 16:
-		if _min_distance(out, avoid) >= SPAWN_MIN_SPACING and _spawn_is_valid(out):
+		if _min_distance(out, avoid) >= min_sp and _spawn_is_valid(out):
 			return {"pos": out, "yaw": out_yaw}
 		var nearest: Vector3 = avoid[0]
 		var nearest_d: float = _min_distance(out, [nearest])
@@ -1015,18 +1062,24 @@ func _enforce_spawn_spacing(pos: Vector3, yaw: float, avoid: Array[Vector3]) -> 
 			var angle: float = yaw + float(_attempt + 1) * (TAU / 8.0)
 			away = Vector3(cos(angle), 0.0, sin(angle))
 		away = away.normalized()
-		var push: float = maxf(SPAWN_MIN_SPACING - nearest_d + 0.75, 1.25)
+		var push: float = maxf(min_sp - nearest_d + 0.75, 1.25)
 		var candidate := pos + away * push * float(_attempt + 1)
 		candidate.y = pos.y
 		if _spawn_is_valid(candidate):
 			out = candidate
-			var arena: Node = get_node_or_null("Arena")
-			var arena_origin: Vector3 = (arena as Node3D).global_position if arena and arena is Node3D else Vector3.ZERO
 			out_yaw = _spawn_yaw_at(out, arena_origin)
-	if _spawn_is_valid(out):
+
+	for ring in range(1, 10):
+		var radius := min_sp * float(ring) * 0.4
+		for i in 16:
+			var angle := float(i) / 16.0 * TAU + yaw
+			var candidate := pos + Vector3(cos(angle) * radius, 0.0, sin(angle) * radius)
+			candidate.y = pos.y
+			if _min_distance(candidate, avoid) >= min_sp and _spawn_is_valid(candidate):
+				return {"pos": candidate, "yaw": _spawn_yaw_at(candidate, arena_origin)}
+
+	if _min_distance(out, avoid) >= min_sp and _spawn_is_valid(out):
 		return {"pos": out, "yaw": out_yaw}
-	if _spawn_is_valid(pos):
-		return {"pos": pos, "yaw": yaw}
 	return _lava_safe_spawn_fallback(yaw, avoid)
 
 
@@ -1036,7 +1089,15 @@ func _lava_safe_spawn_fallback(yaw: float, avoid: Array[Vector3]) -> Dictionary:
 	if arena and arena.has_method("get_lava_fallback_spawn_world"):
 		var fb: Vector3 = arena.get_lava_fallback_spawn_world()
 		if _spawn_is_valid(fb):
-			return {"pos": fb, "yaw": _spawn_yaw_at(fb, arena_origin)}
+			var min_sp := _required_spawn_spacing(fb)
+			if avoid.is_empty() or _min_distance(fb, avoid) >= min_sp:
+				return {"pos": fb, "yaw": _spawn_yaw_at(fb, arena_origin)}
+			if arena.has_method("get_lava_spawn_platform_at"):
+				var platform: Dictionary = arena.get_lava_spawn_platform_at(fb)
+				if not platform.is_empty():
+					var slot: Dictionary = _pick_lava_platform_spawn(platform, avoid)
+					if not slot.is_empty():
+						return slot
 	return {"pos": arena_origin + Vector3(0.0, 8.0, 0.0), "yaw": yaw}
 
 
@@ -1173,9 +1234,11 @@ func _despawn(id: int) -> void:
 
 # -------------------- SINGLE-PLAYER BOT --------------------
 
-func _spawn_bots(count: int) -> void:
+func _spawn_bots(count: int, avoid: Array[Vector3] = []) -> void:
 	if not multiplayer.is_server() or count <= 0:
 		return
+	var used: Array[Vector3] = avoid.duplicate()
+	used.append_array(_current_player_positions())
 	var spawned_any := false
 	for _i in count:
 		var pid := _next_bot_id()
@@ -1187,8 +1250,8 @@ func _spawn_bots(count: int) -> void:
 		NetworkManager.players[pid] = bot_name
 		round_wins[pid] = 0
 		_ping_ms_by_player[pid] = -1
-		var bot_avoid := _current_player_positions()
-		var bot_pick := _pick_spawn(bot_avoid)
+		var bot_pick := _pick_spawn(used)
+		used.append(bot_pick["pos"])
 		_do_spawn.rpc(pid, bot_name, bot_pick["pos"], true, -1, false, bot_pick["yaw"], appearance_seed)
 		spawned_any = true
 	if spawned_any:
@@ -1241,7 +1304,6 @@ func _despawn_one_bot() -> void:
 		_set_game_state.rpc(State.WAITING)
 		_hide_card_pick.rpc()
 		_hide_rematch_overlay.rpc()
-		_announce.rpc("WAITING FOR PLAYERS…", 99.0)
 
 func _despawn_all_bots() -> void:
 	var bot_ids := _bot_ids()
@@ -1352,7 +1414,6 @@ func _maybe_start_match() -> void:
 	if state != State.WAITING:
 		return
 	if NetworkManager.players.size() < 2:
-		_announce.rpc("WAITING FOR PLAYERS…", 99.0)
 		_set_music_energy.rpc(1)
 		return
 	_set_game_state.rpc(State.PLAYING)
@@ -2443,7 +2504,7 @@ func _peer_for_player(pid: int) -> int:
 @rpc("authority", "call_local", "reliable")
 func _show_spectating(text: String = "SPECTATING…") -> void:
 	_hide_card_pick()
-	_set_local_round_win_strip(text)
+	_set_local_round_win_strip("")
 	_sync_mouse_mode()
 
 @rpc("authority", "call_local", "reliable")
@@ -2613,12 +2674,20 @@ func _set_local_round_win_strip(text: String) -> void:
 
 @rpc("authority", "call_local", "reliable")
 func _show_round_win_on_screens(winner_id: int) -> void:
+	# Losers get the full-screen death flash — a banner behind it was unreadable.
 	var winner_name: String = NetworkManager.players.get(winner_id, "Player")
 	if _splitscreen and _splitscreen.is_enabled() and _splitscreen.has_method("show_round_win_for_all"):
-		_splitscreen.show_round_win_for_all(winner_id, winner_name)
+		_splitscreen.show_round_win_for_all(winner_id, winner_name, eliminated_players)
 		return
-	var text := "YOU WIN THE ROUND" if winner_id in _local_view_player_ids() else "%s WINS THE ROUND" % winner_name
-	_set_local_round_win_strip(text)
+	for pid in _local_view_player_ids():
+		var renderer := _render_players.get(pid) as RenderPlayer
+		if renderer == null:
+			continue
+		if eliminated_players.has(pid):
+			renderer.hide_round_win()
+			continue
+		var text := "YOU WIN THE ROUND" if pid == winner_id else "%s WINS THE ROUND" % winner_name
+		renderer.show_round_win(text)
 
 
 @rpc("authority", "call_local", "reliable")
@@ -3144,29 +3213,20 @@ func _show_kill_feed(killer_name: String, victim_name: String) -> void:
 
 
 func _on_network_status_changed(message: String, is_error: bool) -> void:
-	if message.is_empty():
+	if message.is_empty() or not is_error:
 		return
 	if _network_status_panel == null:
 		_build_network_status_panel()
 	var sb := StyleBoxFlat.new()
-	sb.bg_color = Color(0.22, 0.03, 0.035, 0.94) if is_error else Color(0.03, 0.07, 0.10, 0.88)
-	sb.border_color = Color(1.0, 0.35, 0.28, 0.9) if is_error else Color(0.35, 0.75, 1.0, 0.65)
+	sb.bg_color = Color(0.22, 0.03, 0.035, 0.94)
+	sb.border_color = Color(1.0, 0.35, 0.28, 0.9)
 	sb.set_border_width_all(2)
 	sb.set_corner_radius_all(6)
 	_network_status_panel.add_theme_stylebox_override("panel", sb)
 
-	_network_status_label.add_theme_color_override("font_color", Color(1.0, 0.84, 0.78) if is_error else Color(0.76, 0.92, 1.0))
-	_network_status_label.text = message
-	if is_error:
-		_network_status_label.text += "\nLogs: %s" % OS.get_user_data_dir().path_join("logs")
+	_network_status_label.add_theme_color_override("font_color", Color(1.0, 0.84, 0.78))
+	_network_status_label.text = message + "\nLogs: %s" % OS.get_user_data_dir().path_join("logs")
 	_network_status_panel.visible = true
-
-	_network_status_hide_token += 1
-	var token := _network_status_hide_token
-	if not is_error:
-		await get_tree().create_timer(3.0, true).timeout
-		if token == _network_status_hide_token and is_instance_valid(_network_status_panel):
-			_network_status_panel.visible = false
 
 func trigger_explosion_sidechain(
 	pos: Vector3, radius: float, peak: float = 1.0, sustain_sec: float = -1.0, release_sec: float = -1.0,
@@ -4160,7 +4220,7 @@ func _pause_add_bot() -> void:
 	if not multiplayer.is_server():
 		_announce("BOTS ARE HOST-ONLY", 1.5)
 		return
-	_spawn_bots(1)
+	_spawn_bots(1, _current_player_positions())
 
 
 func _pause_remove_bot() -> void:
