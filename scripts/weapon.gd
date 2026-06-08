@@ -103,6 +103,12 @@ const BASE_BULLET_DROP := 30.0                  # matches Player.GRAVITY so bull
 func get_damage() -> float:
 		return maxf(MIN_DAMAGE, BASE_DAMAGE * damage_mult)
 
+func get_damage_for_shot(last_in_mag: bool = false) -> float:
+		var dmg := get_damage()
+		if last_in_mag and last_shot_damage_mult > 1.0:
+			dmg *= last_shot_damage_mult
+		return dmg
+
 func get_fire_interval() -> float:
 		var raw_interval: float = BASE_FIRE_INTERVAL / maxf(0.01, fire_rate_mult)
 		var projectile_budget_interval: float = float(get_shots_per_trigger()) / MAX_PROJECTILES_PER_SECOND
@@ -141,6 +147,13 @@ func get_bullet_scale() -> float:
 		# from going cartoonish (5× damage → ~2.24× scale, not 5×). The
 		# bullet_scale field is left as a manual override for gun-lab previews.
 		return bullet_scale * sqrt(maxf(damage_mult, 0.1))
+
+func get_bullet_scale_for_shot(last_in_mag: bool = false) -> float:
+		# Per-shot tracer/impact scale — includes last-round bonus without
+		# resizing the procedural gun (apply_weapon_stats uses get_bullet_scale).
+		if last_in_mag and last_shot_damage_mult > 1.0:
+			return bullet_scale * sqrt(maxf(damage_mult * last_shot_damage_mult, 0.1))
+		return get_bullet_scale()
 
 func get_melee_damage() -> int:
 	return int(70.0 * melee_damage_mult)

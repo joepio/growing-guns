@@ -1498,8 +1498,10 @@ func _fire_rifle() -> void:
 	var aim_point: Vector3 = aim_hit.position if not aim_hit.is_empty() else (cam_origin + cam_dir * aim_dist)
 	var base_dir: Vector3 = (aim_point - origin).normalized()
 	# Local feel (authority-only; these fields are driven by the local physics loop).
-	# Scale recoil and kick by the size of the bullet
-	var scale_f := weapon.get_bullet_scale()
+	var last_shot := mag <= 0
+	# Scale recoil and kick by the fired round — last bullet can hit harder
+	# without resizing the procedural gun mesh.
+	var scale_f := weapon.get_bullet_scale_for_shot(last_shot)
 	var recoil_scale := scale_f * clampf(weapon.get_recoil_per_shot() / Weapon.BASE_RECOIL, 0.2, 2.5)
 	recoil_pitch += RIFLE_RECOIL_PITCH * recoil_scale
 	muzzle_kick_z = max(muzzle_kick_z, RIFLE_RECOIL_KICK * recoil_scale)
@@ -1508,7 +1510,7 @@ func _fire_rifle() -> void:
 	# Physical recoil push — opposite to where you're aiming. Negligible at
 	# base damage; meaningful when you stack DAMAGE / HAYMAKER / BAZOOKA.
 	# Power 1.6 means scaling is gentle until damage is well above 1×.
-	var dmg_ratio: float = weapon.get_damage() / Weapon.BASE_DAMAGE
+	var dmg_ratio: float = weapon.get_damage_for_shot(last_shot) / Weapon.BASE_DAMAGE
 	var kick_strength: float = clampf(0.4 * pow(dmg_ratio, 1.6), 0.1, 12.0)
 	velocity -= cam_dir * kick_strength * float(weapon.get_shots_per_trigger())
 	# Snapshot spread BEFORE this shot's bloom so the first shot is still crisp,
@@ -1519,14 +1521,13 @@ func _fire_rifle() -> void:
 	var shots: int = weapon.get_shots_per_trigger()
 	var cam_right: Vector3 = camera.global_transform.basis.x
 	var cam_up: Vector3 = camera.global_transform.basis.y
-	var last_in_mag := mag <= 0
 	for i in shots:
 		var dir := base_dir
 		if spread > 0.0:
 			var theta: float = randf() * TAU
 			var r: float = spread * randf() * randf()
 			dir = base_dir.rotated(cam_up, r * cos(theta)).rotated(cam_right, r * sin(theta)).normalized()
-		_rifle_fired.rpc(origin, dir, player_id, last_in_mag)
+		_rifle_fired.rpc(origin, dir, player_id, last_shot)
 	_cycle_first_person_gun(shots)
 
 # First-person gun mechanics: heat glow, bolt cycle, brass ejection. These are
@@ -1579,7 +1580,7 @@ func _rifle_fired(
 	if shooter_node and shooter_node.has_method("_consume_shot_fx_budget"):
 		spawn_shot_fx = bool(shooter_node.call("_consume_shot_fx_budget"))
 	if spawn_shot_fx and not (BenchFlags.active and BenchFlags.no_shot_audio):
-		SFX.shot(w, origin, is_self, silenced)
+		SFX.shot(w, origin, is_self, silenced, last_in_mag)
 
 	# Bench A/B: skip bullet spawning entirely (one static bool branch out
 	# of bench mode). See scripts/bench_flags.gd.
@@ -1599,9 +1600,9 @@ func _rifle_fired(
 	if visual_anchor == null:
 		visual_anchor = muzzle
 	if spawn_shot_fx and not silenced and not (BenchFlags.active and BenchFlags.no_muzzle_flash):
-		var dmg_ratio := w.get_damage() / Weapon.BASE_DAMAGE
+		var dmg_ratio := w.get_damage_for_shot(last_in_mag) / Weapon.BASE_DAMAGE
 		var flash_brightness := clampf(pow(dmg_ratio, 0.88) * 1.5, 0.85, 8.0)
-		_spawn_muzzle_flash(w.bullet_color, w.get_bullet_scale(), visual_anchor, local_first_person, flash_brightness)
+		_spawn_muzzle_flash(w.bullet_color, w.get_bullet_scale_for_shot(last_in_mag), visual_anchor, local_first_person, flash_brightness)
 	if spawn_shot_fx and not local_first_person:
 		_spawn_third_person_casing(w)
 

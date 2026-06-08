@@ -15,7 +15,6 @@ const TARGET_CELL := 2.4
 const MAX_CHUNKS_PER_AXIS := 6
 const EDGE_JITTER := 0.28
 const VISUAL_JAGGEDNESS := 0.16
-const MAX_DEBRIS_CHUNKS_PER_CARVE := 8
 const MAX_JAGGEDIZE_PER_CARVE := 18
 const MAX_EXPOSURE_JOBS_PER_FRAME := 1
 
@@ -414,40 +413,30 @@ func _apply_carve(carve: Dictionary) -> bool:
 		var chunk_damage: float = DestructibleManager.blast_damage_at(maxf(0.0, dist - half_diag), radius, damage)
 		if _damage_chunk(col, chunk_damage):
 			to_remove_cols.append(col)
-	var debris_stride := maxi(1, ceili(float(to_remove_cols.size()) / float(MAX_DEBRIS_CHUNKS_PER_CARVE)))
-	var remove_i := 0
+	var burst_center := Vector3.ZERO
+	var burst_size := Vector3.ZERO
 	for col: CollisionShape3D in to_remove_cols:
 		_hide_intact_instance(col)
 		var mesh_obj: Object = _chunk_meshes.get(col.get_instance_id()) as Object
 		if mesh_obj is MeshInstance3D:
-			var mi := mesh_obj as MeshInstance3D
-			if remove_i % debris_stride == 0:
-				Violence.spawn_destruction_debris(
-					scene,
-					mi.global_position,
-					mi.global_basis,
-					col.get_meta("chunk_size") as Vector3,
-					base_color,
-					to_global(local_center),
-					radius,
-					0.55,
-					)
-				mi.visible = false
-		elif remove_i % debris_stride == 0:
-			Violence.spawn_destruction_debris(
-				scene,
-				col.global_position,
-				col.global_basis,
-				col.get_meta("chunk_size") as Vector3,
-				base_color,
-				to_global(local_center),
-				radius,
-				0.55,
-			)
+			(mesh_obj as MeshInstance3D).visible = false
+		burst_center += col.global_position
+		burst_size += col.get_meta("chunk_size") as Vector3
 		col.set_meta("destroyed", true)
 		col.disabled = true
 		removed = true
-		remove_i += 1
+	if removed and not to_remove_cols.is_empty():
+		var n := float(to_remove_cols.size())
+		Violence.spawn_destruction_debris(
+			scene,
+			burst_center / n,
+			global_basis,
+			burst_size / n,
+			base_color,
+			to_global(local_center),
+			radius,
+			to_remove_cols.size(),
+		)
 	if removed:
 		_pending_exposure_carves.append({"pos": local_center, "radius": radius})
 		set_process(true)

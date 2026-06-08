@@ -124,17 +124,17 @@ static func all() -> Array:
 				w.bullet_color = w.bullet_color.lerp(Color(0.45, 0.48, 0.52), 0.55),
 		},
 		{
-				"id": "shotgun",
-				"name": "SHOTGUN",
-				"desc": "Multi-projectile burst",
-				"color": Color(1.0, 0.5, 0.75),
-				"apply": func(w: Weapon) -> void:
-						w.extra_projectiles += 2
-						w.reload_mult *= 1.5
-						w.damage_mult *= 1.5
-						w.fire_rate_mult *= 0.3
-						w.bullet_speed_mult *= 0.75
-						w.spread = max(w.spread, deg_to_rad(2.0)) + deg_to_rad(2.0),
+			"id": "shotgun",
+			"name": "SHOTGUN",
+			"desc": "Multi-projectile burst",
+			"color": Color(1.0, 0.5, 0.75),
+			"apply": func(w: Weapon) -> void:
+					w.extra_projectiles += 2
+					w.reload_mult *= 1.5
+					w.damage_mult *= 1.5
+					w.fire_rate_mult *= 0.3
+					w.bullet_speed_mult *= 0.75
+					w.spread = max(w.spread, deg_to_rad(2.0)) + deg_to_rad(2.0),
 		},
 		{
 			"id": "extra_barrel",
@@ -147,16 +147,16 @@ static func all() -> Array:
 		{
 			"id": "lifesteal",
 			"name": "LIFESTEAL",
-			"desc": "",
+			"desc": "Damage enemies, gain some health",
 			"color": Color(0.8, 0.2, 0.85),
 			"apply": func(w: Weapon) -> void:
-				w.lifesteal += 0.25
+				w.lifesteal += 0.4
 				w.bullet_color = w.bullet_color.lerp(Color(0.85, 0.15, 0.8), 0.4),
 		},
 		{
 			"id": "explosive",
 			"name": "EXPLOSIVE ROUNDS",
-			"desc": "Bullets explode on impact",
+			"desc": "Bullets explode on impact (stackable)",
 			"color": Color(1.0, 0.4, 0.1),
 			"apply": func(w: Weapon) -> void:
 				# First stack establishes a sizable baseline; each extra one
@@ -403,9 +403,6 @@ static func all() -> Array:
 			"desc": "Hits heavily slow enemy movement",
 			"color": Color(0.55, 0.9, 1.0),
 			"apply": func(w: Weapon) -> void:
-				# Each stack multiplies move speed down (~52% per stack) and
-				# extends the freeze window. Stacks were no-ops before (min/max
-				# with the same constant every time).
 				w.slow_on_hit = clampf(w.slow_on_hit * 0.48, 0.22, 1.0)
 				w.slow_duration += 2.6
 				w.bullet_speed_mult *= 0.9
@@ -442,7 +439,6 @@ static func all() -> Array:
 			"id": "drill_rounds",
 			"name": "DRILL ROUNDS",
 			"desc": "Bullets bore through walls before stopping",
-			"rarity": "rare",
 			"color": Color(0.75, 0.75, 0.82),
 			"apply": func(w: Weapon) -> void:
 				w.world_pierce_count += 2
@@ -460,14 +456,6 @@ static func all() -> Array:
 				w.fire_rate_mult *= 0.55
 				w.bullet_speed_mult *= 0.75
 				w.bullet_color = w.bullet_color.lerp(Color(0.0, 0.95, 0.75), 0.5),
-		},
-		{
-			"id": "quick_recharge",
-			"name": "QUICK RECHARGE",
-			"desc": "",
-			"color": Color(0.85, 0.55, 1.0),
-			"apply": func(w: Weapon) -> void:
-				w.special_cooldown_mult *= 0.85,
 		},
 		{
 			"id": "echo",

@@ -584,10 +584,10 @@ func warmup_specials() -> void:
 	_cached_samples("mine_plant", Callable(self, "_synth_mine_plant"))
 
 
-func _shot_cache_key(w: Weapon, variant: int) -> String:
+func _shot_cache_key(w: Weapon, variant: int, last_in_mag: bool = false) -> String:
 	if w == null:
 		return "shot:default:%d" % variant
-	var damage_bucket := int(round(w.get_damage() / 5.0))
+	var damage_bucket := int(round(w.get_damage_for_shot(last_in_mag) / 5.0))
 	var spread_bucket := int(round(w.spread * 1000.0))
 	var fire_bucket := int(round(w.fire_rate_mult * 10.0))
 	var speed_bucket := int(round(w.bullet_speed_mult * 4.0))  # 0.25 increments
@@ -601,18 +601,18 @@ func _hitmarker_cache_key(kind: String, dmg: int) -> String:
 
 # -------------------- sounds --------------------
 
-func shot(w: Weapon = null, at: Vector3 = NO_POS, is_self: bool = false, silenced: bool = false) -> void:
+func shot(w: Weapon = null, at: Vector3 = NO_POS, is_self: bool = false, silenced: bool = false, last_in_mag: bool = false) -> void:
 	# Use a random real-gun sample when available; fall back to the synth.
 	# Higher-damage weapons pitch down (heavier report) AND get louder.
 	# Self-shots play 2D at their own volume so the local BANG can be tuned
 	# independently of distance attenuation / world reverb.
 	var dmg_db: float = 0.0
 	if w != null:
-		var dmg_ratio: float = maxf(0.5, w.get_damage() / Weapon.BASE_DAMAGE)
+		var dmg_ratio: float = maxf(0.5, w.get_damage_for_shot(last_in_mag) / Weapon.BASE_DAMAGE)
 		dmg_db = clampf(log(dmg_ratio) / log(2.0) * shot_dmg_per_double_db, -4.0, 14.0)
 	var pitch := 1.0
 	if w != null:
-		var dmg_ratio_p: float = maxf(1.0, w.get_damage() / Weapon.BASE_DAMAGE)
+		var dmg_ratio_p: float = maxf(1.0, w.get_damage_for_shot(last_in_mag) / Weapon.BASE_DAMAGE)
 		pitch = clampf(1.0 - (log(dmg_ratio_p) / log(2.0)) * shot_pitch_per_double, 0.35, 1.15)
 		pitch *= randf_range(0.97, 1.03)
 	# Self vs world base levels (knobs let the audio lab tune them live).
@@ -638,7 +638,7 @@ func shot(w: Weapon = null, at: Vector3 = NO_POS, is_self: bool = false, silence
 	var label := "shot_self" if is_self else "shot"
 	# Real-world rifle SPL is ~150-165 dB at the muzzle. Scale with damage so
 	# bigger guns push the HDR window higher, ducking weaker sounds harder.
-	var dmg_log: float = 0.0 if w == null else log(maxf(1.0, w.get_damage() / Weapon.BASE_DAMAGE)) / log(2.0)
+	var dmg_log: float = 0.0 if w == null else log(maxf(1.0, w.get_damage_for_shot(last_in_mag) / Weapon.BASE_DAMAGE)) / log(2.0)
 	# Game-mixed SPL — real rifles read 148+ dB at the muzzle but that pushes
 	# the HDR window so high a single shot mutes everything else. Compressed
 	# baseline at 105 dB lets footsteps (78 SPL) survive a base rifle but
@@ -652,16 +652,16 @@ func shot(w: Weapon = null, at: Vector3 = NO_POS, is_self: bool = false, silence
 		_play_stream(stream, dry_vol, at, pitch, label, shot_dist, true, spl)
 		_play_stream(stream, wet_vol, at, pitch, wet_label, shot_dist, false, spl)
 	else:
-		var key := _shot_cache_key(w, shot_variant)
+		var key := _shot_cache_key(w, shot_variant, last_in_mag)
 		var wav := _cached_wav(key, Callable(self, "_synth_shot").bind(w, shot_variant))
-		_play_stream(wav, dry_vol, at, 1.0, label, shot_dist, true, spl)
-		_play_stream(wav, wet_vol, at, 1.0, wet_label, shot_dist, false, spl)
+		_play_stream(wav, dry_vol, at, pitch, label, shot_dist, true, spl)
+		_play_stream(wav, wet_vol, at, pitch, wet_label, shot_dist, false, spl)
 	# Rumble layer — only for hard-hitting weapons (>1.4× base damage). Reuses
 	# the explosion rumble synth + cache (same brown-noise body) but at a much
 	# lower dB so it sits under the bang. Snipers, bazookas, etc. get a real
 	# subsonic punch; default rifles stay clean.
 	if w != null:
-		var dmg_ratio_r: float = w.get_damage() / Weapon.BASE_DAMAGE
+		var dmg_ratio_r: float = w.get_damage_for_shot(last_in_mag) / Weapon.BASE_DAMAGE
 		if dmg_ratio_r > 1.4:
 			var rumble_radius: int = int(round(clampf(dmg_ratio_r * 1.5, 2.0, 12.0)))
 			var rumble_variant: int = randi() % EXPLOSION_VARIANTS
