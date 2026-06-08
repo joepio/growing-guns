@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://barendestbench01"]
+
+[ext_resource type="Script" path="res://scripts/arena_destruction_bench.gd" id="1_bench"]
+
+[node name="ArenaDestructionBench" type="Node3D"]
+script = ExtResource("1_bench")

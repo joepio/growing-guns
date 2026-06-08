@@ -1,5 +1,7 @@
 extends Node3D
 
+const DestructibleManager = preload("res://scripts/destructible_manager.gd")
+
 const ION_COLOR := Color(0.38, 0.78, 1.0)
 const ION_CORE := Color(0.92, 0.97, 1.0)
 const CHARGE_SECONDS := 3.8
@@ -398,6 +400,7 @@ func _detonate() -> void:
 	if _notify_server and _game and is_instance_valid(_game) and _game.has_method("_apply_ion_cannon_explosion"):
 		_game.call("_apply_ion_cannon_explosion", target_pos, BLAST_RADIUS, BLAST_DAMAGE, shooter_id)
 	if scene:
+		DestructibleManager.apply_blast(target_pos, BLAST_RADIUS * 0.52, BLAST_DAMAGE)
 		var sidechain_peak := 5.5
 		if scene.has_method("trigger_explosion_sidechain"):
 			scene.trigger_explosion_sidechain(

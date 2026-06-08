@@ -1,6 +1,7 @@
 extends Node3D
 
 const Violence = preload("res://scripts/violence.gd")
+const DestructibleManager = preload("res://scripts/destructible_manager.gd")
 
 var speed: float = 150.0
 var direction: Vector3 = Vector3.FORWARD
@@ -294,7 +295,9 @@ func _handle_collision(result: Dictionary) -> void:
 		return
 
 	var bullet_damage := _current_damage()
-	var dmg_ratio: float = clampf(bullet_damage / Weapon.BASE_DAMAGE, 0.5, 5.0)
+	var raw_dmg_ratio: float = bullet_damage / Weapon.BASE_DAMAGE
+	var dmg_ratio: float = clampf(raw_dmg_ratio, 0.5, 5.0)
+	var impact_dmg_ratio: float = clampf(raw_dmg_ratio, 0.2, 24.0)
 
 	# Corpse hits run cosmetic-only on every peer (no networked health change).
 	# The corpse accumulates damage and disintegrates at CORPSE_DISINTEGRATE_DMG.
@@ -346,8 +349,16 @@ func _handle_collision(result: Dictionary) -> void:
 		if is_head_hit:
 			Violence.spawn_headshot_spray(get_tree().current_scene, hit_pos, direction, blood_ratio)
 	else:
-		shooter_node.call("_spawn_impact", hit_pos, weapon_stats.bullet_color, weapon_stats.get_bullet_scale(), dmg_ratio, normal, weapon_stats.explosive_radius, collider)
+		shooter_node.call("_spawn_impact", hit_pos, weapon_stats.bullet_color, weapon_stats.get_bullet_scale(), impact_dmg_ratio, normal, weapon_stats.explosive_radius, collider)
 		SFX.impact(hit_pos, dmg_ratio)
+		DestructibleManager.carve_from_hit(
+			hit_pos,
+			impact_dmg_ratio,
+			weapon_stats.explosive_radius,
+			collider,
+			normal,
+			weapon_stats.explosive_damage,
+		)
 
 	if weapon_stats.explosive_radius > 0.0 and not bench_skip_visuals:
 		shooter_node.call("_spawn_bullet_blast", hit_pos, weapon_stats.explosive_radius, weapon_stats.bullet_color, true)
