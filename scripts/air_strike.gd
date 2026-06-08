@@ -1,6 +1,7 @@
 extends Node3D
 
 const Violence = preload("res://scripts/violence.gd")
+const DestructibleManager = preload("res://scripts/destructible_manager.gd")
 
 const MARKER_COLOR := Color(1.0, 0.08, 0.04)
 const ROCKET_TRAVEL_SECONDS := 2.3
@@ -125,6 +126,7 @@ func _on_rocket_impact() -> void:
 		_game.call("_apply_environment_explosion", target_pos, BLAST_RADIUS, BLAST_DAMAGE, shooter_id)
 	if scene:
 		Violence.spawn_bullet_blast(scene, target_pos, BLAST_RADIUS, blast_color, local_player)
+		DestructibleManager.apply_blast(target_pos, BLAST_RADIUS * 0.52, BLAST_DAMAGE)
 	else:
 		_report_error("impact", "no fx scene — explosion VFX/audio skipped")
 	_spawn_impact_flare(impact_intensity)

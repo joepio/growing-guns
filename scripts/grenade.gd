@@ -1,6 +1,7 @@
 extends RigidBody3D
 
 const Blast = preload("res://scripts/blast.gd")
+const DestructibleManager = preload("res://scripts/destructible_manager.gd")
 
 const FUSE := 4.0                # fallback if the grenade somehow never touches anything
 const ARM_DELAY := 0.04          # ignore contacts for this long after spawn (just enough to clear the muzzle)
@@ -372,6 +373,7 @@ func _do_cluster_pop_vfx(pos: Vector3, radius: float) -> void:
 	tw.tween_property(core_mat, "albedo_color", Color(1.0, 0.35, 0.05, 0.0), dur)
 	tw.tween_property(core_mat, "emission_energy_multiplier", 0.0, dur * 0.8)
 	tw.chain().tween_callback(core.queue_free)
+	DestructibleManager.apply_blast(pos, radius * 0.52, _max_damage())
 	var lp: Node = scene.get("local_player")
 	if lp and is_instance_valid(lp) and lp.has_method("apply_explosion_view_punch"):
 		lp.apply_explosion_view_punch(pos, radius, 0.9)
@@ -402,6 +404,7 @@ func _do_vfx() -> void:
 
 	Violence._spawn_blast_flash_light(scene, pos, radius)
 	Violence._spawn_blast_core_light(scene, pos, radius, col, 0.85)
+	DestructibleManager.apply_blast(pos, radius * 0.52, _max_damage())
 
 	# --- Local camera shake with distance falloff
 	var lp: Node = scene.get("local_player")

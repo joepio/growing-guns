@@ -2173,8 +2173,15 @@ static func spawn_impact(scene: Node, pos: Vector3, color: Color = Color(1.0, 0.
 			.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
 		htw.tween_callback(heat.queue_free)
 
+	var heavy_impact := dmg_ratio > 1.35 or scale_f > 1.35
+	if heavy_impact:
+		_spawn_impact_rock_chips(scene, pos, normal, scale_f, dmg_ratio, collider, color)
+
 	# A handful of dust particles scattering outward and falling.
 	var dust_count: int = int(clampf(3.0 * dmg_ratio, 2.0, 15.0))
+	if heavy_impact:
+		dust_count = 0
+	var dust_color := _surface_color_from_collider(collider, color).lerp(Color(0.72, 0.66, 0.55), 0.35)
 	for i in dust_count:
 		var dust := MeshInstance3D.new()
 		var m := SphereMesh.new()
@@ -2186,7 +2193,7 @@ static func spawn_impact(scene: Node, pos: Vector3, color: Color = Color(1.0, 0.
 		var mat := StandardMaterial3D.new()
 		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		mat.albedo_color = Color(0.72, 0.66, 0.55, 0.75)
+		mat.albedo_color = Color(dust_color.r, dust_color.g, dust_color.b, 0.6)
 		dust.material_override = mat
 		dust.position = pos
 		scene.add_child(dust)
@@ -2199,7 +2206,7 @@ static func spawn_impact(scene: Node, pos: Vector3, color: Color = Color(1.0, 0.
 		var tw := dust.create_tween().set_parallel(true)
 		tw.tween_property(dust, "position", end, 0.35) \
 			.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
-		tw.tween_property(mat, "albedo_color", Color(0.72, 0.66, 0.55, 0.0), 0.4)
+		tw.tween_property(mat, "albedo_color", Color(dust_color.r, dust_color.g, dust_color.b, 0.0), 0.4)
 		tw.chain().tween_callback(dust.queue_free)
 
 # Brief high-intensity beam for hitscan bullets. Rendered for 1-2 frames
@@ -2294,9 +2301,14 @@ static var _crater_fifo: Array[Node] = []
 # expensive extras (warm-glow, hot-spot, OmniLight) or blast scorches.
 static var _hot_extras_active: int = 0
 static var _blast_craters_active: int = 0
+static var _impact_chip_meshes: Array[Mesh] = []
 # Per-frame allocation budget — caps spawn rate from a UZI burst.
 static var _crater_frame_id: int = -1
 static var _craters_this_frame: int = 0
+const MAX_DESTRUCT_DEBRIS_PER_FRAME := 80
+static var _debris_frame_id: int = -1
+static var _debris_this_frame: int = 0
+static var _debris_queue: Array[Dictionary] = []
 
 static func _get_crater_mesh() -> Mesh:
 	if _shared_crater_mesh == null:
@@ -2435,44 +2447,127 @@ static func _distance_to_cylinder_edge(local_pos: Vector3, local_dir: Vector3, s
 	return maxf(0.0, best) if best < INF else INF
 
 
-static func _crater_surface_scale(pos: Vector3, right: Vector3, bitan: Vector3, size: float, collider: Node) -> Vector2:
+static func _crater_clip_bounds(pos: Vector3, right: Vector3, bitan: Vector3, collider: Node) -> Vector4:
 	var col := _first_collision_shape(collider)
 	if col == null or col.shape == null:
-		return Vector2(size, size)
+		return Vector4(INF, INF, INF, INF)
 	var local_pos: Vector3 = col.global_transform.affine_inverse() * pos
 	var inv_basis := col.global_transform.basis.inverse()
 	var right_local: Vector3 = (inv_basis * right).normalized()
 	var bitan_local: Vector3 = (inv_basis * bitan).normalized()
-	var edge_pad := 0.96
-	var max_right := INF
-	var max_bitan := INF
+	var edge_pad := 0.92
+	var right_plus := INF
+	var right_minus := INF
+	var bitan_plus := INF
+	var bitan_minus := INF
 	if col.shape is BoxShape3D:
 		var half: Vector3 = (col.shape as BoxShape3D).size * 0.5
-		max_right = minf(
-			_distance_to_box_edge(local_pos, right_local, half),
-			_distance_to_box_edge(local_pos, -right_local, half)
-		)
-		max_bitan = minf(
-			_distance_to_box_edge(local_pos, bitan_local, half),
-			_distance_to_box_edge(local_pos, -bitan_local, half)
-		)
+		right_plus = _distance_to_box_edge(local_pos, right_local, half)
+		right_minus = _distance_to_box_edge(local_pos, -right_local, half)
+		bitan_plus = _distance_to_box_edge(local_pos, bitan_local, half)
+		bitan_minus = _distance_to_box_edge(local_pos, -bitan_local, half)
 	elif col.shape is CylinderShape3D:
 		var cyl := col.shape as CylinderShape3D
-		max_right = minf(
-			_distance_to_cylinder_edge(local_pos, right_local, cyl),
-			_distance_to_cylinder_edge(local_pos, -right_local, cyl)
-		)
-		max_bitan = minf(
-			_distance_to_cylinder_edge(local_pos, bitan_local, cyl),
-			_distance_to_cylinder_edge(local_pos, -bitan_local, cyl)
-		)
-	if max_right == INF or max_bitan == INF:
-		return Vector2(size, size)
-	# Keep the texture circular. Near an edge, shrink uniformly to the tighter
-	# tangent bound instead of turning the scorch into an oval.
-	var uniform_size: float = minf(size, minf(max_right * 2.0 * edge_pad, max_bitan * 2.0 * edge_pad))
-	uniform_size = maxf(0.035, uniform_size)
-	return Vector2(uniform_size, uniform_size)
+		right_plus = _distance_to_cylinder_edge(local_pos, right_local, cyl)
+		right_minus = _distance_to_cylinder_edge(local_pos, -right_local, cyl)
+		bitan_plus = _distance_to_cylinder_edge(local_pos, bitan_local, cyl)
+		bitan_minus = _distance_to_cylinder_edge(local_pos, -bitan_local, cyl)
+	if right_plus == INF or right_minus == INF or bitan_plus == INF or bitan_minus == INF:
+		return Vector4(INF, INF, INF, INF)
+	return Vector4(
+		-right_minus * edge_pad,
+		right_plus * edge_pad,
+		-bitan_minus * edge_pad,
+		bitan_plus * edge_pad
+	)
+
+
+static func _crater_surface_fit(
+	pos: Vector3,
+	right: Vector3,
+	bitan: Vector3,
+	size: float,
+	collider: Node,
+) -> Dictionary:
+	var bounds: Vector4 = _crater_clip_bounds(pos, right, bitan, collider)
+	if bounds.x >= INF:
+		return {"scale": Vector2(size, size), "offset": Vector3.ZERO}
+	var half_right: float = minf(bounds.y, -bounds.x)
+	var half_bitan: float = minf(bounds.w, -bounds.z)
+	var uniform_size: float = clampf(minf(half_right, half_bitan) * 2.0, 0.035, size)
+	var shift_r: float = (bounds.x + bounds.y) * 0.5
+	var shift_b: float = (bounds.z + bounds.w) * 0.5
+	var offset: Vector3 = right * shift_r + bitan * shift_b
+	return {"scale": Vector2(uniform_size, uniform_size), "offset": offset}
+
+
+static func _clip_poly_axis(poly: Array[Vector2], axis: int, limit: float, keep_less: bool) -> Array[Vector2]:
+	var out: Array[Vector2] = []
+	if poly.is_empty():
+		return out
+	for i in poly.size():
+		var a := poly[i]
+		var b := poly[(i + 1) % poly.size()]
+		var av := a.x if axis == 0 else a.y
+		var bv := b.x if axis == 0 else b.y
+		var a_in := av <= limit if keep_less else av >= limit
+		var b_in := bv <= limit if keep_less else bv >= limit
+		if a_in and b_in:
+			out.append(b)
+		elif a_in and not b_in:
+			var denom := bv - av
+			var t := clampf((limit - av) / denom, 0.0, 1.0) if absf(denom) > 0.00001 else 0.0
+			out.append(a.lerp(b, t))
+		elif not a_in and b_in:
+			var denom := bv - av
+			var t := clampf((limit - av) / denom, 0.0, 1.0) if absf(denom) > 0.00001 else 0.0
+			out.append(a.lerp(b, t))
+			out.append(b)
+	return out
+
+
+static func _build_clipped_crater_mesh(size: float, bounds: Vector4) -> Mesh:
+	var radius := size * 0.5
+	var poly: Array[Vector2] = []
+	var segments := 48
+	for i in segments:
+		var a := TAU * float(i) / float(segments)
+		poly.append(Vector2(cos(a), sin(a)) * radius)
+	if bounds.x < INF:
+		poly = _clip_poly_axis(poly, 0, bounds.x, false)
+		poly = _clip_poly_axis(poly, 0, bounds.y, true)
+		poly = _clip_poly_axis(poly, 1, bounds.z, false)
+		poly = _clip_poly_axis(poly, 1, bounds.w, true)
+	if poly.size() < 3:
+		return _get_crater_mesh()
+	var center := Vector2.ZERO
+	for p in poly:
+		center += p
+	center /= float(poly.size())
+	var verts := PackedVector3Array()
+	var normals := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var indices := PackedInt32Array()
+	verts.append(Vector3(center.x, 0.0, center.y))
+	normals.append(Vector3.UP)
+	uvs.append(Vector2(0.5 + center.x / size, 0.5 + center.y / size))
+	for p in poly:
+		verts.append(Vector3(p.x, 0.0, p.y))
+		normals.append(Vector3.UP)
+		uvs.append(Vector2(0.5 + p.x / size, 0.5 + p.y / size))
+	for i in poly.size():
+		indices.append(0)
+		indices.append(i + 1)
+		indices.append(1 if i == poly.size() - 1 else i + 2)
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_NORMAL] = normals
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_INDEX] = indices
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return mesh
 
 
 static func _crater_basis(normal: Vector3, rotation: float = 0.0) -> Basis:
@@ -2483,14 +2578,353 @@ static func _crater_basis(normal: Vector3, rotation: float = 0.0) -> Basis:
 	return Basis(right, n, bitan).rotated(n, rotation)
 
 
+static func _build_impact_chip_mesh(variant: int) -> Mesh:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash(["impact_chip", variant])
+	var top := Vector3(0.0, rng.randf_range(0.42, 0.62), 0.0)
+	var bottom := Vector3(0.0, -rng.randf_range(0.34, 0.52), 0.0)
+	var upper: Array[Vector3] = []
+	var lower: Array[Vector3] = []
+	for i in 5:
+		var a := float(i) / 5.0 * TAU + rng.randf_range(-0.18, 0.18)
+		var r1 := rng.randf_range(0.36, 0.62)
+		var r2 := rng.randf_range(0.28, 0.56)
+		upper.append(Vector3(cos(a) * r1, rng.randf_range(0.04, 0.22), sin(a) * r1))
+		lower.append(Vector3(cos(a + rng.randf_range(-0.16, 0.16)) * r2, rng.randf_range(-0.26, -0.05), sin(a) * r2))
+	var min_v := top
+	var max_v := top
+	for p in [bottom]:
+		min_v = min_v.min(p)
+		max_v = max_v.max(p)
+	for p in upper:
+		min_v = min_v.min(p)
+		max_v = max_v.max(p)
+	for p in lower:
+		min_v = min_v.min(p)
+		max_v = max_v.max(p)
+	var center := (min_v + max_v) * 0.5
+	var extents := max_v - min_v
+	var max_dim := maxf(0.001, maxf(extents.x, maxf(extents.y, extents.z)))
+	top = (top - center) / max_dim
+	bottom = (bottom - center) / max_dim
+	for i in upper.size():
+		upper[i] = (upper[i] - center) / max_dim
+	for i in lower.size():
+		lower[i] = (lower[i] - center) / max_dim
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for i in 5:
+		var j := (i + 1) % 5
+		st.add_vertex(top)
+		st.add_vertex(upper[i])
+		st.add_vertex(upper[j])
+		st.add_vertex(upper[i])
+		st.add_vertex(lower[i])
+		st.add_vertex(lower[j])
+		st.add_vertex(upper[i])
+		st.add_vertex(lower[j])
+		st.add_vertex(upper[j])
+		st.add_vertex(bottom)
+		st.add_vertex(lower[j])
+		st.add_vertex(lower[i])
+	st.generate_normals()
+	return st.commit()
+
+
+static func _get_impact_chip_mesh() -> Mesh:
+	if _impact_chip_meshes.is_empty():
+		for i in 5:
+			_impact_chip_meshes.append(_build_impact_chip_mesh(i))
+	return _impact_chip_meshes[randi() % _impact_chip_meshes.size()]
+
+
+static func _surface_color_from_collider(collider: Node, fallback: Color) -> Color:
+	var mesh_owner: MeshInstance3D = null
+	if collider is MeshInstance3D:
+		mesh_owner = collider as MeshInstance3D
+	elif collider:
+		for child in collider.get_children():
+			if child is MeshInstance3D:
+				mesh_owner = child as MeshInstance3D
+				break
+	if mesh_owner == null:
+		return fallback.lerp(Color(0.72, 0.66, 0.55), 0.65)
+	var mat: Material = mesh_owner.get_active_material(0)
+	if mat == null:
+		mat = mesh_owner.material_override
+	if mat is StandardMaterial3D:
+		return (mat as StandardMaterial3D).albedo_color
+	return fallback.lerp(Color(0.72, 0.66, 0.55), 0.65)
+
+
+static func _animate_impact_chip(
+	t: float,
+	chip: MeshInstance3D,
+	mat: StandardMaterial3D,
+	start: Vector3,
+	velocity: Vector3,
+	gravity: Vector3,
+	start_rot: Vector3,
+	end_rot: Vector3,
+	start_alpha: float,
+) -> void:
+	if not is_instance_valid(chip):
+		return
+	chip.global_position = start + velocity * t + gravity * (t * t)
+	chip.rotation = start_rot.lerp(end_rot, t)
+	var col := mat.albedo_color
+	mat.albedo_color = Color(col.r, col.g, col.b, start_alpha * (1.0 - smoothstep(0.96, 1.0, t)))
+
+
+static func _spawn_impact_rock_chips(scene: Node, pos: Vector3, normal: Vector3, scale_f: float, dmg_ratio: float, collider: Node, bullet_color: Color) -> void:
+	if scene == null or (BenchFlags.active and BenchFlags.no_explosion_visuals):
+		return
+	var n: Vector3 = normal.normalized() if normal.length_squared() > 0.001 else Vector3.UP
+	var damage_t := 0.0
+	if dmg_ratio > 1.0:
+		damage_t = pow(clampf(log(dmg_ratio) / log(24.0), 0.0, 1.0), 1.2)
+	var travel_damage_scale := lerpf(0.45, 2.6, damage_t)
+	var count_power := damage_t
+	var count := int(clampf(2.0 + count_power * 11.0, 2.0, 13.0))
+	var base_color := _surface_color_from_collider(collider, bullet_color)
+	var tangent_a := n.cross(Vector3.UP)
+	if tangent_a.length_squared() < 0.001:
+		tangent_a = n.cross(Vector3.RIGHT)
+	tangent_a = tangent_a.normalized()
+	var tangent_b := n.cross(tangent_a).normalized()
+	for i in count:
+		var chip := MeshInstance3D.new()
+		chip.mesh = _get_impact_chip_mesh()
+		var mat := StandardMaterial3D.new()
+		var tint := randf_range(0.72, 1.12)
+		var start_alpha := randf_range(0.78, 0.95)
+		mat.albedo_color = Color(
+			clampf(base_color.r * tint, 0.0, 1.0),
+			clampf(base_color.g * tint, 0.0, 1.0),
+			clampf(base_color.b * tint, 0.0, 1.0),
+			start_alpha
+		)
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.roughness = 0.88
+		chip.material_override = mat
+		var size_jitter := randf_range(0.85, 1.25)
+		var target_longest_axis_m := clampf(lerpf(0.16, 0.9, damage_t) * size_jitter, 0.12, 1.0)
+		var proportions := Vector3(
+			randf_range(0.55, 1.0),
+			randf_range(0.35, 0.9),
+			randf_range(0.5, 1.0)
+		)
+		var prop_max := maxf(proportions.x, maxf(proportions.y, proportions.z))
+		chip.scale = proportions * (target_longest_axis_m / prop_max)
+		chip.rotation = Vector3(randf() * TAU, randf() * TAU, randf() * TAU)
+		scene.add_child(chip)
+		var start := pos + n * 0.035
+		chip.global_position = start
+
+		var angle := randf() * TAU
+		var lateral := (tangent_a * cos(angle) + tangent_b * sin(angle)).normalized()
+		var launch_dir := (lateral * randf_range(0.75, 1.8) + n * randf_range(0.15, 0.65)).normalized()
+		var travel_jitter := pow(randf_range(0.85, 1.85), 1.1)
+		var travel := randf_range(3.0, 7.5) * travel_damage_scale * travel_jitter
+		var rise := randf_range(0.55, 1.8) * travel_damage_scale
+		var bury_depth := randf_range(2.5, 5.5) * lerpf(0.85, 1.8, damage_t)
+		var gravity_drop := rise + absf(launch_dir.y * travel) + bury_depth
+		var velocity := launch_dir * travel + Vector3.UP * rise
+		var gravity := Vector3.DOWN * gravity_drop - n * randf_range(0.2, 0.75)
+		var start_rot := chip.rotation
+		var end_rot := start_rot + Vector3(
+			randf_range(-PI, PI) * 2.8,
+			randf_range(-PI, PI) * 2.8,
+			randf_range(-PI, PI) * 2.8
+		)
+		var life := randf_range(1.35, 2.35)
+		var tw := chip.create_tween()
+		tw.tween_method(
+			Callable(Violence, "_animate_impact_chip").bind(chip, mat, start, velocity, gravity, start_rot, end_rot, start_alpha),
+			0.0,
+			1.0,
+			life
+		)\
+			.set_trans(Tween.TRANS_LINEAR)
+		tw.tween_callback(chip.queue_free)
+
+
+static func _destruct_debris_budget_remaining() -> int:
+	if BenchFlags.active and BenchFlags.no_explosion_visuals:
+		return 0
+	var fid: int = Engine.get_physics_frames()
+	if fid != _debris_frame_id:
+		_debris_frame_id = fid
+		_debris_this_frame = 0
+	return maxi(0, MAX_DESTRUCT_DEBRIS_PER_FRAME - _debris_this_frame)
+
+
+static func _consume_destruct_debris_budget(count: int) -> void:
+	_debris_this_frame += count
+
+
+# Cheap rubble when destructible chunks break off — queued across frames so big
+# blasts still spray chips after the per-frame budget is spent.
+static func spawn_destruction_debris(
+	scene: Node,
+	global_pos: Vector3,
+	global_basis: Basis,
+	block_size: Vector3,
+	color: Color,
+	blast_world: Vector3,
+	blast_radius: float,
+	chip_mult: float = 1.0,
+) -> void:
+	if scene == null or block_size.length_squared() < 0.0001:
+		return
+	_debris_queue.append({
+		"scene": scene,
+		"global_pos": global_pos,
+		"global_basis": global_basis,
+		"block_size": block_size,
+		"color": color,
+		"blast_world": blast_world,
+		"blast_radius": blast_radius,
+		"chip_mult": chip_mult,
+		"next_i": 0,
+	})
+
+
+static func flush_destruction_debris() -> void:
+	while not _debris_queue.is_empty():
+		var budget: int = _destruct_debris_budget_remaining()
+		if budget <= 0:
+			break
+		var job: Dictionary = _debris_queue[0]
+		var spawned: int = _spawn_debris_job(job, budget)
+		if spawned < 0:
+			_debris_queue.pop_front()
+			continue
+		if spawned <= 0:
+			break
+		_consume_destruct_debris_budget(spawned)
+		if int(job.get("next_i", 0)) >= int(job.get("chip_count", 0)):
+			_debris_queue.pop_front()
+
+
+static func _debris_launch_direction(away: Vector3, blast_heavy: float) -> Vector3:
+	# Full-sphere spray; big blasts only nudge outward instead of locking to "away".
+	for _attempt in 8:
+		var rnd := Vector3(
+			randf_range(-1.0, 1.0),
+			randf_range(-0.35, 1.0),
+			randf_range(-1.0, 1.0),
+		)
+		if rnd.length_squared() < 0.08:
+			continue
+		var outward: float = randf_range(-0.25, 0.65) * lerpf(0.35, 1.0, blast_heavy)
+		return (rnd.normalized() + away * outward + Vector3.UP * randf_range(-0.08, 0.25)).normalized()
+	return away
+
+
+static func _debris_chip_count(block_size: Vector3, chip_mult: float) -> int:
+	var vol: float = block_size.x * block_size.y * block_size.z
+	var mult: float = maxf(chip_mult, 0.25)
+	return clampi(int(round(vol / 0.06 * mult)), 1, int(5.0 * mult))
+
+
+static func _spawn_debris_job(job: Dictionary, max_chips: int) -> int:
+	var scene: Node = job.get("scene") as Node
+	if scene == null or not is_instance_valid(scene):
+		return -1
+	var block_size: Vector3 = job.get("block_size") as Vector3
+	if not job.has("chip_count"):
+		job["chip_count"] = _debris_chip_count(block_size, float(job.get("chip_mult", 1.0)))
+	var chip_count: int = int(job["chip_count"])
+	var start_i: int = int(job.get("next_i", 0))
+	if start_i >= chip_count:
+		return -1
+	var global_pos: Vector3 = job.get("global_pos") as Vector3
+	var global_basis: Basis = job.get("global_basis") as Basis
+	var color: Color = job.get("color") as Color
+	var blast_world: Vector3 = job.get("blast_world") as Vector3
+	var blast_radius: float = float(job.get("blast_radius"))
+	var away: Vector3 = global_pos - blast_world
+	if away.length_squared() < 0.04:
+		away = Vector3(randf() - 0.5, 0.2, randf() - 0.5)
+	away = away.normalized()
+	var blast_heavy: float = clampf((blast_radius - 4.0) / 10.0, 0.0, 1.0)
+	# Travel is tied to damage radius so rubble lands outside the crater, not inside it.
+	var travel_min: float = maxf(5.0, blast_radius * lerpf(1.45, 1.85, blast_heavy))
+	var travel_max: float = maxf(travel_min + 5.0, blast_radius * lerpf(2.4, 3.6, blast_heavy))
+	var rubble_base: float = clampf(block_size.length() * 0.22, 0.08, 0.42)
+	var spawned := 0
+	for i in range(start_i, chip_count):
+		if spawned >= max_chips:
+			job["next_i"] = i
+			return spawned
+		var chip := MeshInstance3D.new()
+		chip.add_to_group("destruction_debris")
+		chip.mesh = _get_impact_chip_mesh()
+		var mat := StandardMaterial3D.new()
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		var tint := randf_range(0.72, 1.18)
+		var start_alpha := randf_range(0.9, 1.0)
+		mat.albedo_color = Color(
+			clampf(color.r * tint, 0.0, 1.0),
+			clampf(color.g * tint, 0.0, 1.0),
+			clampf(color.b * tint, 0.0, 1.0),
+			start_alpha,
+		)
+		mat.roughness = 0.9
+		chip.material_override = mat
+		var size_jitter := randf_range(0.45, 1.85)
+		var axis := rubble_base * size_jitter
+		chip.scale = Vector3(
+			axis * randf_range(0.4, 1.15),
+			axis * randf_range(0.35, 1.0),
+			axis * randf_range(0.4, 1.1),
+		)
+		chip.rotation = Vector3(randf() * TAU, randf() * TAU, randf() * TAU)
+		var local_offset := Vector3(
+			randf_range(-0.5, 0.5) * block_size.x,
+			randf_range(-0.5, 0.5) * block_size.y,
+			randf_range(-0.5, 0.5) * block_size.z,
+		)
+		var start := global_pos + global_basis * local_offset
+		scene.add_child(chip)
+		chip.global_position = start
+		var launch_dir := _debris_launch_direction(away, blast_heavy)
+		var travel: float = randf_range(travel_min, travel_max) * randf_range(0.55, 1.55)
+		var bury_depth: float = randf_range(1.2, 4.5) + blast_radius * randf_range(0.06, 0.16)
+		var gravity_drop := absf(minf(launch_dir.y, 0.0) * travel) + bury_depth + randf_range(0.8, 2.5)
+		var velocity := launch_dir * travel
+		var gravity := Vector3.DOWN * gravity_drop
+		var start_rot := chip.rotation
+		var end_rot := start_rot + Vector3(
+			randf_range(-PI, PI) * randf_range(2.0, 4.5),
+			randf_range(-PI, PI) * randf_range(2.0, 4.5),
+			randf_range(-PI, PI) * randf_range(2.0, 4.5),
+		)
+		var life: float = randf_range(0.85, 1.65) * randf_range(0.85, 1.2) + blast_radius * lerpf(0.02, 0.05, blast_heavy)
+		var tw := chip.create_tween()
+		tw.tween_method(
+			Callable(Violence, "_animate_impact_chip").bind(
+				chip, mat, start, velocity, gravity, start_rot, end_rot, start_alpha,
+			),
+			0.0,
+			1.0,
+			life,
+		).set_trans(Tween.TRANS_LINEAR)
+		tw.tween_callback(chip.queue_free)
+		spawned += 1
+	job["next_i"] = chip_count
+	return spawned
+
+
 static func spawn_crater(scene: Node, pos: Vector3, normal: Vector3, dmg_ratio: float, scale_f: float = 1.0, collider: Node = null) -> void:
 	if scene == null or not _can_spawn_crater_this_frame():
 		return
 	_ensure_crater_textures()
 	var dmg: float = clampf(dmg_ratio, 0.5, 6.0)
-	# Crater size: scales linearly from ~10cm to ~80cm based on damage ratio.
-	# This makes it much more obvious when a heavy round hits compared to a pistol.
-	var size: float = (0.08 + 0.14 * dmg) * scale_f
+	# Keep the crater scale simple: one damage-derived scalar, then the surface
+	# clamp below keeps it circular near edges.
+	var size: float = (0.10 + 0.10 * dmg) * scale_f
 
 	var splat := Decal.new()
 	splat.add_to_group("craters")
@@ -2502,11 +2936,14 @@ static func spawn_crater(scene: Node, pos: Vector3, normal: Vector3, dmg_ratio: 
 	var n: Vector3 = normal.normalized() if normal.length_squared() > 0.001 else Vector3.UP
 	var rot := randf_range(-PI, PI)
 	var b := _crater_basis(n, rot)
-	var crater_scale := _crater_surface_scale(pos, b.x.normalized(), b.z.normalized(), size, collider)
+	var crater_fit := _crater_surface_fit(pos, b.x.normalized(), b.z.normalized(), size, collider)
+	var crater_scale: Vector2 = crater_fit["scale"]
+	var crater_offset: Vector3 = crater_fit["offset"]
 	# Random jitter on the surface offset prevents Z-fighting when multiple
 	# shots hit the exact same spot.
 	var offset_jitter: float = randf_range(-0.002, 0.002)
-	splat.global_transform = Transform3D(b, pos + n * (0.012 + offset_jitter))
+	var crater_pos := pos + crater_offset
+	splat.global_transform = Transform3D(b, crater_pos + n * (0.012 + offset_jitter))
 	splat.size = Vector3(crater_scale.x, 0.08, crater_scale.y)
 	splat.texture_albedo = _crater_textures[randi() % _crater_textures.size()]
 	var darkness: float = randf_range(0.04, 0.10)
@@ -2535,9 +2972,8 @@ static func spawn_crater(scene: Node, pos: Vector3, normal: Vector3, dmg_ratio: 
 
 		var glow_node := MeshInstance3D.new()
 		glow_node.mesh = _get_crater_mesh()
-		# Tiny center spot: 12.5% of the base crater size.
-		var glow_b := b.rotated(n, randf_range(-PI, PI)).scaled(Vector3.ONE * 0.125)
-		glow_node.global_transform = Transform3D(glow_b, pos + n * (0.020 + offset_jitter))
+		var glow_b := b.rotated(n, randf_range(-PI, PI)).scaled(Vector3.ONE * size * 0.30)
+		glow_node.global_transform = Transform3D(glow_b, crater_pos + n * (0.020 + offset_jitter))
 		var glow_mat := StandardMaterial3D.new()
 		glow_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		glow_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
@@ -2596,9 +3032,11 @@ static func spawn_blast_crater(scene: Node, pos: Vector3, normal: Vector3, blast
 
 	var n: Vector3 = normal.normalized() if normal.length_squared() > 0.001 else Vector3.UP
 	var b := _crater_basis(n, randf_range(-PI, PI))
-	var crater_scale := _crater_surface_scale(pos, b.x.normalized(), b.z.normalized(), size, collider)
+	var crater_fit := _crater_surface_fit(pos, b.x.normalized(), b.z.normalized(), size, collider)
+	var crater_scale: Vector2 = crater_fit["scale"]
+	var crater_offset: Vector3 = crater_fit["offset"]
 	# Sit slightly further off the surface than the central crater.
-	splat.global_transform = Transform3D(b, pos + n * 0.008)
+	splat.global_transform = Transform3D(b, pos + crater_offset + n * 0.008)
 	splat.size = Vector3(crater_scale.x, 0.10, crater_scale.y)
 	splat.texture_albedo = _crater_textures[randi() % _crater_textures.size()]
 	# Lighter / greyer than the central crater — surface soot, not a hole.

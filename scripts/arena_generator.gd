@@ -2,6 +2,12 @@
 class_name ArenaGenerator
 extends Node3D
 
+const DestructibleSolid = preload("res://scripts/destructible_solid.gd")
+const DestructionCoordinator = preload("res://scripts/destruction_coordinator.gd")
+
+# Large floor/wall spans are tiled so each piece fractures like cover/buildings.
+const TERRAIN_TILE_SIZE := 5.0
+
 # Procedural closed-arena map generator — the only map type in MAP_POOL.
 #
 # Layout: 80m x 80m floor, walled in 12m tall, optional center tower, mirrored
@@ -260,6 +266,8 @@ func regenerate() -> void:
 		var child := get_child(0)
 		remove_child(child)
 		child.free()
+	var coord: Node = DestructionCoordinator.new()
+	add_child(coord)
 	_placed.clear()
 	_spawn_positions.clear()
 	_lava_damage_accum_by_player.clear()
@@ -724,37 +732,78 @@ func _editor_owner() -> Node:
 	return tree.edited_scene_root if tree else null
 
 
-func _add_static_box(pos: Vector3, size: Vector3, mat: StandardMaterial3D, rotation_y: float = 0.0, with_collider: bool = true) -> StaticBody3D:
-	var body := StaticBody3D.new()
-	body.position = pos
-	if rotation_y != 0.0:
-		body.rotation.y = rotation_y
+func _add_destructible_region(
+	center: Vector3,
+	size: Vector3,
+	mat: StandardMaterial3D,
+	rotation_y: float = 0.0,
+) -> void:
+	var counts := Vector3i(
+		maxi(1, ceili(size.x / TERRAIN_TILE_SIZE)),
+		maxi(1, ceili(size.y / TERRAIN_TILE_SIZE)),
+		maxi(1, ceili(size.z / TERRAIN_TILE_SIZE)),
+	)
+	var cell := Vector3(
+		size.x / float(counts.x),
+		size.y / float(counts.y),
+		size.z / float(counts.z),
+	)
+	var corner := center - size * 0.5
+	for z: int in counts.z:
+		for y: int in counts.y:
+			for x: int in counts.x:
+				var local := Vector3(
+					(float(x) + 0.5) * cell.x,
+					(float(y) + 0.5) * cell.y,
+					(float(z) + 0.5) * cell.z,
+				)
+				var tile_center := corner + local
+				if rotation_y != 0.0:
+					tile_center = center + (local - size * 0.5).rotated(Vector3.UP, rotation_y)
+				_add_static_box(tile_center, cell, mat, rotation_y)
+
+
+func _add_static_box(
+	pos: Vector3,
+	size: Vector3,
+	mat: StandardMaterial3D,
+	rotation_y: float = 0.0,
+	with_collider: bool = true,
+	destructible: bool = true,
+) -> StaticBody3D:
+	var body: StaticBody3D
+	if destructible:
+		body = DestructibleSolid.new()
+		body.setup_box(pos, size, mat, rotation_y, with_collider)
+	else:
+		body = StaticBody3D.new()
+		body.position = pos
+		if rotation_y != 0.0:
+			body.rotation.y = rotation_y
+		var mi := MeshInstance3D.new()
+		var box := BoxMesh.new()
+		box.size = size
+		mi.mesh = box
+		mi.material_override = mat
+		body.add_child(mi)
+		if with_collider:
+			var col := CollisionShape3D.new()
+			var shape := BoxShape3D.new()
+			shape.size = size
+			col.shape = shape
+			body.add_child(col)
 	add_child(body)
-	var mi := MeshInstance3D.new()
-	var box := BoxMesh.new()
-	box.size = size
-	mi.mesh = box
-	mi.material_override = mat
-	body.add_child(mi)
-	var col: CollisionShape3D = null
-	if with_collider:
-		col = CollisionShape3D.new()
-		var shape := BoxShape3D.new()
-		shape.size = size
-		col.shape = shape
-		body.add_child(col)
 	var box_owner := _editor_owner()
 	if box_owner:
 		body.owner = box_owner
-		mi.owner = box_owner
-		if col:
-			col.owner = box_owner
+		for child in body.get_children():
+			child.owner = box_owner
 	return body
 
 
 func _build_floor(has_hole: bool = false, hole_pos: Vector2 = Vector2.ZERO, hole_size: float = 0.0) -> void:
 	if not has_hole or hole_size <= 0.0:
-		_add_static_box(Vector3(0, -0.5, 0), Vector3(arena_size, 1, arena_size), _mat_floor)
+		_add_destructible_region(Vector3(0, -0.5, 0), Vector3(arena_size, 1, arena_size), _mat_floor)
 		return
 	# Floor with a square cutout — built as 4 strips (N / S / W / E) around
 	# the hole. Lava under the floor (y = -2) shows through the hole, and
@@ -767,22 +816,22 @@ func _build_floor(has_hole: bool = false, hole_pos: Vector2 = Vector2.ZERO, hole
 	var n_d: float = (hz - hh) - (-half)
 	if n_d > 0.1:
 		var n_z: float = (-half + (hz - hh)) * 0.5
-		_add_static_box(Vector3(0, -0.5, n_z), Vector3(arena_size, 1, n_d), _mat_floor)
+		_add_destructible_region(Vector3(0, -0.5, n_z), Vector3(arena_size, 1, n_d), _mat_floor)
 	# South strip — from hole's far edge to +half.
 	var s_d: float = half - (hz + hh)
 	if s_d > 0.1:
 		var s_z: float = ((hz + hh) + half) * 0.5
-		_add_static_box(Vector3(0, -0.5, s_z), Vector3(arena_size, 1, s_d), _mat_floor)
+		_add_destructible_region(Vector3(0, -0.5, s_z), Vector3(arena_size, 1, s_d), _mat_floor)
 	# West strip — only spans the hole's Z range, fills X up to the hole.
 	var w_w: float = (hx - hh) - (-half)
 	if w_w > 0.1:
 		var w_x: float = (-half + (hx - hh)) * 0.5
-		_add_static_box(Vector3(w_x, -0.5, hz), Vector3(w_w, 1, hole_size), _mat_floor)
+		_add_destructible_region(Vector3(w_x, -0.5, hz), Vector3(w_w, 1, hole_size), _mat_floor)
 	# East strip — from hole's far edge to +half.
 	var e_w: float = half - (hx + hh)
 	if e_w > 0.1:
 		var e_x: float = ((hx + hh) + half) * 0.5
-		_add_static_box(Vector3(e_x, -0.5, hz), Vector3(e_w, 1, hole_size), _mat_floor)
+		_add_destructible_region(Vector3(e_x, -0.5, hz), Vector3(e_w, 1, hole_size), _mat_floor)
 
 
 func _build_lava_pool() -> void:
@@ -931,11 +980,11 @@ func _apply_lava_pool_damage(delta: float) -> void:
 func _build_walls() -> void:
 	var half: float = arena_size * 0.5
 	# N + S walls span X, depth 1m on Z.
-	_add_static_box(Vector3(0, wall_height * 0.5, -half), Vector3(arena_size, wall_height, 1), _mat_wall)
-	_add_static_box(Vector3(0, wall_height * 0.5, half), Vector3(arena_size, wall_height, 1), _mat_wall)
+	_add_destructible_region(Vector3(0, wall_height * 0.5, -half), Vector3(arena_size, wall_height, 1), _mat_wall)
+	_add_destructible_region(Vector3(0, wall_height * 0.5, half), Vector3(arena_size, wall_height, 1), _mat_wall)
 	# E + W walls span Z, depth 1m on X.
-	_add_static_box(Vector3(half, wall_height * 0.5, 0), Vector3(1, wall_height, arena_size), _mat_wall)
-	_add_static_box(Vector3(-half, wall_height * 0.5, 0), Vector3(1, wall_height, arena_size), _mat_wall)
+	_add_destructible_region(Vector3(half, wall_height * 0.5, 0), Vector3(1, wall_height, arena_size), _mat_wall)
+	_add_destructible_region(Vector3(-half, wall_height * 0.5, 0), Vector3(1, wall_height, arena_size), _mat_wall)
 
 
 func _build_lava_island_layout(rng: RandomNumberGenerator, perim_radius: float) -> Dictionary:
@@ -1138,29 +1187,14 @@ func _add_lava_island_cover(platforms: Array, rng: RandomNumberGenerator) -> voi
 
 
 func _build_lava_jump_platform(center: Vector3, radius: float, height: float) -> void:
-	var body := StaticBody3D.new()
-	body.position = center
+	var body: StaticBody3D = DestructibleSolid.new()
+	body.setup_box(center, Vector3(radius * 2.0, height, radius * 2.0), _mat_dark)
 	add_child(body)
-	var mi := MeshInstance3D.new()
-	var cyl := CylinderMesh.new()
-	cyl.radial_segments = 10
-	cyl.top_radius = radius
-	cyl.bottom_radius = maxf(0.9, radius * 0.58)
-	cyl.height = height
-	mi.mesh = cyl
-	mi.material_override = _mat_dark
-	body.add_child(mi)
-	var col := CollisionShape3D.new()
-	var shape := CylinderShape3D.new()
-	shape.radius = radius * 0.96
-	shape.height = height
-	col.shape = shape
-	body.add_child(col)
 	var island_owner := _editor_owner()
 	if island_owner:
 		body.owner = island_owner
-		mi.owner = island_owner
-		col.owner = island_owner
+		for child in body.get_children():
+			child.owner = island_owner
 
 
 func _build_center_tower(h: float) -> void:
@@ -1243,31 +1277,14 @@ func _build_cover(pos: Vector3, rot_y: float, size: Vector3) -> void:
 
 
 func _build_floating_platform(pos: Vector3) -> void:
-	# Octagonal puck — cleanly readable as a discrete jump target without
-	# adding more boxes to the box-heavy palette.
-	var body := StaticBody3D.new()
-	body.position = pos
+	var body: StaticBody3D = DestructibleSolid.new()
+	body.setup_box(pos, Vector3(5.0, 0.6, 5.0), _mat_dark)
 	add_child(body)
-	var mi := MeshInstance3D.new()
-	var cyl := CylinderMesh.new()
-	cyl.radial_segments = 8
-	cyl.top_radius = 2.5
-	cyl.bottom_radius = 2.0
-	cyl.height = 0.6
-	mi.mesh = cyl
-	mi.material_override = _mat_dark
-	body.add_child(mi)
-	var col := CollisionShape3D.new()
-	var shape := CylinderShape3D.new()
-	shape.radius = 2.4
-	shape.height = 0.6
-	col.shape = shape
-	body.add_child(col)
 	var spawn_root := _editor_owner()
 	if spawn_root:
 		body.owner = spawn_root
-		mi.owner = spawn_root
-		col.owner = spawn_root
+		for child in body.get_children():
+			child.owner = spawn_root
 
 
 func _emit_spawnpoints() -> void:
