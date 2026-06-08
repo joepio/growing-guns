@@ -6,7 +6,6 @@ const DEV_PANEL_SCRIPT := preload("res://scripts/dev_panel.gd")
 const RENDER_PLAYER_SCRIPT := preload("res://scripts/render_player.gd")
 const SPLITSCREEN_MANAGER_SCRIPT := preload("res://scripts/splitscreen_manager.gd")
 const PICKUP_ITEM_SCRIPT := preload("res://scripts/pickup_item.gd")
-const WEAPON_NAME_SCRIPT := preload("res://scripts/weapon_name.gd")
 const ROUND_MODIFIERS_SCRIPT := preload("res://scripts/round_modifiers.gd")
 const AIR_STRIKE_SCRIPT := preload("res://scripts/air_strike.gd")
 const ION_CANNON_SCRIPT := preload("res://scripts/ion_cannon.gd")
@@ -1422,7 +1421,6 @@ func _start_round_now() -> void:
 		var kind: String = PICKUP_ITEM_SCRIPT.KINDS[randi() % PICKUP_ITEM_SCRIPT.KINDS.size()]
 		_spawn_pickup_item_with_fx.rpc(kind, _random_pickup_spawn_pos())
 	_show_round_modifier_on_screens.rpc()
-	_show_round_loadout_names.rpc()
 	if multiplayer.is_server() and ROUND_MODIFIERS_SCRIPT.lava_immediate(current_round_modifier):
 		_trigger_lava_leak(LAVA_LEAK_SPREAD_SECONDS)
 	_hide_rematch_overlay.rpc()
@@ -2094,29 +2092,6 @@ func _apply_round_modifier_environment() -> void:
 		_arena_env.fog_depth_curve = _fog_base_depth_curve
 		_arena_env.fog_aerial_perspective = _fog_base_aerial_perspective
 		_fog_base_saved = false
-
-@rpc("authority", "call_local", "reliable")
-func _show_round_loadout_names() -> void:
-	var ids: Array[int] = []
-	if _splitscreen and _splitscreen.is_enabled() and _splitscreen.has_method("_local_player_ids"):
-		ids = _splitscreen._local_player_ids()
-	elif local_player and is_instance_valid(local_player):
-		ids = [int(local_player.get("player_id"))]
-	elif multiplayer.get_unique_id() > 0:
-		ids = [multiplayer.get_unique_id()]
-	var lines: PackedStringArray = PackedStringArray()
-	for pid in ids:
-		var p := players_root.get_node_or_null(str(pid))
-		if p == null or p.get("weapon") == null:
-			continue
-		if p.weapon.applied_cards.is_empty():
-			continue
-		var pname: String = str(NetworkManager.players.get(pid, "Player"))
-		lines.append("%s: %s" % [pname, WEAPON_NAME_SCRIPT.generate(p.weapon)])
-	if lines.is_empty():
-		return
-	_announce.rpc("\n".join(lines), 2.2, 22)
-
 
 @rpc("authority", "call_local", "reliable")
 func _show_round_modifier_on_screens() -> void:
@@ -4309,12 +4284,6 @@ func _tab_player_row(id: int) -> Control:
 	hbox.add_child(ping_lbl)
 	row.add_child(hbox)
 	var p_node := players_root.get_node_or_null(str(id))
-	if p_node and p_node.get("weapon") != null and p_node.weapon.applied_cards.size() > 0:
-		var wname := Label.new()
-		wname.text = "    %s" % WEAPON_NAME_SCRIPT.generate(p_node.weapon)
-		wname.add_theme_font_size_override("font_size", 14)
-		wname.add_theme_color_override("font_color", Color(0.75, 0.9, 1.0))
-		row.add_child(wname)
 	# Cards as colored pills (empty for fresh players).
 	if p_node and p_node.get("weapon") != null:
 		var cards: Array = p_node.weapon.applied_cards
