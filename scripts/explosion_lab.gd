@@ -49,7 +49,6 @@ var _fx := {
 	"heat": true,
 	"shock": true,
 	"lights": true,
-	"fireball": true,
 	"smoke": true,
 	"fire_clouds": true,
 	"shards": true,
@@ -72,6 +71,7 @@ var _bs_frame := 0.0
 var _bs_cpu := 0.0
 var _bs_draw := 0.0
 var _bs_nodes := 0.0
+var _bs_smoke_layers := 0.0
 var _bs_n := 0
 
 func _ready() -> void:
@@ -85,7 +85,8 @@ func _ready() -> void:
 		_bench = true
 		_radius = 10.0
 		_stress_rate = _bench_rates[0]
-		print("[exlab] benchmark sweep starting (radius=%.0f)" % _radius)
+		Violence.reset_smoke_push_bench()
+		print("[exlab] benchmark sweep starting (radius=%.0f, smoke_push=on)" % _radius)
 
 func _exit_tree() -> void:
 	Engine.time_scale = 1.0
@@ -187,14 +188,21 @@ func _bench_tick(delta: float) -> void:
 		_bs_cpu += Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0
 		_bs_draw += Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME)
 		_bs_nodes += Performance.get_monitor(Performance.OBJECT_NODE_COUNT)
+		_bs_smoke_layers += get_tree().get_nodes_in_group("blast_smoke_layers").size()
 		_bs_n += 1
 	if _bench_t >= _BENCH_WARM + _BENCH_SAMPLE:
 		var n := maxf(_bs_n, 1)
-		print("[exlab] rate=%4.0f/s  fps=%5.1f  frame=%5.2fms  cpu=%5.2fms  draws=%6.0f  nodes=%6.0f" % [
-			_bench_rates[_bench_stage], _bs_fps / n, _bs_frame / n, _bs_cpu / n, _bs_draw / n, _bs_nodes / n])
+		var rate: float = _bench_rates[_bench_stage]
+		var pushes: int = Violence.bench_smoke_layers_pushed
+		var push_per_boom := float(pushes) / maxf(rate * _BENCH_SAMPLE, 0.001) if rate > 0.0 else 0.0
+		print("[exlab] rate=%4.0f/s  fps=%5.1f  frame=%5.2fms  cpu=%5.2fms  draws=%6.0f  nodes=%6.0f  smoke=%4.0f  pushes=%5d  push/boom=%.2f" % [
+			rate, _bs_fps / n, _bs_frame / n, _bs_cpu / n, _bs_draw / n, _bs_nodes / n,
+			_bs_smoke_layers / n, pushes, push_per_boom])
 		_bench_stage += 1
 		_bench_t = 0.0
-		_bs_fps = 0.0; _bs_frame = 0.0; _bs_cpu = 0.0; _bs_draw = 0.0; _bs_nodes = 0.0; _bs_n = 0
+		_bs_fps = 0.0; _bs_frame = 0.0; _bs_cpu = 0.0; _bs_draw = 0.0; _bs_nodes = 0.0
+		_bs_smoke_layers = 0.0; _bs_n = 0
+		Violence.reset_smoke_push_bench()
 		if _bench_stage >= _bench_rates.size():
 			print("[exlab] benchmark done")
 			get_tree().quit()
@@ -225,15 +233,14 @@ func _boom() -> void:
 	if _stress_rate < 8.0:
 		SFX.explosion(pos, _radius)
 	if _fx.heat:
-		Violence.spawn_heat_distortion(self, pos, _radius, clampf(0.3 + _radius * 0.012, 0.3, 0.7), clampf(_radius * 0.014, 0.06, 0.14))
+		Violence.spawn_heat_distortion(self, pos, _radius, Violence.blast_heat_distortion_duration(_radius), Violence.blast_heat_distortion_strength(_radius))
 	if _fx.shock:
 		Violence.spawn_shockwave_ring(self, pos, _radius)
 	if _fx.lights:
 		Violence._spawn_blast_flash_light(self, pos, _radius)
-		Violence._spawn_blast_core_light(self, pos, _radius, col)
-	if _fx.fireball:
-		Violence._spawn_blast_fireball(self, pos, _radius, col)
+		Violence._spawn_blast_fireball_light(self, pos, _radius, col)
 	if _fx.smoke:
+		Violence._push_nearby_blast_smoke(self, pos, _radius)
 		Violence.spawn_blast_fire_smoke(self, pos, _radius, col)
 	if _fx.fire_clouds:
 		Violence.spawn_blast_fire_clouds(self, pos, _radius, col)
@@ -313,7 +320,6 @@ func _build_ui() -> void:
 	_add_toggle(vb, "Heat distortion", "heat")
 	_add_toggle(vb, "Shockwave", "shock")
 	_add_toggle(vb, "Lights", "lights")
-	_add_toggle(vb, "Hot core (additive)", "fireball")
 	_add_toggle(vb, "Smoke clouds", "smoke")
 	_add_toggle(vb, "Fire clouds", "fire_clouds")
 	_add_toggle(vb, "Flame shards", "shards")

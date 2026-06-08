@@ -7,10 +7,8 @@ const GIB_CHUNK_COUNT := 5
 # Killing blow that would leave health here or lower → full body disintegrate.
 const OVERKILL_DISINTEGRATE_HEALTH := -50
 # Screen-space heat-shimmer + shockwave distortion read the framebuffer (a
-# back-buffer copy) — expensive, and barely visible on small rapid blasts. Only
-# spawn them for big "hero" blasts (airstrike-class); explosive-round / grenade
-# spam (radius ≈ 6) skips them entirely, which is the bulk of the cost.
-const BLAST_DISTORTION_MIN_RADIUS := 16.0
+# back-buffer copy) — expensive on rapid spam, so very small blasts still skip it.
+const BLAST_DISTORTION_MIN_RADIUS := 5.0
 
 # Single home for all death / ragdoll / impact / gore logic. Player.gd keeps
 # RPC entry points (must live on the Node) as thin pass-throughs and exposes
@@ -139,17 +137,11 @@ static func warmup_material(scene: Node, mat: Material) -> void:
 	t.timeout.connect(mi.queue_free)
 
 
-# Pre-compile the explosion fireball material PSO. The screen-space heat +
-# shock distortion shaders are warmed separately by grenade.warmup_shaders;
-# this covers the additive emissive shell every blast spawns via
-# _spawn_blast_fireball. (The cluster-pop core + phoenix column share their PSO
-# with the phoenix-column material, warmed in Player.warmup_phoenix_shaders.)
+# Pre-compile blast VFX materials. Screen-space heat/shock shaders are warmed
+# separately by grenade.warmup_shaders().
 static func warmup_blast_materials(scene: Node) -> void:
 	if scene == null:
 		return
-	var fireball := StandardMaterial3D.new()
-	_configure_blast_fireball_mat(fireball, Color(1.0, 0.78, 0.42), 0.88, 16.0)
-	warmup_material(scene, fireball)
 	# Fused fire/smoke billow runs on a MultiMesh — instanced rendering is its own
 	# PSO, so warm it with an actual (sub-pixel) MultiMesh, not a plain mesh.
 	var billow := ShaderMaterial.new()
@@ -1254,33 +1246,7 @@ static func _claim_smoke_burst() -> bool:
 	return true
 
 
-static func _configure_blast_fireball_mat(
-	mat: StandardMaterial3D,
-	hot: Color,
-	start_alpha: float,
-	emission_mult: float = 7.5,
-) -> void:
-	# Additive unshaded shell — low alpha keeps it see-through; emission carries
-	# the brightness so it still blooms.
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	mat.render_priority = 2
-	mat.albedo_color = Color(hot.r, hot.g, hot.b, start_alpha)
-	mat.emission_enabled = true
-	mat.emission = hot
-	mat.emission_energy_multiplier = emission_mult
-
-
 const BLAST_FRONT_SPEED := 343.0  # m/s — shockwave front + audio delay
-const BLAST_FIREBALL_MIN_GROW := 0.12
-const BLAST_FIREBALL_MAX_GROW := 0.32
-
-
-static func blast_expand_time(radius: float) -> float:
-	# Linear growth synced to sound speed, but clamped so small blasts stay visible.
-	return clampf(radius / BLAST_FRONT_SPEED, BLAST_FIREBALL_MIN_GROW, BLAST_FIREBALL_MAX_GROW)
 
 
 static func _blast_fireball_timing(radius: float) -> Dictionary:
@@ -1290,78 +1256,8 @@ static func _blast_fireball_timing(radius: float) -> Dictionary:
 	return {"grow": grow, "fade": fade}
 
 
-static func _animate_blast_fireball(
-	ball: MeshInstance3D,
-	mat: StandardMaterial3D,
-	hot: Color,
-	target_scale: float,
-	timing: Dictionary,
-) -> void:
-	var grow: float = timing.grow
-	var fade: float = timing.fade
-	var life: float = grow + fade
-	var start_hot := hot.lerp(Color(1.0, 1.0, 0.98), 0.65)
-	var mid_hot := hot.lerp(Color(1.0, 0.48, 0.08), 0.5)
-	var end_hot := hot.lerp(Color(1.0, 0.30, 0.04), 0.45)
-	# Very high emission energy → blown-out white-hot HDR core that blooms hard.
-	_configure_blast_fireball_mat(mat, start_hot, 0.98, 55.0)
-	ball.scale = Vector3.ONE * maxf(0.01, target_scale * 0.4)
-	# Additive brightness is gated by alpha, so the core must HOLD full alpha +
-	# emission for a beat (the bright HDR flash) before fading — otherwise it
-	# winks out before the eye registers it.
-	var hold := life * 0.28
-
-	# One sphere, one tween per property — nothing animates the same property
-	# twice, so it reads as a single fireball easing white→orange while getting
-	# steadily dimmer and more transparent. (The old version ran two overlapping
-	# albedo tweens whose alpha fought near the end, popping an orange ghost
-	# sphere back into view as it died.)
-	# Scale: expand linearly for the whole lifetime — constant rate, no easing
-	# slowdown and no plateau (keeps growing right up until it's freed).
-	ball.create_tween().tween_property(ball, "scale", Vector3.ONE * target_scale, life)\
-		.set_trans(Tween.TRANS_LINEAR)
-
-	# Emission hue: white → orange → deep orange across the full life.
-	var col_tw := ball.create_tween()
-	col_tw.tween_property(mat, "emission", mid_hot, life * 0.45)\
-		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
-	col_tw.tween_property(mat, "emission", end_hot, life * 0.55)\
-		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
-
-	# Albedo carries the same hue and a single clean alpha sweep 0.88 → 0 — one
-	# front-loaded ease (no mid-life plateau), so transparency rises smoothly and
-	# fast all the way to fully see-through.
-	var alb_tw := ball.create_tween()
-	alb_tw.tween_interval(hold)
-	alb_tw.tween_property(mat, "albedo_color", Color(end_hot.r, end_hot.g, end_hot.b, 0.0), life - hold)\
-		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
-
-	# Emission energy: hold the hot peak, then decay to nothing.
-	var em_tw := ball.create_tween()
-	em_tw.tween_interval(hold)
-	em_tw.tween_property(mat, "emission_energy_multiplier", 0.0, life - hold)\
-		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
-	em_tw.tween_callback(ball.queue_free)
-
-
-static func _spawn_blast_fireball(scene: Node, pos: Vector3, radius: float, color: Color = Color.WHITE) -> void:
-	var ball := MeshInstance3D.new()
-	var mesh := SphereMesh.new()
-	mesh.radius = 0.25
-	mesh.height = 0.5
-	ball.mesh = mesh
-	var mat := StandardMaterial3D.new()
-	ball.material_override = mat
-	_attach_world_3d(scene, ball, pos)
-	# Hot core stays compact — it's the bright HDR heart, smaller than the smoke
-	# body that surrounds it (see spawn_blast_fire_smoke).
-	var target_scale := maxf(0.01, (radius * 0.58) / mesh.radius)
-	var hot := color.lerp(Color(1.0, 0.78, 0.42), 0.45)
-	_animate_blast_fireball(ball, mat, hot, target_scale, _blast_fireball_timing(radius))
-
-
 # ---- Stylized flame shards + embers --------------------------------------
-# Radial flame petals + flying sparks layered on the fireball for a stylized
+# Radial flame petals + flying sparks for a stylized
 # "burst" read. Performance notes:
 #  - Meshes are built once and shared by every shard/ember ever (cached below).
 #  - Each blast uses ONE additive material (a single shared fade tween, not one
@@ -1564,6 +1460,8 @@ static func _basis_from_y(dir: Vector3) -> Basis:
 # opacity_peak), INSTANCE_CUSTOM = (seed, delay, heat-or-glow, 0).
 static var blast_smoke_count_scale: float = 1.0
 static var blast_fire_cloud_count_scale: float = 1.0
+static var bench_smoke_push_calls: int = 0
+static var bench_smoke_layers_pushed: int = 0
 static var _smoke_billow_mesh: Mesh = null
 static var _billow_mm_shader: Shader = null
 
@@ -1703,13 +1601,85 @@ static func _spawn_blast_billow(scene: Node, pos: Vector3, radius: float, count:
 		mat.set_shader_parameter("warm_glow", tint.lerp(Color(1.0, 0.45, 0.12), 0.6))
 	mmi.material_override = mat
 	var base := pos + Vector3.UP * (radius * 0.1)
-	_attach_world_3d(scene, mmi, base)
-	var atw := mmi.create_tween()
+	var host: Node3D = mmi
+	if is_fire:
+		_attach_world_3d(scene, mmi, base)
+	else:
+		var pivot := Node3D.new()
+		pivot.add_to_group("blast_smoke_layers")
+		pivot.set_meta("billow_layer_life", layer_life)
+		pivot.set_meta("billow_rise", rise)
+		pivot.set_meta("billow_mat", mat)
+		_attach_world_3d(scene, pivot, base)
+		pivot.add_child(mmi)
+		mmi.position = Vector3.ZERO
+		host = pivot
+	var atw := host.create_tween()
 	atw.tween_property(mat, "shader_parameter/anim", 1.0, layer_life).set_trans(Tween.TRANS_LINEAR)
-	atw.tween_callback(mmi.queue_free)
+	atw.tween_callback(host.queue_free)
 	if rise > 0.0:
-		mmi.create_tween().tween_property(mmi, "position", base + Vector3.UP * rise, layer_life)\
+		var rise_tw := host.create_tween()
+		rise_tw.tween_property(host, "global_position", base + Vector3.UP * rise, layer_life)\
 			.set_trans(Tween.TRANS_LINEAR)
+		if not is_fire:
+			host.set_meta("billow_rise_tween", rise_tw)
+
+
+static func reset_smoke_push_bench() -> void:
+	bench_smoke_push_calls = 0
+	bench_smoke_layers_pushed = 0
+
+
+static func _push_nearby_blast_smoke(scene: Node, blast_pos: Vector3, blast_radius: float) -> void:
+	if scene == null:
+		return
+	var tree := scene.get_tree()
+	if tree == null:
+		return
+	bench_smoke_push_calls += 1
+	var reach := blast_radius * 3.8 + 14.0
+	var strength := clampf(blast_radius / 8.0, 0.55, 2.8)
+	for node in tree.get_nodes_in_group("blast_smoke_layers"):
+		if not is_instance_valid(node) or not node is Node3D:
+			continue
+		var pivot := node as Node3D
+		var cloud_pos := pivot.global_position
+		var delta := cloud_pos - blast_pos
+		var dist_3d := delta.length()
+		if dist_3d >= reach:
+			continue
+		var closeness := 1.0 - dist_3d / reach
+		var away: Vector3
+		var horiz_sq := delta.x * delta.x + delta.z * delta.z
+		if horiz_sq < 1.0:
+			# Repeat hits on the same pad — old smoke sits on the blast centre.
+			var ang := float(pivot.get_instance_id() % 6283) / 1000.0
+			away = Vector3(cos(ang), 0.0, sin(ang))
+		else:
+			var horiz := sqrt(horiz_sq)
+			away = Vector3(delta.x / horiz, 0.0, delta.z / horiz)
+		var push := away * blast_radius * 1.15 * closeness * strength
+		push.y = blast_radius * 0.28 * closeness * strength
+		var layer_life: float = pivot.get_meta("billow_layer_life", 1.0)
+		var rise: float = pivot.get_meta("billow_rise", 0.0)
+		var mat: ShaderMaterial = pivot.get_meta("billow_mat", null)
+		var anim := 0.0
+		if mat:
+			anim = float(mat.get_shader_parameter("anim"))
+		var remaining := maxf(0.05, layer_life * (1.0 - anim))
+		var rise_remain := rise * (remaining / layer_life)
+		var rise_tw: Tween = pivot.get_meta("billow_rise_tween", null)
+		if rise_tw and rise_tw.is_valid():
+			rise_tw.kill()
+		var move_tw := pivot.create_tween()
+		move_tw.tween_property(
+			pivot,
+			"global_position",
+			pivot.global_position + push + Vector3.UP * rise_remain,
+			remaining,
+		).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		pivot.set_meta("billow_rise_tween", move_tw)
+		bench_smoke_layers_pushed += 1
 
 
 static func spawn_blast_fire_smoke(scene: Node, pos: Vector3, radius: float, color: Color) -> void:
@@ -1743,10 +1713,11 @@ static func spawn_blast_fire_clouds(scene: Node, pos: Vector3, radius: float, co
 
 const BLAST_LIGHT_FLASH_HOLD := 0.045   # ~1–3 rendered frames before decay
 const BLAST_LIGHT_FLASH_DECAY := 0.09
-const BLAST_LIGHT_CORE_HOLD := 0.03
-const BLAST_LIGHT_CORE_DECAY := 0.075
 const BLAST_LIGHT_HOT := Color(1.0, 0.995, 0.98)
 const BLAST_LIGHT_WARM := Color(1.0, 0.54, 0.12)
+const BLAST_FIREBALL_LIGHT_REF_RADIUS := 30.0
+const BLAST_FIREBALL_LIGHT_REF_PEAK := 178.0
+const BLAST_FIREBALL_LIGHT_SIZE_EXP := 0.92
 
 
 static func _tween_blast_light_pop(
@@ -1782,25 +1753,76 @@ static func _spawn_blast_flash_light(scene: Node, pos: Vector3, radius: float) -
 	_tween_blast_light_pop(flash, peak, BLAST_LIGHT_FLASH_HOLD, BLAST_LIGHT_FLASH_DECAY)
 
 
-static func _spawn_blast_core_light(scene: Node, pos: Vector3, radius: float, color: Color, energy_mult: float = 1.0) -> void:
-	var core_light := OmniLight3D.new()
-	var peak := (22.0 + radius * 2.5) * energy_mult
-	core_light.omni_range = clampf(radius * 2.2, 12.0, 65.0)
-	core_light.shadow_enabled = false
-	_attach_world_3d(scene, core_light, pos)
-	var hot := color.lerp(BLAST_LIGHT_HOT, 0.55)
-	var warm := color.lerp(BLAST_LIGHT_WARM, 0.45)
-	_tween_blast_light_pop(core_light, peak, BLAST_LIGHT_CORE_HOLD, BLAST_LIGHT_CORE_DECAY, hot, warm)
+static func _blast_fireball_light_peak(radius: float, energy_mult: float = 1.0) -> float:
+	# Sublinear vs blast radius — huge blasts stay hot, small pops stay subtle.
+	var t := clampf(radius / BLAST_FIREBALL_LIGHT_REF_RADIUS, 0.0, 1.0)
+	return BLAST_FIREBALL_LIGHT_REF_PEAK * pow(t, BLAST_FIREBALL_LIGHT_SIZE_EXP) * energy_mult
+
+
+static func _tween_blast_fireball_light(
+	light: OmniLight3D,
+	radius: float,
+	color: Color,
+	energy_mult: float = 1.0,
+	range_start: float = 12.0,
+	range_end: float = 40.0,
+) -> void:
+	# Spike → sustained glow (matches fireball hold) → fade out with the fireball.
+	var timing := _blast_fireball_timing(radius)
+	var grow: float = timing.grow
+	var fade: float = timing.fade
+	var life: float = grow + fade
+	var hold: float = life * 0.28
+	var sustain := _blast_fireball_light_peak(radius, energy_mult)
+	var spike := sustain * 1.45
+	var spike_s := minf(0.045, grow * 0.2)
+	var settle_s := minf(0.055, grow * 0.25)
+	var sustain_hold := maxf(0.0, hold - spike_s - settle_s)
+	var fade_s := maxf(0.001, life - hold)
+	var hot := color.lerp(BLAST_LIGHT_HOT, 0.45)
+	var warm := color.lerp(BLAST_LIGHT_WARM, 0.5)
+	var end_warm := hot.lerp(BLAST_LIGHT_WARM, 0.65)
+	light.light_color = hot
+	light.light_energy = spike
+	light.omni_range = range_start
+	var em_tw := light.create_tween()
+	em_tw.tween_interval(spike_s)
+	em_tw.tween_property(light, "light_energy", sustain, settle_s)\
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	if sustain_hold > 0.0001:
+		em_tw.tween_interval(sustain_hold)
+	em_tw.tween_property(light, "light_energy", 0.0, fade_s)\
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	em_tw.tween_callback(light.queue_free)
+	light.create_tween().tween_property(light, "omni_range", range_end, life)\
+		.set_trans(Tween.TRANS_LINEAR)
+	var col_tw := light.create_tween()
+	col_tw.tween_property(light, "light_color", warm, life * 0.45)\
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	col_tw.tween_property(light, "light_color", end_warm, life * 0.55)\
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
+
+
+static func _spawn_blast_fireball_light(scene: Node, pos: Vector3, radius: float, color: Color, energy_mult: float = 1.0) -> void:
+	var glow := OmniLight3D.new()
+	var ball_radius := maxf(0.5, radius * 0.58)
+	var range_start := clampf(ball_radius * 1.2, 10.0, 36.0)
+	var range_end := clampf(ball_radius * 3.8, 16.0, 92.0)
+	glow.omni_attenuation = 0.42
+	glow.shadow_enabled = true
+	glow.omni_shadow_mode = OmniLight3D.SHADOW_DUAL_PARABOLOID
+	glow.shadow_bias = 0.08
+	glow.shadow_normal_bias = 1.0
+	_attach_world_3d(scene, glow, pos)
+	_tween_blast_fireball_light(glow, radius, color, energy_mult, range_start, range_end)
 
 
 static func _spawn_cheap_blast_flare(scene: Node, pos: Vector3, radius: float, color: Color) -> void:
 	if scene == null or radius <= 0.0 or not _claim_cheap_blast():
 		return
-	var expand_time := blast_expand_time(radius)
-	_spawn_blast_fireball(scene, pos, radius, color)
+	_spawn_blast_fireball_light(scene, pos, radius, color, 0.65)
 	if _claim_cheap_light():
 		_spawn_blast_flash_light(scene, pos, radius)
-		_spawn_blast_core_light(scene, pos, radius, color, 0.55)
 
 
 # Bigger blasts expand further, hold a hotter core, and pump a brighter
@@ -1828,18 +1850,17 @@ static func spawn_bullet_blast(scene: Node, pos: Vector3, radius: float, color: 
 	# Screen-space distortion (back-buffer read) only on big hero blasts — strong
 	# and visible there, skipped entirely on small/rapid spam (perf).
 	if radius >= BLAST_DISTORTION_MIN_RADIUS:
-		spawn_heat_distortion(scene, pos, radius, clampf(0.3 + radius * 0.012, 0.3, 0.7), clampf(radius * 0.014, 0.06, 0.14))
+		spawn_heat_distortion(scene, pos, radius, blast_heat_distortion_duration(radius), blast_heat_distortion_strength(radius))
 		spawn_shockwave_ring(scene, pos, radius)
 	# Drop scorch rings on every nearby surface (floor under midair blasts,
 	# walls beside corner blasts, ceiling above ground-level pops).
 	spawn_blast_scorches(scene, pos, radius)
 
-	# Lights first, then fireball meshes on top (render_priority 2).
 	_spawn_blast_flash_light(scene, pos, radius)
-	_spawn_blast_core_light(scene, pos, radius, color)
-	_spawn_blast_fireball(scene, pos, radius, color)
+	_spawn_blast_fireball_light(scene, pos, radius, color)
 	# Stylized burst layers — fused fire/smoke body, radial flame petals, embers.
 	if not (BenchFlags.active and BenchFlags.no_explosion_visuals):
+		_push_nearby_blast_smoke(scene, pos, radius)
 		spawn_blast_fire_smoke(scene, pos, radius, color)
 		spawn_blast_fire_clouds(scene, pos, radius, color)
 		spawn_blast_flame_shards(scene, pos, radius, color)
@@ -1994,6 +2015,14 @@ static func _emit_delayed_smoke_puff(scene: Node, ground: Vector3, radius: float
 		Color(0.34, 0.32, 0.30, randf_range(0.18, 0.30)),
 	)
 
+static func blast_heat_distortion_duration(radius: float) -> float:
+	return clampf(0.42 + radius * 0.018, 0.42, 0.95)
+
+
+static func blast_heat_distortion_strength(radius: float) -> float:
+	return clampf(radius * 0.026, 0.11, 0.26)
+
+
 static func spawn_heat_distortion(scene: Node, pos: Vector3, radius: float, duration: float, strength: float) -> void:
 	if scene == null:
 		return
@@ -2018,25 +2047,26 @@ static func spawn_heat_distortion(scene: Node, pos: Vector3, radius: float, dura
 
 			void fragment() {
 				vec3 n = normalize((VIEW_MATRIX * vec4(NORMAL, 0.0)).xyz);
-				float fresnel = pow(1.0 - abs(dot(normalize(VIEW), NORMAL)), 1.6);
-				vec2 offset = n.xy * distortion_strength * fresnel;
-				vec2 zoom = (SCREEN_UV - vec2(0.5)) * zoom_strength * fresnel;
+				float fresnel = pow(1.0 - abs(dot(normalize(VIEW), NORMAL)), 1.1);
+				float weight = 0.38 + 0.62 * fresnel;
+				vec2 offset = n.xy * distortion_strength * weight;
+				vec2 zoom = (SCREEN_UV - vec2(0.5)) * zoom_strength * weight;
 				vec2 uv = SCREEN_UV - zoom + offset;
 				vec3 col = texture(screen_tex, uv).rgb;
 				ALBEDO = col;
-				ALPHA = opacity * fresnel;
+				ALPHA = opacity * weight;
 			}
 		"""
 	var mat := ShaderMaterial.new()
 	mat.shader = _heat_shader
-	var heat_distort := strength * 3.0
+	var heat_distort := strength * 5.2
 	mat.set_shader_parameter("distortion_strength", heat_distort)
-	mat.set_shader_parameter("zoom_strength", strength * 1.4)
-	mat.set_shader_parameter("opacity", 0.85)
+	mat.set_shader_parameter("zoom_strength", strength * 2.2)
+	mat.set_shader_parameter("opacity", 1.0)
 	shell.material_override = mat
 	_attach_world_3d(scene, shell, pos)
 
-	var target_scale := Vector3.ONE * maxf(0.01, (radius * 1.85) / _heat_mesh.radius)
+	var target_scale := Vector3.ONE * maxf(0.01, (radius * 2.2) / _heat_mesh.radius)
 	var tw := shell.create_tween().set_parallel(true)
 	tw.tween_property(shell, "scale", target_scale, duration)\
 		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
@@ -2054,9 +2084,9 @@ static func spawn_heat_distortion(scene: Node, pos: Vector3, radius: float, dura
 	).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
 	tw.tween_method(
 		func(v: float) -> void: mat.set_shader_parameter("opacity", v),
-		0.85,
+		1.0,
 		0.0,
-		duration * 0.8
+		duration * 0.85
 	).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
 	tw.chain().tween_callback(shell.queue_free)
 
