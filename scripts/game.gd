@@ -368,9 +368,17 @@ func _ready() -> void:
 		if not multiplayer.peer_connected.is_connected(_on_peer_connected):
 			multiplayer.peer_connected.connect(_on_peer_connected)
 		multiplayer.peer_disconnected.connect(_on_peer_disconnected)
+		var spawn_used: Array[Vector3] = []
 		for pid in NetworkManager.players:
 			round_wins[pid] = 0
-			_spawn_player(pid, NetworkManager.players[pid])
+			if players_root.has_node(str(pid)):
+				var existing := players_root.get_node(str(pid)) as Node3D
+				if existing:
+					spawn_used.append(existing.global_position)
+				continue
+			var pick := _pick_spawn(spawn_used)
+			spawn_used.append(pick["pos"])
+			_do_spawn.rpc(pid, NetworkManager.players[pid], pick["pos"], false, -1, false, pick["yaw"])
 
 		var bot_requested: bool = NetworkManager.has_meta("spawn_bot_on_start") and NetworkManager.get_meta("spawn_bot_on_start")
 		var requested_count: int = int(NetworkManager.get_meta("bot_count_on_start", 1)) if bot_requested else 0
@@ -853,7 +861,8 @@ func _request_spawn(pname: String) -> void:
 	_maybe_start_match()
 
 func _spawn_player(id: int, pname: String) -> void:
-	# Avoid dropping a new player on top of anyone already in the arena.
+	if players_root.has_node(str(id)):
+		return
 	var pick := _pick_spawn(_current_player_positions())
 	_do_spawn.rpc(id, pname, pick["pos"], false, -1, false, pick["yaw"])
 
@@ -932,48 +941,103 @@ func _pick_spawn(avoid: Array[Vector3] = []) -> Dictionary:
 	var best_pos: Vector3 = Vector3.ZERO
 	var best_yaw: float = 0.0
 	var best_score: float = -INF
+	var relaxed_pos: Vector3 = Vector3.ZERO
+	var relaxed_yaw: float = 0.0
+	var relaxed_min_d: float = -INF
 	var found_clear: bool = false
+	var found_spaced: bool = false
 	for spawn in spawns:
 		var pos: Vector3 = spawn.global_position
 		if not _spawn_is_valid(pos):
 			continue
 		found_clear = true
 		var min_d: float = _min_distance(pos, avoid) if not avoid.is_empty() else 100.0
-		# Heavy penalty when below the SPAWN_MIN_SPACING bar — but candidate
-		# stays in contention so we have something to fall back to.
-		if min_d < SPAWN_MIN_SPACING:
-			min_d *= 0.1
 		var height_penalty: float = absf(pos.y - target_y) * 1.5 if has_target_y else 0.0
 		var score: float = min_d - height_penalty
-		if score > best_score:
-			best_score = score
-			best_pos = pos
-			best_yaw = _spawn_yaw_at(pos, arena_origin)
+		if min_d >= SPAWN_MIN_SPACING:
+			found_spaced = true
+			if score > best_score:
+				best_score = score
+				best_pos = pos
+				best_yaw = _spawn_yaw_at(pos, arena_origin)
+		elif score > relaxed_min_d:
+			relaxed_min_d = score
+			relaxed_pos = pos
+			relaxed_yaw = _spawn_yaw_at(pos, arena_origin)
 
-	if found_clear:
-		return {"pos": best_pos, "yaw": best_yaw}
+	if found_clear and found_spaced:
+		return _enforce_spawn_spacing(best_pos, best_yaw, avoid)
+	if found_clear and relaxed_min_d > -INF:
+		return _enforce_spawn_spacing(relaxed_pos, relaxed_yaw, avoid)
 	# Last-ditch fallback: every spawn was blocked by an obstacle or failed
 	# validation. Never return a raw spawnpoint — on lava-platform maps that
 	# can land in open lava or inside cover columns.
 	for spawn in spawns:
 		var pos: Vector3 = (spawn as Node3D).global_position
 		if _spawn_is_valid(pos):
-			return {"pos": pos, "yaw": _spawn_yaw_at(pos, arena_origin)}
+			return _enforce_spawn_spacing(pos, _spawn_yaw_at(pos, arena_origin), avoid)
 	if arena and arena.has_method("is_all_floor_lava") and arena.is_all_floor_lava():
 		if arena.has_method("get_lava_fallback_spawn_world"):
 			var fb_lava: Vector3 = arena.get_lava_fallback_spawn_world()
 			if _spawn_is_valid(fb_lava):
-				return {"pos": fb_lava, "yaw": _spawn_yaw_at(fb_lava, arena_origin)}
-	return {"pos": arena_origin + Vector3(0.0, 8.0, 0.0), "yaw": 0.0}
+				return _enforce_spawn_spacing(fb_lava, _spawn_yaw_at(fb_lava, arena_origin), avoid)
+	return _enforce_spawn_spacing(arena_origin + Vector3(0.0, 8.0, 0.0), 0.0, avoid)
 
 
 func _min_distance(pos: Vector3, others: Array[Vector3]) -> float:
 	var best: float = INF
 	for o in others:
-		var d: float = pos.distance_to(o)
+		var d: float = Vector2(pos.x, pos.z).distance_to(Vector2(o.x, o.z))
 		if d < best:
 			best = d
 	return best
+
+
+func _enforce_spawn_spacing(pos: Vector3, yaw: float, avoid: Array[Vector3]) -> Dictionary:
+	if avoid.is_empty() or _min_distance(pos, avoid) >= SPAWN_MIN_SPACING:
+		if _spawn_is_valid(pos):
+			return {"pos": pos, "yaw": yaw}
+		return _lava_safe_spawn_fallback(yaw, avoid)
+	var out := pos
+	var out_yaw := yaw
+	for _attempt in 16:
+		if _min_distance(out, avoid) >= SPAWN_MIN_SPACING and _spawn_is_valid(out):
+			return {"pos": out, "yaw": out_yaw}
+		var nearest: Vector3 = avoid[0]
+		var nearest_d: float = _min_distance(out, [nearest])
+		for other: Vector3 in avoid:
+			var d: float = _min_distance(out, [other])
+			if d < nearest_d:
+				nearest_d = d
+				nearest = other
+		var away := Vector3(out.x - nearest.x, 0.0, out.z - nearest.z)
+		if away.length_squared() < 0.04:
+			var angle: float = yaw + float(_attempt + 1) * (TAU / 8.0)
+			away = Vector3(cos(angle), 0.0, sin(angle))
+		away = away.normalized()
+		var push: float = maxf(SPAWN_MIN_SPACING - nearest_d + 0.75, 1.25)
+		var candidate := pos + away * push * float(_attempt + 1)
+		candidate.y = pos.y
+		if _spawn_is_valid(candidate):
+			out = candidate
+			var arena: Node = get_node_or_null("Arena")
+			var arena_origin: Vector3 = (arena as Node3D).global_position if arena and arena is Node3D else Vector3.ZERO
+			out_yaw = _spawn_yaw_at(out, arena_origin)
+	if _spawn_is_valid(out):
+		return {"pos": out, "yaw": out_yaw}
+	if _spawn_is_valid(pos):
+		return {"pos": pos, "yaw": yaw}
+	return _lava_safe_spawn_fallback(yaw, avoid)
+
+
+func _lava_safe_spawn_fallback(yaw: float, avoid: Array[Vector3]) -> Dictionary:
+	var arena: Node = get_node_or_null("Arena")
+	var arena_origin: Vector3 = (arena as Node3D).global_position if arena and arena is Node3D else Vector3.ZERO
+	if arena and arena.has_method("get_lava_fallback_spawn_world"):
+		var fb: Vector3 = arena.get_lava_fallback_spawn_world()
+		if _spawn_is_valid(fb):
+			return {"pos": fb, "yaw": _spawn_yaw_at(fb, arena_origin)}
+	return {"pos": arena_origin + Vector3(0.0, 8.0, 0.0), "yaw": yaw}
 
 
 func _spawn_yaw_at(pos: Vector3, arena_origin: Vector3) -> float:
@@ -1123,7 +1187,8 @@ func _spawn_bots(count: int) -> void:
 		NetworkManager.players[pid] = bot_name
 		round_wins[pid] = 0
 		_ping_ms_by_player[pid] = -1
-		var bot_pick := _pick_spawn(_current_player_positions())
+		var bot_avoid := _current_player_positions()
+		var bot_pick := _pick_spawn(bot_avoid)
 		_do_spawn.rpc(pid, bot_name, bot_pick["pos"], true, -1, false, bot_pick["yaw"], appearance_seed)
 		spawned_any = true
 	if spawned_any:
