@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://deststressbench01"]
+
+[ext_resource type="Script" path="res://scripts/destruction_stress_bench.gd" id="1_bench"]
+
+[node name="DestructionStressBench" type="Node3D"]
+script = ExtResource("1_bench")

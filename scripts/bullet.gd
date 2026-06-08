@@ -89,10 +89,10 @@ func setup(origin: Vector3, dir: Vector3, shooter: int, w: Weapon, p_last_in_mag
 	mat.albedo_color = Color(tracer_color.r, tracer_color.g, tracer_color.b, tracer_alpha)
 	mat.emission_enabled = true
 	mat.emission = tracer_color
-	mat.emission_energy_multiplier = clampf(1.6 * weapon_stats.get_bullet_scale(), 1.2, 4.5) * (0.45 if silenced else 1.0)
+	mat.emission_energy_multiplier = clampf(1.6 * weapon_stats.get_bullet_scale_for_shot(last_in_mag), 1.2, 4.5) * (0.45 if silenced else 1.0)
 
 	# Head — a small bright dot that always sits at the bullet's tip.
-	var s: float = weapon_stats.get_bullet_scale()
+	var s: float = weapon_stats.get_bullet_scale_for_shot(last_in_mag)
 	var head_inst := MeshInstance3D.new()
 	var head_box := BoxMesh.new()
 	head_box.size = Vector3(0.08 * s, 0.08 * s, 0.14 * s)
@@ -204,9 +204,7 @@ func _do_hitscan() -> void:
 	queue_free()
 
 func _current_damage() -> float:
-	var dmg := weapon_stats.get_damage()
-	if last_in_mag and weapon_stats.last_shot_damage_mult > 1.0:
-		dmg *= weapon_stats.last_shot_damage_mult
+	var dmg := weapon_stats.get_damage_for_shot(last_in_mag)
 	if weapon_stats.grow_damage_per_meter > 0.0:
 		dmg *= 1.0 + distance_traveled * weapon_stats.grow_damage_per_meter
 	if ricochet_hits > 0 and weapon_stats.ricochet_damage_mult > 1.0:
@@ -264,7 +262,7 @@ func _maybe_zip_by() -> void:
 		# panning reflect the bullet's nearest point to the listener, not
 		# whichever side of it we happen to sample on this tick.
 		var fire_pos: Vector3 = closest_pos
-		SFX.bullet_zip(speed, weapon_stats.get_bullet_scale(), fire_pos)
+		SFX.bullet_zip(speed, weapon_stats.get_bullet_scale_for_shot(last_in_mag), fire_pos)
 		# Tell the server about the near miss so it can lift the music to
 		# "high" — this fires from whichever peer the camera is local to.
 		var scene := get_tree().current_scene
@@ -349,7 +347,7 @@ func _handle_collision(result: Dictionary) -> void:
 		if is_head_hit:
 			Violence.spawn_headshot_spray(get_tree().current_scene, hit_pos, direction, blood_ratio)
 	else:
-		shooter_node.call("_spawn_impact", hit_pos, weapon_stats.bullet_color, weapon_stats.get_bullet_scale(), impact_dmg_ratio, normal, weapon_stats.explosive_radius, collider)
+		shooter_node.call("_spawn_impact", hit_pos, weapon_stats.bullet_color, weapon_stats.get_bullet_scale_for_shot(last_in_mag), impact_dmg_ratio, normal, weapon_stats.explosive_radius, collider)
 		SFX.impact(hit_pos, dmg_ratio)
 		DestructibleManager.carve_from_hit(
 			hit_pos,

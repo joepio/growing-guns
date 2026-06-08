@@ -2332,12 +2332,20 @@ static var _crater_fifo: Array[Node] = []
 static var _hot_extras_active: int = 0
 static var _blast_craters_active: int = 0
 static var _impact_chip_meshes: Array[Mesh] = []
+const DEBRIS_GRAVITY := 16.0
 # Per-frame allocation budget — caps spawn rate from a UZI burst.
 static var _crater_frame_id: int = -1
 static var _craters_this_frame: int = 0
 const MAX_DESTRUCT_DEBRIS_PER_FRAME := 80
+const MAX_DESTRUCT_DEBRIS_PER_FRAME_CHEAP := 140
+const MAX_PREMIUM_DEBRIS_BURSTS_PER_FRAME := 10
+const MAX_DEBRIS_QUEUE_PREMIUM := 14
 static var _debris_frame_id: int = -1
 static var _debris_this_frame: int = 0
+static var _debris_burst_frame_id: int = -1
+static var _premium_bursts_this_frame: int = 0
+static var _debris_premium_total: int = 0
+static var _debris_cheap_total: int = 0
 static var _debris_queue: Array[Dictionary] = []
 
 static func _get_crater_mesh() -> Mesh:
@@ -2706,6 +2714,109 @@ static func _animate_impact_chip(
 	mat.albedo_color = Color(col.r, col.g, col.b, start_alpha * (1.0 - smoothstep(0.96, 1.0, t)))
 
 
+# Parabolic arc: constant initial velocity + uniform downward acceleration.
+# Not a bezier — this is the textbook projectile equation sampled over elapsed time.
+static func _animate_debris_fragment(
+	t_norm: float,
+	chip: MeshInstance3D,
+	start: Vector3,
+	initial_velocity: Vector3,
+	flight_time: float,
+	impact_pos: Vector3,
+	start_rot: Vector3,
+	end_rot: Vector3,
+) -> void:
+	if not is_instance_valid(chip):
+		return
+	if t_norm >= 1.0:
+		chip.global_position = impact_pos
+		chip.rotation = end_rot
+		return
+	var elapsed: float = t_norm * flight_time
+	var gravity_accel := Vector3.DOWN * DEBRIS_GRAVITY
+	chip.global_position = (
+		start
+		+ initial_velocity * elapsed
+		+ gravity_accel * (0.5 * elapsed * elapsed)
+	)
+	chip.rotation = start_rot.lerp(end_rot, t_norm)
+
+
+static func _debris_ground_y_at(scene: Node, probe: Vector3) -> float:
+	if scene == null or not is_instance_valid(scene):
+		return probe.y - 12.0
+	var world: World3D = scene.get_world_3d()
+	if world == null:
+		return probe.y - 12.0
+	var space: PhysicsDirectSpaceState3D = world.direct_space_state
+	var from := probe + Vector3.UP * 48.0
+	var to := probe + Vector3.DOWN * 120.0
+	var q := PhysicsRayQueryParameters3D.create(from, to)
+	q.collision_mask = 1
+	var hit: Dictionary = space.intersect_ray(q)
+	if hit.is_empty():
+		return probe.y - 12.0
+	return float(hit.position.y)
+
+
+static func _debris_flight_time_to_ground(start_y: float, vel_y: float, ground_y: float) -> float:
+	var drop: float = start_y - ground_y
+	if drop <= 0.05:
+		return 0.35
+	var disc: float = vel_y * vel_y + 2.0 * DEBRIS_GRAVITY * drop
+	if disc <= 0.0:
+		return sqrt(2.0 * drop / DEBRIS_GRAVITY)
+	return maxf(0.25, (vel_y + sqrt(disc)) / DEBRIS_GRAVITY)
+
+
+static func _debris_impact_position(
+	start: Vector3,
+	initial_velocity: Vector3,
+	flight_time: float,
+	ground_y: float,
+) -> Vector3:
+	var gravity_accel := Vector3.DOWN * DEBRIS_GRAVITY
+	var impact := (
+		start
+		+ initial_velocity * flight_time
+		+ gravity_accel * (0.5 * flight_time * flight_time)
+	)
+	impact.y = ground_y
+	return impact
+
+
+static func _debris_fade_mat(t: float, mat: StandardMaterial3D, start_alpha: float) -> void:
+	if mat == null:
+		return
+	var col := mat.albedo_color
+	mat.albedo_color = Color(col.r, col.g, col.b, start_alpha * (1.0 - t))
+
+
+static func _debris_bury_after_impact(
+	chip: MeshInstance3D,
+	mat: StandardMaterial3D,
+	impact_pos: Vector3,
+	start_alpha: float,
+) -> void:
+	if not is_instance_valid(chip):
+		return
+	chip.global_position = impact_pos
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	var bury_depth: float = randf_range(0.18, 0.55)
+	var buried := impact_pos + Vector3.DOWN * bury_depth
+	var tw := chip.create_tween()
+	tw.tween_property(chip, "global_position", buried, randf_range(0.14, 0.26))\
+		.set_trans(Tween.TRANS_QUAD)\
+		.set_ease(Tween.EASE_IN)
+	tw.parallel().tween_method(
+		Callable(Violence, "_debris_fade_mat").bind(mat, start_alpha),
+		0.0,
+		1.0,
+		randf_range(0.22, 0.38),
+	).set_trans(Tween.TRANS_LINEAR)
+	tw.tween_callback(chip.queue_free)
+
+
 static func _spawn_impact_rock_chips(scene: Node, pos: Vector3, normal: Vector3, scale_f: float, dmg_ratio: float, collider: Node, bullet_color: Color) -> void:
 	if scene == null or (BenchFlags.active and BenchFlags.no_explosion_visuals):
 		return
@@ -2779,22 +2890,35 @@ static func _spawn_impact_rock_chips(scene: Node, pos: Vector3, normal: Vector3,
 		tw.tween_callback(chip.queue_free)
 
 
-static func _destruct_debris_budget_remaining() -> int:
-	if BenchFlags.active and BenchFlags.no_explosion_visuals:
-		return 0
+static func _sync_debris_frame_ids() -> void:
 	var fid: int = Engine.get_physics_frames()
 	if fid != _debris_frame_id:
 		_debris_frame_id = fid
 		_debris_this_frame = 0
-	return maxi(0, MAX_DESTRUCT_DEBRIS_PER_FRAME - _debris_this_frame)
+	if fid != _debris_burst_frame_id:
+		_debris_burst_frame_id = fid
+		_premium_bursts_this_frame = 0
+
+
+static func _destruct_debris_budget_remaining(tier: String = "premium") -> int:
+	if BenchFlags.active and BenchFlags.no_explosion_visuals:
+		return 0
+	_sync_debris_frame_ids()
+	var cap: int = (
+		MAX_DESTRUCT_DEBRIS_PER_FRAME_CHEAP
+		if tier == "cheap"
+		else MAX_DESTRUCT_DEBRIS_PER_FRAME
+	)
+	return maxi(0, cap - _debris_this_frame)
 
 
 static func _consume_destruct_debris_budget(count: int) -> void:
 	_debris_this_frame += count
 
 
-# Cheap rubble when destructible chunks break off — queued across frames so big
-# blasts still spray chips after the per-frame budget is spent.
+# Cheap rubble when destructible chunks break off — one parabolic fragment burst
+# per carve, no physics bodies. Count + size scale with blast radius and chunks
+# removed. Queued across frames when budget tight.
 static func spawn_destruction_debris(
 	scene: Node,
 	global_pos: Vector3,
@@ -2803,10 +2927,22 @@ static func spawn_destruction_debris(
 	color: Color,
 	blast_world: Vector3,
 	blast_radius: float,
-	chip_mult: float = 1.0,
+	chunks_removed: int = 1,
 ) -> void:
 	if scene == null or block_size.length_squared() < 0.0001:
 		return
+	var tier: String = _pick_debris_tier(blast_radius, chunks_removed)
+	var chip_count: int = (
+		_debris_chip_count_cheap(blast_radius, chunks_removed)
+		if tier == "cheap"
+		else _debris_chip_count_for_blast(blast_radius, chunks_removed)
+	)
+	if tier == "premium":
+		_sync_debris_frame_ids()
+		_premium_bursts_this_frame += 1
+		_debris_premium_total += 1
+	else:
+		_debris_cheap_total += 1
 	_debris_queue.append({
 		"scene": scene,
 		"global_pos": global_pos,
@@ -2815,17 +2951,20 @@ static func spawn_destruction_debris(
 		"color": color,
 		"blast_world": blast_world,
 		"blast_radius": blast_radius,
-		"chip_mult": chip_mult,
+		"chunks_removed": maxi(1, chunks_removed),
+		"tier": tier,
+		"chip_count": chip_count,
 		"next_i": 0,
 	})
 
 
 static func flush_destruction_debris() -> void:
 	while not _debris_queue.is_empty():
-		var budget: int = _destruct_debris_budget_remaining()
+		var job: Dictionary = _debris_queue[0]
+		var tier: String = str(job.get("tier", "premium"))
+		var budget: int = _destruct_debris_budget_remaining(tier)
 		if budget <= 0:
 			break
-		var job: Dictionary = _debris_queue[0]
 		var spawned: int = _spawn_debris_job(job, budget)
 		if spawned < 0:
 			_debris_queue.pop_front()
@@ -2837,35 +2976,106 @@ static func flush_destruction_debris() -> void:
 			_debris_queue.pop_front()
 
 
-static func _debris_launch_direction(away: Vector3, blast_heavy: float) -> Vector3:
-	# Full-sphere spray; big blasts only nudge outward instead of locking to "away".
+static func debug_debris_queue_len() -> int:
+	return _debris_queue.size()
+
+
+static func debug_debris_premium_bursts() -> int:
+	return _debris_premium_total
+
+
+static func debug_debris_cheap_bursts() -> int:
+	return _debris_cheap_total
+
+
+static func reset_debris_bench_counters() -> void:
+	_debris_premium_total = 0
+	_debris_cheap_total = 0
+
+
+static func _pick_debris_tier(blast_radius: float, chunks_removed: int) -> String:
+	if BenchFlags.active and BenchFlags.debris_cheap_only:
+		return "cheap"
+	if BenchFlags.active and BenchFlags.debris_premium_only:
+		return "premium"
+	_sync_debris_frame_ids()
+	if _debris_queue.size() >= MAX_DEBRIS_QUEUE_PREMIUM:
+		return "cheap"
+	if _premium_bursts_this_frame >= MAX_PREMIUM_DEBRIS_BURSTS_PER_FRAME:
+		return "cheap"
+	# Tiny chip-off pops still get the full treatment when the pipe is quiet.
+	var sev: float = _debris_blast_severity(blast_radius, chunks_removed)
+	if sev < 0.22 and chunks_removed <= 2:
+		return "premium"
+	if sev >= 0.55 and _debris_queue.size() >= 6:
+		return "cheap"
+	return "premium"
+
+
+static func _debris_chip_count_cheap(blast_radius: float, chunks_removed: int) -> int:
+	var sev: float = _debris_blast_severity(blast_radius, chunks_removed)
+	var count: float = lerpf(3.0, 7.0, pow(sev, 0.75))
+	count += float(maxi(1, chunks_removed)) * 0.08
+	return clampi(int(round(count)), 2, 8)
+
+
+static func _debris_blast_severity(blast_radius: float, chunks_removed: int) -> float:
+	var radius_t: float = clampf((blast_radius - 0.45) / 10.0, 0.0, 1.0)
+	var chunk_t: float = clampf(float(chunks_removed) / 16.0, 0.0, 1.0)
+	return clampf(maxf(radius_t, chunk_t * 0.75), 0.0, 1.0)
+
+
+static func _debris_chip_count_for_blast(blast_radius: float, chunks_removed: int) -> int:
+	var sev: float = _debris_blast_severity(blast_radius, chunks_removed)
+	var count: float = lerpf(4.0, 26.0, pow(sev, 0.82))
+	count += float(maxi(1, chunks_removed)) * lerpf(0.04, 0.32, sev)
+	return clampi(int(round(count)), 3, 28)
+
+
+static func _debris_fragment_longest_axis(blast_radius: float, block_size: Vector3) -> float:
+	var sev: float = clampf((blast_radius - 0.45) / 10.0, 0.0, 1.0)
+	var chunk_hint: float = clampf(block_size.length() / 4.2, 0.7, 1.25)
+	var base_lo: float = lerpf(0.11, 0.28, sev) * chunk_hint
+	var base_hi: float = lerpf(0.2, 0.62, sev) * chunk_hint
+	# Heavier blasts occasionally throw a chunky shard.
+	if randf() < lerpf(0.04, 0.26, sev):
+		return randf_range(lerpf(0.42, 0.62, sev), lerpf(0.72, 1.15, sev)) * chunk_hint
+	return randf_range(base_lo, base_hi) * randf_range(0.82, 1.22)
+
+
+static func _debris_launch_horizontal(away: Vector3, blast_heavy: float) -> Vector3:
+	# Mostly sideways spray; gravity handles the downward arc separately.
 	for _attempt in 8:
 		var rnd := Vector3(
 			randf_range(-1.0, 1.0),
-			randf_range(-0.35, 1.0),
+			0.0,
 			randf_range(-1.0, 1.0),
 		)
 		if rnd.length_squared() < 0.08:
 			continue
-		var outward: float = randf_range(-0.25, 0.65) * lerpf(0.35, 1.0, blast_heavy)
-		return (rnd.normalized() + away * outward + Vector3.UP * randf_range(-0.08, 0.25)).normalized()
-	return away
-
-
-static func _debris_chip_count(block_size: Vector3, chip_mult: float) -> int:
-	var vol: float = block_size.x * block_size.y * block_size.z
-	var mult: float = maxf(chip_mult, 0.25)
-	return clampi(int(round(vol / 0.06 * mult)), 1, int(5.0 * mult))
+		var outward: float = randf_range(0.35, 1.0) * lerpf(0.45, 1.0, blast_heavy)
+		var dir := (rnd.normalized() + away * outward)
+		dir.y = 0.0
+		if dir.length_squared() > 0.04:
+			return dir.normalized()
+	var flat_away := Vector3(away.x, 0.0, away.z)
+	if flat_away.length_squared() > 0.04:
+		return flat_away.normalized()
+	return Vector3.FORWARD
 
 
 static func _spawn_debris_job(job: Dictionary, max_chips: int) -> int:
+	if str(job.get("tier", "premium")) == "cheap":
+		return _spawn_debris_job_cheap(job, max_chips)
+	return _spawn_debris_job_premium(job, max_chips)
+
+
+static func _spawn_debris_job_premium(job: Dictionary, max_chips: int) -> int:
 	var scene: Node = job.get("scene") as Node
 	if scene == null or not is_instance_valid(scene):
 		return -1
 	var block_size: Vector3 = job.get("block_size") as Vector3
-	if not job.has("chip_count"):
-		job["chip_count"] = _debris_chip_count(block_size, float(job.get("chip_mult", 1.0)))
-	var chip_count: int = int(job["chip_count"])
+	var chip_count: int = int(job.get("chip_count", 20))
 	var start_i: int = int(job.get("next_i", 0))
 	if start_i >= chip_count:
 		return -1
@@ -2874,15 +3084,25 @@ static func _spawn_debris_job(job: Dictionary, max_chips: int) -> int:
 	var color: Color = job.get("color") as Color
 	var blast_world: Vector3 = job.get("blast_world") as Vector3
 	var blast_radius: float = float(job.get("blast_radius"))
+	var chunks_removed: int = int(job.get("chunks_removed", 1))
+	var blast_sev: float = _debris_blast_severity(blast_radius, chunks_removed)
 	var away: Vector3 = global_pos - blast_world
 	if away.length_squared() < 0.04:
 		away = Vector3(randf() - 0.5, 0.2, randf() - 0.5)
 	away = away.normalized()
-	var blast_heavy: float = clampf((blast_radius - 4.0) / 10.0, 0.0, 1.0)
-	# Travel is tied to damage radius so rubble lands outside the crater, not inside it.
-	var travel_min: float = maxf(5.0, blast_radius * lerpf(1.45, 1.85, blast_heavy))
-	var travel_max: float = maxf(travel_min + 5.0, blast_radius * lerpf(2.4, 3.6, blast_heavy))
-	var rubble_base: float = clampf(block_size.length() * 0.22, 0.08, 0.42)
+	# Parabolic arcs — constant horizontal speed, uniform downward acceleration.
+	var travel_min: float = maxf(
+		lerpf(3.5, 16.0, blast_sev),
+		blast_radius * lerpf(1.6, 3.2, blast_sev),
+	)
+	var travel_max: float = maxf(
+		travel_min + lerpf(4.0, 18.0, blast_sev),
+		blast_radius * lerpf(2.8, 6.0, blast_sev),
+	)
+	var spread: float = maxf(
+		block_size.length() * lerpf(0.35, 0.55, blast_sev),
+		blast_radius * lerpf(0.12, 0.24, blast_sev),
+	)
 	var spawned := 0
 	for i in range(start_i, chip_count):
 		if spawned >= max_chips:
@@ -2893,8 +3113,8 @@ static func _spawn_debris_job(job: Dictionary, max_chips: int) -> int:
 		chip.mesh = _get_impact_chip_mesh()
 		var mat := StandardMaterial3D.new()
 		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		var tint := randf_range(0.72, 1.18)
-		var start_alpha := randf_range(0.9, 1.0)
+		var tint := randf_range(0.82, 1.22)
+		var start_alpha := 1.0
 		mat.albedo_color = Color(
 			clampf(color.r * tint, 0.0, 1.0),
 			clampf(color.g * tint, 0.0, 1.0),
@@ -2903,43 +3123,155 @@ static func _spawn_debris_job(job: Dictionary, max_chips: int) -> int:
 		)
 		mat.roughness = 0.9
 		chip.material_override = mat
-		var size_jitter := randf_range(0.45, 1.85)
-		var axis := rubble_base * size_jitter
-		chip.scale = Vector3(
-			axis * randf_range(0.4, 1.15),
-			axis * randf_range(0.35, 1.0),
-			axis * randf_range(0.4, 1.1),
+		var target_longest_axis_m := _debris_fragment_longest_axis(blast_radius, block_size)
+		var proportions := Vector3(
+			randf_range(0.5, 1.0),
+			randf_range(0.32, 0.92),
+			randf_range(0.45, 1.0),
 		)
+		var prop_max := maxf(proportions.x, maxf(proportions.y, proportions.z))
+		chip.scale = proportions * (target_longest_axis_m / prop_max)
 		chip.rotation = Vector3(randf() * TAU, randf() * TAU, randf() * TAU)
 		var local_offset := Vector3(
-			randf_range(-0.5, 0.5) * block_size.x,
-			randf_range(-0.5, 0.5) * block_size.y,
-			randf_range(-0.5, 0.5) * block_size.z,
+			randf_range(-1.0, 1.0) * spread,
+			randf_range(-1.0, 1.0) * spread,
+			randf_range(-1.0, 1.0) * spread,
 		)
 		var start := global_pos + global_basis * local_offset
 		scene.add_child(chip)
 		chip.global_position = start
-		var launch_dir := _debris_launch_direction(away, blast_heavy)
-		var travel: float = randf_range(travel_min, travel_max) * randf_range(0.55, 1.55)
-		var bury_depth: float = randf_range(1.2, 4.5) + blast_radius * randf_range(0.06, 0.16)
-		var gravity_drop := absf(minf(launch_dir.y, 0.0) * travel) + bury_depth + randf_range(0.8, 2.5)
-		var velocity := launch_dir * travel
-		var gravity := Vector3.DOWN * gravity_drop
+		var horizontal_dir := _debris_launch_horizontal(away, blast_sev)
+		var horizontal_dist: float = randf_range(travel_min, travel_max) * randf_range(0.9, 1.15)
+		var initial_velocity_y: float = randf_range(
+			lerpf(1.8, 4.5, blast_sev),
+			lerpf(4.5, 11.5, blast_sev),
+		) * randf_range(0.88, 1.12)
+		var landing_probe := start + horizontal_dir * horizontal_dist
+		var ground_y: float = _debris_ground_y_at(scene, landing_probe)
+		var flight_time: float = _debris_flight_time_to_ground(start.y, initial_velocity_y, ground_y)
+		var horizontal_speed: float = horizontal_dist / flight_time
+		var initial_velocity := horizontal_dir * horizontal_speed
+		initial_velocity.y = initial_velocity_y
+		var impact_pos := _debris_impact_position(start, initial_velocity, flight_time, ground_y)
 		var start_rot := chip.rotation
 		var end_rot := start_rot + Vector3(
 			randf_range(-PI, PI) * randf_range(2.0, 4.5),
 			randf_range(-PI, PI) * randf_range(2.0, 4.5),
 			randf_range(-PI, PI) * randf_range(2.0, 4.5),
 		)
-		var life: float = randf_range(0.85, 1.65) * randf_range(0.85, 1.2) + blast_radius * lerpf(0.02, 0.05, blast_heavy)
 		var tw := chip.create_tween()
 		tw.tween_method(
-			Callable(Violence, "_animate_impact_chip").bind(
-				chip, mat, start, velocity, gravity, start_rot, end_rot, start_alpha,
+			Callable(Violence, "_animate_debris_fragment").bind(
+				chip, start, initial_velocity, flight_time, impact_pos, start_rot, end_rot,
 			),
 			0.0,
 			1.0,
-			life,
+			flight_time,
+		).set_trans(Tween.TRANS_LINEAR)
+		tw.tween_callback(
+			Callable(Violence, "_debris_bury_after_impact").bind(chip, mat, impact_pos, start_alpha),
+		)
+		spawned += 1
+	job["next_i"] = chip_count
+	return spawned
+
+
+static func _spawn_debris_job_cheap(job: Dictionary, max_chips: int) -> int:
+	var scene: Node = job.get("scene") as Node
+	if scene == null or not is_instance_valid(scene):
+		return -1
+	var block_size: Vector3 = job.get("block_size") as Vector3
+	var chip_count: int = int(job.get("chip_count", 5))
+	var start_i: int = int(job.get("next_i", 0))
+	if start_i >= chip_count:
+		return -1
+	var global_pos: Vector3 = job.get("global_pos") as Vector3
+	var global_basis: Basis = job.get("global_basis") as Basis
+	var color: Color = job.get("color") as Color
+	var blast_world: Vector3 = job.get("blast_world") as Vector3
+	var blast_radius: float = float(job.get("blast_radius"))
+	var chunks_removed: int = int(job.get("chunks_removed", 1))
+	var blast_sev: float = _debris_blast_severity(blast_radius, chunks_removed)
+	if not job.has("ground_y"):
+		job["ground_y"] = _debris_ground_y_at(scene, global_pos)
+	var ground_y: float = float(job["ground_y"])
+	var away: Vector3 = global_pos - blast_world
+	if away.length_squared() < 0.04:
+		away = Vector3(randf() - 0.5, 0.2, randf() - 0.5)
+	away = away.normalized()
+	var travel_min: float = maxf(
+		lerpf(2.5, 10.0, blast_sev),
+		blast_radius * lerpf(1.2, 2.4, blast_sev),
+	)
+	var travel_max: float = maxf(
+		travel_min + lerpf(3.0, 12.0, blast_sev),
+		blast_radius * lerpf(2.0, 4.2, blast_sev),
+	)
+	var spread: float = maxf(
+		block_size.length() * lerpf(0.25, 0.42, blast_sev),
+		blast_radius * lerpf(0.1, 0.18, blast_sev),
+	)
+	var spawned := 0
+	for i in range(start_i, chip_count):
+		if spawned >= max_chips:
+			job["next_i"] = i
+			return spawned
+		var chip := MeshInstance3D.new()
+		chip.add_to_group("destruction_debris")
+		chip.mesh = _get_impact_chip_mesh()
+		var mat := StandardMaterial3D.new()
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		var tint := randf_range(0.88, 1.12)
+		mat.albedo_color = Color(
+			clampf(color.r * tint, 0.0, 1.0),
+			clampf(color.g * tint, 0.0, 1.0),
+			clampf(color.b * tint, 0.0, 1.0),
+			1.0,
+		)
+		mat.roughness = 0.92
+		chip.material_override = mat
+		var target_longest_axis_m := lerpf(0.1, 0.38, blast_sev) * randf_range(0.85, 1.15)
+		var proportions := Vector3(
+			randf_range(0.55, 1.0),
+			randf_range(0.35, 0.85),
+			randf_range(0.5, 1.0),
+		)
+		var prop_max := maxf(proportions.x, maxf(proportions.y, proportions.z))
+		chip.scale = proportions * (target_longest_axis_m / prop_max)
+		chip.rotation = Vector3(randf() * TAU, randf() * TAU, randf() * TAU)
+		var local_offset := Vector3(
+			randf_range(-1.0, 1.0) * spread,
+			randf_range(-0.35, 0.35) * spread,
+			randf_range(-1.0, 1.0) * spread,
+		)
+		var start := global_pos + global_basis * local_offset
+		scene.add_child(chip)
+		chip.global_position = start
+		var horizontal_dir := _debris_launch_horizontal(away, blast_sev)
+		var horizontal_dist: float = randf_range(travel_min, travel_max) * randf_range(0.85, 1.1)
+		var initial_velocity_y: float = randf_range(
+			lerpf(1.4, 3.0, blast_sev),
+			lerpf(3.0, 7.0, blast_sev),
+		)
+		var flight_time: float = _debris_flight_time_to_ground(start.y, initial_velocity_y, ground_y)
+		var horizontal_speed: float = horizontal_dist / flight_time
+		var initial_velocity := horizontal_dir * horizontal_speed
+		initial_velocity.y = initial_velocity_y
+		var impact_pos := _debris_impact_position(start, initial_velocity, flight_time, ground_y)
+		var start_rot := chip.rotation
+		var end_rot := start_rot + Vector3(
+			randf_range(-PI, PI) * 1.6,
+			randf_range(-PI, PI) * 1.6,
+			randf_range(-PI, PI) * 1.6,
+		)
+		var tw := chip.create_tween()
+		tw.tween_method(
+			Callable(Violence, "_animate_debris_fragment").bind(
+				chip, start, initial_velocity, flight_time, impact_pos, start_rot, end_rot,
+			),
+			0.0,
+			1.0,
+			flight_time,
 		).set_trans(Tween.TRANS_LINEAR)
 		tw.tween_callback(chip.queue_free)
 		spawned += 1
