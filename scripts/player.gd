@@ -1839,8 +1839,8 @@ func _spawn_muzzle_flash(
 		return
 	var bright: float = maxf(0.1, brightness_mult)
 	var energy: float = 6.0 * pow(bright, 1.18)
-	var light_energy: float = 5.5 * pow(bright, 1.12)
-	var gun_light_energy: float = 3.2 * pow(bright, 1.08)
+	var light_energy: float = 2.75 * pow(bright, 1.12)
+	var gun_light_energy: float = 1.6 * pow(bright, 1.08)
 	var flash_pos: Vector3 = _muzzle_flash_exit_local(anchor)
 	# Directional flash: a short starburst plus a forward flame plume reads
 	# better than a glowing orb and stays cheap enough for multiplayer.
@@ -1888,6 +1888,7 @@ func _spawn_muzzle_flash(
 	light.light_color = color.lerp(Color(1.0, 0.95, 0.82), 0.45)
 	light.light_energy = light_energy
 	light.omni_range = 5.0 * scale_f * pow(bright, 0.55)
+	light.shadow_enabled = false
 	light.position = Vector3(0.0, 0.0, -0.42)
 	flash_root.add_child(light)
 	tw.tween_property(light, "light_energy", 0.0, 0.07)
@@ -1899,6 +1900,7 @@ func _spawn_muzzle_flash(
 	gun_light.light_color = color.lerp(Color(1.0, 0.92, 0.8), 0.6)
 	gun_light.light_energy = gun_light_energy
 	gun_light.omni_range = 2.0 * scale_f * pow(bright, 0.5)
+	gun_light.shadow_enabled = false
 	gun_light.position = Vector3(0.0, 0.0, 0.06)
 	anchor.add_child(gun_light)
 	tw.tween_property(gun_light, "light_energy", 0.0, 0.08)
