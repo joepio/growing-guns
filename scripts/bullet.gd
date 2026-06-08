@@ -18,6 +18,7 @@ var ricochet_hits: int = 0
 var body_ricochets_done: int = 0
 var last_in_mag: bool = false
 var silenced: bool = false
+var visible_to_shooter: bool = false
 var excluded_rids: Array[RID] = []
 
 # Per-bullet ray query — allocated once in setup() and re-used every physics
@@ -38,14 +39,16 @@ var _trail_inst: MeshInstance3D = null
 var _max_trail_length: float = 2.0
 
 const HITSCAN_THRESHOLD := 550.0
+const SILENCED_OWNER_TRACER_ALPHA := 0.12
 
-func setup(origin: Vector3, dir: Vector3, shooter: int, w: Weapon, p_last_in_mag: bool = false) -> void:
+func setup(origin: Vector3, dir: Vector3, shooter: int, w: Weapon, p_last_in_mag: bool = false, p_visible_to_shooter: bool = false) -> void:
 	global_position = origin
 	direction = dir.normalized()
 	shooter_id = shooter
 	weapon_stats = w
 	last_in_mag = p_last_in_mag
 	silenced = w.silencer_stacks > 0
+	visible_to_shooter = p_visible_to_shooter
 	add_to_group("projectiles")
 	speed = w.get_bullet_speed()
 	velocity = direction * speed
@@ -67,7 +70,7 @@ func setup(origin: Vector3, dir: Vector3, shooter: int, w: Weapon, p_last_in_mag
 		call_deferred("_do_hitscan")
 		return
 
-	if silenced:
+	if silenced and not visible_to_shooter:
 		return
 	if BenchFlags.active and BenchFlags.no_bullet_visuals:
 		return
@@ -77,10 +80,15 @@ func setup(origin: Vector3, dir: Vector3, shooter: int, w: Weapon, p_last_in_mag
 	var mat: StandardMaterial3D = StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	var tracer_color := weapon_stats.bullet_color.lerp(Color.WHITE, 0.18)
-	mat.albedo_color = tracer_color
+	var tracer_alpha := SILENCED_OWNER_TRACER_ALPHA if silenced else 1.0
+	if tracer_alpha < 1.0:
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+		mat.no_depth_test = true
+	mat.albedo_color = Color(tracer_color.r, tracer_color.g, tracer_color.b, tracer_alpha)
 	mat.emission_enabled = true
 	mat.emission = tracer_color
-	mat.emission_energy_multiplier = clampf(1.6 * weapon_stats.get_bullet_scale(), 1.2, 4.5)
+	mat.emission_energy_multiplier = clampf(1.6 * weapon_stats.get_bullet_scale(), 1.2, 4.5) * (0.45 if silenced else 1.0)
 
 	# Head — a small bright dot that always sits at the bullet's tip.
 	var s: float = weapon_stats.get_bullet_scale()
@@ -188,8 +196,9 @@ func _do_hitscan() -> void:
 	
 	# Visual laser tracer
 	var shooter_node: Node3D = _shooter_node()
-	if not silenced and shooter_node and shooter_node.has_method("_spawn_laser_tracer"):
-		shooter_node.call("_spawn_laser_tracer", start_pos, hit_pos)
+	if (not silenced or visible_to_shooter) and shooter_node and shooter_node.has_method("_spawn_laser_tracer"):
+		var tracer_alpha := SILENCED_OWNER_TRACER_ALPHA if silenced else 1.0
+		shooter_node.call("_spawn_laser_tracer", start_pos, hit_pos, tracer_alpha)
 	
 	queue_free()
 

@@ -116,7 +116,7 @@ static func all() -> Array:
 		{
 			"id": "silencer",
 			"name": "SILENCER",
-			"desc": "No flash or tracers; −10% damage",
+			"desc": "Hidden shots; faint tracer for you; −10% damage",
 			"color": Color(0.55, 0.58, 0.62),
 			"apply": func(w: Weapon) -> void:
 				w.silencer_stacks += 1

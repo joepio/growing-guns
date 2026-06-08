@@ -1589,7 +1589,7 @@ func _rifle_fired(
 	var bullet := Node3D.new()
 	bullet.set_script(bullet_script)
 	get_tree().current_scene.add_child(bullet)
-	bullet.setup(origin, dir, shooter_id, w, last_in_mag)
+	bullet.setup(origin, dir, shooter_id, w, last_in_mag, is_self)
 	BenchFlags.inc("bullets_spawned")
 
 	# Muzzle flash scales with bullet size — get_bullet_scale already folds
@@ -2034,8 +2034,8 @@ func _spawn_blood_wound(
 ) -> void:
 	Violence.spawn_player_blood_wound(self, collider, hit_pos, normal, dir, strength)
 
-func _spawn_laser_tracer(from: Vector3, to: Vector3) -> void:
-	Violence.spawn_laser_tracer(get_tree().current_scene, from, to)
+func _spawn_laser_tracer(from: Vector3, to: Vector3, alpha: float = 1.0) -> void:
+	Violence.spawn_laser_tracer(get_tree().current_scene, from, to, alpha)
 
 # -------------------- RAGDOLL / DEATH --------------------
 

@@ -2204,12 +2204,13 @@ static func spawn_impact(scene: Node, pos: Vector3, color: Color = Color(1.0, 0.
 
 # Brief high-intensity beam for hitscan bullets. Rendered for 1-2 frames
 # as a bright white streak.
-static func spawn_laser_tracer(scene: Node, from: Vector3, to: Vector3) -> void:
+static func spawn_laser_tracer(scene: Node, from: Vector3, to: Vector3, alpha: float = 1.0) -> void:
 	if scene == null:
 		return
 	var dist := from.distance_to(to)
 	if dist < 0.1:
 		return
+	alpha = clampf(alpha, 0.0, 1.0)
 
 	var line := MeshInstance3D.new()
 	var mesh := BoxMesh.new()
@@ -2219,10 +2220,14 @@ static func spawn_laser_tracer(scene: Node, from: Vector3, to: Vector3) -> void:
 
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.albedo_color = Color.WHITE
+	if alpha < 1.0:
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+		mat.no_depth_test = true
+	mat.albedo_color = Color(1.0, 1.0, 1.0, alpha)
 	mat.emission_enabled = true
 	mat.emission = Color.WHITE
-	mat.emission_energy_multiplier = 22.0
+	mat.emission_energy_multiplier = 22.0 * (0.35 if alpha < 1.0 else 1.0)
 	line.material_override = mat
 
 	# Add to scene FIRST so global_transform / look_at work in world space.
@@ -2238,20 +2243,23 @@ static func spawn_laser_tracer(scene: Node, from: Vector3, to: Vector3) -> void:
 		line.look_at(to, Vector3.UP)
 
 	# Bright white-hot flash at the muzzle
-	var light := OmniLight3D.new()
-	light.light_color = Color.WHITE
-	light.light_energy = 15.0
-	light.omni_range = 5.0
-	scene.add_child(light)
-	light.global_position = from
+	var light: OmniLight3D = null
+	if alpha >= 1.0:
+		light = OmniLight3D.new()
+		light.light_color = Color.WHITE
+		light.light_energy = 15.0
+		light.omni_range = 5.0
+		scene.add_child(light)
+		light.global_position = from
 
 	var tw := line.create_tween()
 	tw.tween_interval(0.04) # roughly 2-3 frames
 	tw.tween_callback(line.queue_free)
 
-	var ltw := light.create_tween()
-	ltw.tween_property(light, "light_energy", 0.0, 0.1)
-	ltw.tween_callback(light.queue_free)
+	if light:
+		var ltw := light.create_tween()
+		ltw.tween_property(light, "light_energy", 0.0, 0.1)
+		ltw.tween_callback(light.queue_free)
 
 # Persistent scorch mark on the impacted surface. Always spawned by
 # spawn_impact; bigger rounds get bigger craters. dmg_ratio > ~2 adds an
