@@ -4137,6 +4137,141 @@ static func spawn_ragdoll(
 # Free all spawned ragdoll pieces and restore body visibility / hitbox layers.
 # Caller is responsible for calling _apply_ghost_visuals() afterward (since
 # that touches Player-private rendering knobs).
+static func _lava_surface_world_y(player: Node) -> float:
+	var scene: Node = player.get_tree().current_scene if player else null
+	if scene == null:
+		return player.global_position.y - 2.0
+	var arena: Node = scene.get_node_or_null("Arena")
+	if arena != null and arena.has_method("get_lava_surface_world_y"):
+		return float(arena.call("get_lava_surface_world_y"))
+	return player.global_position.y - 2.0
+
+
+# Lava death — body picks up the arena lava shader, then sinks. Tuned in lava_death_lab.tscn.
+static var _lava_body_material: ShaderMaterial = null
+static var lava_death_sink_y_fall: float = 0.75
+static var lava_death_sink_y_stand: float = 0.5
+static var lava_death_sink_dur_fall: float = 2.15
+static var lava_death_sink_dur_stand: float = 1.35
+static var lava_splash_pillar_height: float = 2.2
+static var lava_splash_pillar_radius: float = 0.55
+static var lava_splash_rise_dur: float = 0.18
+static var lava_splash_sink_dur: float = 0.55
+
+
+static func get_lava_body_material() -> ShaderMaterial:
+	return _get_lava_body_material()
+
+
+static func _get_lava_body_material() -> ShaderMaterial:
+	if _lava_body_material == null:
+		_lava_body_material = ArenaGenerator.make_lava_shader_material()
+		_lava_body_material.render_priority = 1
+	return _lava_body_material
+
+
+static func _lava_fx_scene(player: Node) -> Node:
+	var tree: SceneTree = player.get_tree() if player else null
+	if tree == null:
+		return null
+	var scene: Node = tree.current_scene
+	if scene == null:
+		return null
+	var arena: Node = scene.get_node_or_null("Arena")
+	if arena is Node3D:
+		return arena
+	if scene is Node3D:
+		return scene
+	return null
+
+
+static func _apply_lava_body(player: Node) -> void:
+	var body_model: Node = player.get("body_model") as Node
+	if body_model == null:
+		return
+	var lava_mat := _get_lava_body_material()
+	var meshes: Array[MeshInstance3D] = []
+	collect_meshes(body_model, meshes)
+	for mesh: MeshInstance3D in meshes:
+		mesh.material_override = lava_mat
+
+
+static func spawn_lava_impact_splash(scene: Node, surface_pos: Vector3) -> void:
+	if scene == null:
+		return
+	if BenchFlags.active and BenchFlags.no_explosion_visuals:
+		return
+	var height: float = lava_splash_pillar_height
+	var radius: float = lava_splash_pillar_radius
+	var cyl := CylinderMesh.new()
+	cyl.top_radius = radius * 0.42
+	cyl.bottom_radius = radius
+	cyl.height = height
+	cyl.radial_segments = 10
+	cyl.rings = 1
+	var pillar := MeshInstance3D.new()
+	pillar.name = "LavaSplashPillar"
+	pillar.mesh = cyl
+	var mat := _get_lava_body_material().duplicate()
+	mat.render_priority = 2
+	pillar.material_override = mat
+	var half_h: float = height * 0.5
+	var start_y: float = surface_pos.y + half_h + 0.08
+	var peak_y: float = surface_pos.y + height * 1.05
+	var end_y: float = surface_pos.y - height * 0.7
+	_attach_world_3d(scene, pillar, Vector3(surface_pos.x, start_y, surface_pos.z))
+	var tw := pillar.create_tween()
+	tw.tween_property(pillar, "global_position:y", peak_y, lava_splash_rise_dur)\
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tw.tween_property(pillar, "global_position:y", end_y, lava_splash_sink_dur)\
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
+	tw.tween_callback(pillar.queue_free)
+
+
+static func play_lava_death(player: Node, fall_death: bool) -> void:
+	if player == null:
+		return
+	if player.has_meta("lava_death_tween"):
+		var old_tw: Variant = player.get_meta("lava_death_tween")
+		if old_tw is Tween and (old_tw as Tween).is_valid():
+			(old_tw as Tween).kill()
+		player.remove_meta("lava_death_tween")
+	player.set("_lava_death_active", true)
+	set_dead_visuals(player, true)
+	var body_model: Node3D = player.get("body_model") as Node3D
+	if body_model:
+		body_model.visible = true
+	if player.has_method("_apply_ghost_visuals"):
+		player.call("_apply_ghost_visuals")
+	var lava_y: float = _lava_surface_world_y(player)
+	var scene: Node = _lava_fx_scene(player)
+	var splash_pos := Vector3(player.global_position.x, lava_y + 0.06, player.global_position.z)
+	if fall_death and scene != null:
+		spawn_lava_impact_splash(scene, splash_pos)
+	var target_y: float = lava_y - lerpf(lava_death_sink_y_stand, lava_death_sink_y_fall, 1.0 if fall_death else 0.0)
+	var duration: float = lerpf(lava_death_sink_dur_stand, lava_death_sink_dur_fall, 1.0 if fall_death else 0.0)
+	var tw := player.create_tween()
+	player.set_meta("lava_death_tween", tw)
+	if fall_death:
+		tw.tween_interval(lava_splash_rise_dur)
+	tw.tween_callback(_apply_lava_body.bind(player))
+	tw.tween_property(player, "global_position:y", target_y, duration)\
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
+
+
+static func end_lava_death(player: Node) -> void:
+	if player == null:
+		return
+	player.set("_lava_death_active", false)
+	if player.has_meta("lava_death_tween"):
+		var tw: Variant = player.get_meta("lava_death_tween")
+		if tw is Tween and (tw as Tween).is_valid():
+			(tw as Tween).kill()
+		player.remove_meta("lava_death_tween")
+	if player.has_method("restore_body_materials"):
+		player.call("restore_body_materials")
+
+
 static func clear_ragdoll(player: Node) -> void:
 	var pieces: Array = player.get("_ragdoll_pieces")
 	for piece in pieces:
@@ -4146,6 +4281,7 @@ static func clear_ragdoll(player: Node) -> void:
 			piece.queue_free()
 	pieces.clear()
 	clear_player_blood_wounds(player)
+	end_lava_death(player)
 	set_dead_visuals(player, false)
 
 static func apply_knockback(player: Node, impulse: Vector3) -> void:

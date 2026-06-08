@@ -34,6 +34,7 @@ Multiplayer FPS in Godot 4.6. Last-man-standing rounds; round losers pick stacki
 - `scenes/action_lab.tscn` — full arena, 5 random-card bots, free-look camera, live SFX sliders. Use for AI / combat playtesting.
 - `scenes/gun_lab.tscn` + `gun_preview.tscn` — preview procedural gun visually, tweak exports.
 - `scenes/audio_lab.tscn` — SFX mix / synth iteration.
+- `scenes/lava_death_lab.tscn` — lava-shader body + sink death; live-tune sink timing and SFX.
 - `scenes/perf_benchmark.tscn` — see below.
 
 Run any of them with:

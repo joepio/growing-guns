@@ -63,10 +63,10 @@ var jump_db: float = -7.5
 var landing_max_db: float = 5.0
 var hurt_self_db: float = -25.0
 var hurt_world_db: float = -17.5
-var death_self_db: float = -21.0
-var death_world_db: float = -15.5
+var death_self_db: float = -12.0
+var death_world_db: float = -8.0
 var lava_sizzle_db: float = -18.0
-var lava_fall_sizzle_db: float = -32.0
+var lava_fall_sizzle_db: float = -26.0
 var hit_received_db: float = -12.0
 # Round-start rocket spawn — heavy rumble that ramps in over the descent.
 # 2D (UI-style) so each player hears their own "rocket cabin" without
@@ -881,7 +881,8 @@ func lava_sizzle(at: Vector3 = NO_POS, fall_death: bool = false) -> void:
 	var key := "lava_sizzle2:%s:%d" % [mode, variant]
 	var wav := _cached_wav(key, Callable(self, "_synth_lava_sizzle").bind(variant, fall_death))
 	var db := lava_fall_sizzle_db if fall_death else lava_sizzle_db - 5.0
-	_play_stream(wav, db + randf_range(-1.0, 1.0), at, randf_range(0.96, 1.04), "lava_sizzle", 18.0, false, 85.0 if fall_death else 105.0, false)
+	var reach := 72.0 if fall_death else 95.0
+	_play_stream(wav, db + randf_range(-1.0, 1.0), at, randf_range(0.96, 1.04), "lava_sizzle", 18.0, false, reach, false)
 func rocket_descent() -> Node:
 	# Heavy, soft-distorted rumble for the round-start rocket spawn. 2D so
 	# the local player hears their own "cabin" loud regardless of where the
@@ -1669,13 +1670,13 @@ func _synth_lava_sizzle(variant: int, fall_death: bool = false) -> PackedVector2
 		var env: float = attack * body
 		var noise: float = rng.randf_range(-1.0, 1.0)
 		hiss_lp = lerpf(hiss_lp, noise, 0.08)
-		var hiss: float = (noise - hiss_lp) * env * (0.17 if fall_death else 0.26)
+		var hiss: float = (noise - hiss_lp) * env * (0.11 if fall_death else 0.26)
 		var low_noise: float = rng.randf_range(-1.0, 1.0)
 		low_lp = lerpf(low_lp, low_noise, 0.018)
 		bubble_phase += TAU * lerpf(22.0, 38.0, rng.randf()) / MIX_RATE
 		var bubble_env: float = body * (0.55 + 0.45 * sin(bubble_phase))
 		var bubble: float = tanh(low_lp * 4.0) * bubble_env * 0.18
-		var s: float = tanh((hiss + bubble) * 1.35)
+		var s: float = tanh((hiss + bubble) * (1.05 if fall_death else 1.35))
 		out[i] = Vector2(s, s)
 	return out
 
