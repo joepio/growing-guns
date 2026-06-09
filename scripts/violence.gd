@@ -2,8 +2,10 @@ class_name Violence extends RefCounted
 
 # Default chunk count when fracturing a body. Must match the value used by
 # gib_warm_tree() at scene load — varying it forces synchronous bakes on the
-# main thread (~200ms per mesh).
-const GIB_CHUNK_COUNT := 5
+# main thread (~200ms per mesh). Kept low: each gibbed mesh spawns this many
+# RigidBody chunks, and active rigid bodies are the #1 driver of in-game frame
+# hitches (a single overkill used to spawn ~60 bodies).
+const GIB_CHUNK_COUNT := 3
 # Killing blow that would leave health here or lower → full body disintegrate.
 const OVERKILL_DISINTEGRATE_HEALTH := -50
 # Screen-space heat-shimmer + shockwave distortion read the framebuffer (a
@@ -41,6 +43,43 @@ const _GIB_QUANTIZE := 0.0001
 static var _gib_cache: Dictionary = {}
 static var _gib_cache_mutex: Mutex = Mutex.new()
 static var _gib_flesh_material_cached: StandardMaterial3D = null
+
+# Hard cap on simultaneously-alive gib chunks. Active rigid bodies are the
+# dominant cause of in-game frame hitches (≥40 active bodies tracked ~91% of
+# spikes), so stacked overkills can't pile up unbounded — the oldest chunk is
+# freed when a new one would exceed the cap. FIFO holds only alive chunks
+# (entries erase themselves on tree_exiting).
+const MAX_ACTIVE_GIB_CHUNKS := 32
+static var _gib_chunk_fifo: Array[RigidBody3D] = []
+
+static func _gib_enroll_chunk(rb: RigidBody3D) -> void:
+	_gib_chunk_fifo.append(rb)
+	rb.tree_exiting.connect(func() -> void: _gib_chunk_fifo.erase(rb))
+	while _gib_chunk_fifo.size() > MAX_ACTIVE_GIB_CHUNKS:
+		var old: RigidBody3D = _gib_chunk_fifo.pop_front()
+		if is_instance_valid(old):
+			old.queue_free()
+
+# Hard cap on simultaneously-alive destruction debris chips. Each chip is an
+# individual MeshInstance3D, so under sustained carving ~3000 piled up and —
+# multiplied by shadow passes — drove draw calls to 20k+ (16fps). Bounds the
+# count; chips also have shadow casting disabled at spawn (see _spawn_debris_job_*).
+const MAX_ACTIVE_DEBRIS_CHIPS := 400
+static var _debris_chip_fifo: Array[MeshInstance3D] = []
+
+static func _enroll_debris_chip(chip: MeshInstance3D) -> void:
+	_debris_chip_fifo.append(chip)
+	chip.tree_exiting.connect(func() -> void: _debris_chip_fifo.erase(chip))
+	while _debris_chip_fifo.size() > MAX_ACTIVE_DEBRIS_CHIPS:
+		var old: MeshInstance3D = _debris_chip_fifo.pop_front()
+		if is_instance_valid(old):
+			old.queue_free()
+
+# Cosmetic face details (eyes, pupils, eye-strokes) are tiny — gibbing them just
+# multiplies rigid-body chunks for debris nobody can read amid the meaty pieces.
+static func _gib_is_cosmetic_mesh(mi: MeshInstance3D) -> bool:
+	var n := String(mi.name)
+	return n.begins_with("Eye") or n.begins_with("Pupil") or n.begins_with("Stroke")
 
 # Kick off async bakes for every MeshInstance3D under `root`. Idempotent;
 # subsequent calls with the same mesh/chunk_count are no-ops.
@@ -397,6 +436,7 @@ static func _gib_instantiate_chunk(
 	rb.body_entered.connect(func(_body: Node) -> void:
 		_gib_on_chunk_body_entered(rb, scene, impact_blood_strength)
 	)
+	_gib_enroll_chunk(rb)
 	return rb
 
 # Single rigid body containing every supplied mesh — used for non-explosive
@@ -3194,6 +3234,10 @@ static func _spawn_debris_job_premium(job: Dictionary, max_chips: int) -> int:
 			return spawned
 		var chip := MeshInstance3D.new()
 		chip.add_to_group("destruction_debris")
+		# Tiny tumbling debris doesn't need to cast shadows — each shadow pass
+		# re-draws every chip, which multiplied ~3000 chips into 20k+ draw calls.
+		chip.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		_enroll_debris_chip(chip)
 		chip.mesh = _get_impact_chip_mesh()
 		var mat := StandardMaterial3D.new()
 		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -3302,6 +3346,8 @@ static func _spawn_debris_job_cheap(job: Dictionary, max_chips: int) -> int:
 			return spawned
 		var chip := MeshInstance3D.new()
 		chip.add_to_group("destruction_debris")
+		chip.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		_enroll_debris_chip(chip)
 		chip.mesh = _get_impact_chip_mesh()
 		var mat := StandardMaterial3D.new()
 		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -4128,7 +4174,7 @@ static func spawn_ragdoll(
 			spawn_overkill_blood_splats(scene, mist_origin, dir_n, splat_sev)
 		var first: bool = true
 		for src in meshes:
-			if src.mesh == null:
+			if src.mesh == null or _gib_is_cosmetic_mesh(src):
 				continue
 			var chunks: Array[RigidBody3D] = gib_explode(
 				src.mesh,
@@ -4193,7 +4239,7 @@ static func spawn_ragdoll(
 			var head_blood: float = clampf(0.65 + kb_mag * 0.18, 0.55, 1.0)
 			var first_head_chunk: bool = true
 			for src in head_meshes:
-				if src.mesh == null:
+				if src.mesh == null or _gib_is_cosmetic_mesh(src):
 					continue
 				var head_chunks: Array[RigidBody3D] = gib_explode(
 					src.mesh,

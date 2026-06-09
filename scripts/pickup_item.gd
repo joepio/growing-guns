@@ -172,8 +172,8 @@ func _build_drop_beam() -> void:
 	_beam = MeshInstance3D.new()
 	_beam.name = "DropBeam"
 	var mesh := CylinderMesh.new()
-	mesh.top_radius = 0.035
-	mesh.bottom_radius = 0.12
+	mesh.top_radius = 0.12
+	mesh.bottom_radius = 0.36
 	mesh.height = 1.0
 	_beam.mesh = mesh
 	_beam_mat = StandardMaterial3D.new()

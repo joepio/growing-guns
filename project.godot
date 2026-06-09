@@ -28,6 +28,7 @@ NetworkManager="*res://scripts/network_manager.gd"
 SFX="*res://scripts/sfx.gd"
 ProceduralMusic="*res://scripts/procedural_music.gd"
 PerfGovernor="*res://scripts/perf_governor.gd"
+Trace="*res://scripts/trace.gd"
 
 [debug]
 

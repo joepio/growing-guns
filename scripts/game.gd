@@ -143,6 +143,12 @@ var _rematch_requested: bool = false
 var _match_end_votes: Dictionary = {} # id -> "rematch" | "extend"
 const REMATCH_VOTE_DELAY := 1.0
 var _rematch_vote_unlock_timer: Timer = null
+# Match-win banner gets an oversized animated treatment, and the rematch buttons
+# fade in a beat later so the victory reads first.
+const MATCH_WIN_FONT_SIZE := 92
+const MATCH_WIN_BUTTONS_DELAY := 1.4
+var _match_win_tween: Tween = null
+var _match_win_pulse_tween: Tween = null
 
 # --- Dev panel (`.`) ---
 # Owned by scripts/dev_panel.gd, instantiated in _ready and added under $HUD.
@@ -231,6 +237,7 @@ var _render_players: Dictionary = {}
 var _audio_panel: AudioSettingsPanel = null
 
 func _ready() -> void:
+	Trace.mark("game._ready start (is_server=%s)" % multiplayer.is_server())
 	ProceduralMusic.set_energy(1, true)
 	_install_controller_input_map()
 	# Show the loading overlay immediately so no garbage is visible while
@@ -315,7 +322,9 @@ func _ready() -> void:
 	NetworkManager.local_player_name = _player_name
 
 	# Voronoi gib bakes are expensive — do them once at boot, not on first kill.
+	Trace.span_begin("prewarm_disintegration_cache")
 	Violence.prewarm_disintegration_cache()
+	Trace.span_end("prewarm_disintegration_cache")
 
 	# Pre-synthesize the heavy one-off effect sounds (ion cannon charge/burst,
 	# air strike, lava, casings, mine) once at boot so the first cast doesn't
@@ -386,7 +395,9 @@ func _ready() -> void:
 			_spawn_bots(requested_count, spawn_used)
 		# Warm up GPU pipelines before the first round. Everything (arena,
 		# players, gun) is now in the scene tree, so the host warms here.
+		Trace.span_begin("shader_warmup (force_draw)")
 		await _warmup_effect_shaders_and_hide_overlay()
+		Trace.span_end("shader_warmup (force_draw)")
 		_maybe_start_match()
 
 		# Solo-vs-AI fallback: with the main menu gone, every fresh launch
@@ -1205,7 +1216,9 @@ func _do_spawn(
 		# the arena is in the tree, warm and reveal. Host already did this in
 		# _ready, so gate to clients to keep the host path untouched.
 		if not multiplayer.is_server():
+			Trace.span_begin("client shader_warmup (force_draw)")
 			_warmup_effect_shaders_and_hide_overlay()
+			Trace.span_end("client shader_warmup (force_draw)")
 	if _splitscreen and _splitscreen.is_enabled() and split_local:
 		# Manager owns the device→player_id map server-side; on clients we
 		# just need the view layout refreshed so the new SubViewport appears.
@@ -1456,6 +1469,8 @@ func _gun_swap_permutation(n: int) -> Array[int]:
 
 
 func _start_round_now() -> void:
+	Trace.mark("_start_round_now (round %d)" % current_round)
+	Trace.span_begin("_start_round_now total")
 	_reset_round_tracking()
 	_round_damage_seen = false
 	_hide_round_win_on_screens.rpc()
@@ -1538,7 +1553,9 @@ func _start_round_now() -> void:
 	if multiplayer.is_server() and ROUND_MODIFIERS_SCRIPT.lava_immediate(current_round_modifier):
 		_trigger_lava_leak(LAVA_LEAK_SPREAD_SECONDS)
 	_hide_rematch_overlay.rpc()
+	Trace.span_begin("_warmup_round_audio")
 	_warmup_round_audio()
+	Trace.span_end("_warmup_round_audio")
 	# Now launch players into the fight.
 	for p in round_players:
 		p.set_launching.rpc(true, 80.0)
@@ -1548,6 +1565,8 @@ func _start_round_now() -> void:
 	if multiplayer.is_server() and ROUND_MODIFIERS_SCRIPT.needs_ion_cannon(current_round_modifier):
 		_ion_cannons_armed = true
 		_ion_cannon_timer = randf_range(0.75, 1.5)
+	Trace.span_end("_start_round_now total")
+	Trace.mark("round %d PLAYING — players launched" % current_round)
 
 func _update_air_strikes(delta: float) -> void:
 	if not _air_strikes_armed or not ROUND_MODIFIERS_SCRIPT.needs_air_strikes(current_round_modifier):
@@ -1975,6 +1994,7 @@ func _clear_smoke_puffs() -> void:
 func _swap_arena(map_index: int, map_seed: int = 0, arena_size_min: float = -1.0, arena_size_max: float = -1.0) -> void:
 	if map_index < 0 or map_index >= MAP_POOL.size():
 		return
+	Trace.span_begin("_swap_arena (instantiate+apply_seed)")
 	var existing := get_node_or_null("Arena")
 	if existing:
 		remove_child(existing)
@@ -1989,6 +2009,7 @@ func _swap_arena(map_index: int, map_seed: int = 0, arena_size_min: float = -1.0
 	# _pick_spawn() runs in _start_round_now().
 	if new_arena.has_method("apply_seed"):
 		new_arena.apply_seed(map_seed, arena_size_min, arena_size_max)
+	Trace.span_end("_swap_arena (instantiate+apply_seed)")
 	current_map_index = map_index
 	current_map_seed = map_seed
 	current_arena_size_min = arena_size_min
@@ -2181,6 +2202,7 @@ func _clear_pickups() -> void:
 @rpc("authority", "call_local", "reliable")
 func _set_round_modifier(mod_id: String) -> void:
 	current_round_modifier = mod_id if mod_id in ROUND_MODIFIERS_SCRIPT.IDS else ""
+	Trace.mark("round modifier set: '%s' (is_server=%s)" % [current_round_modifier, multiplayer.is_server()])
 	_apply_round_modifier_environment()
 
 func _apply_round_modifier_environment() -> void:
@@ -2622,6 +2644,8 @@ func _announce(text: String, duration: float, font_size: int = -1) -> void:
 # RPCs that already run via call_local on every peer (so we don't need to
 # re-broadcast).
 func _set_banner(text: String, duration: float, font_size: int = -1) -> void:
+	# Clear any leftover match-win pop/pulse so the shared banner is neutral.
+	_reset_match_win_banner()
 	if text == "" or duration <= 0:
 		round_banner.visible = false
 		banner_timer.stop()
@@ -2692,10 +2716,53 @@ func _match_over(winner_id: int) -> void:
 	var winner_name: String = NetworkManager.players.get(winner_id, "Player")
 	var is_me := winner_id == multiplayer.get_unique_id()
 	round_banner.text = "YOU'RE THE WINNER" if is_me else "%s WINS THE MATCH" % winner_name
-	round_banner.visible = true
 	banner_timer.stop()
-	_show_rematch_overlay(winner_id)
+	_animate_match_win_banner()
+	# Let the victory land before the buttons appear — they fade in a beat later.
+	get_tree().create_timer(MATCH_WIN_BUTTONS_DELAY).timeout.connect(
+		_show_rematch_overlay.bind(winner_id), CONNECT_ONE_SHOT)
 	_sync_mouse_mode()
+
+
+# Oversized pop-in for the match-winner banner: scale up from small with an
+# overshoot and fade in, then a subtle continuous pulse. Reuses round_banner, so
+# _set_banner resets scale/modulate/font for ordinary round announcements.
+func _animate_match_win_banner() -> void:
+	var b := round_banner
+	if _match_win_tween and _match_win_tween.is_valid():
+		_match_win_tween.kill()
+	b.add_theme_font_size_override("font_size", MATCH_WIN_FONT_SIZE)
+	b.pivot_offset = b.size * 0.5
+	b.scale = Vector2(0.4, 0.4)
+	b.modulate.a = 0.0
+	b.visible = true
+	# Pop-in: overshoot scale up + fade, then a gentle looped breathing pulse.
+	_match_win_tween = b.create_tween()
+	_match_win_tween.tween_property(b, "scale", Vector2.ONE, 0.55)\
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	_match_win_tween.parallel().tween_property(b, "modulate:a", 1.0, 0.3)
+	# Breathing pulse (its own looped tween so the pop above stays one-shot).
+	var pulse := b.create_tween().set_loops()
+	pulse.tween_interval(0.55)
+	pulse.tween_property(b, "scale", Vector2(1.05, 1.05), 0.9)\
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	pulse.tween_property(b, "scale", Vector2.ONE, 0.9)\
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	_match_win_pulse_tween = pulse
+
+
+# Stop the win-banner animation and restore neutral transform so the shared
+# round_banner renders normally for the next round announcement.
+func _reset_match_win_banner() -> void:
+	if _match_win_tween and _match_win_tween.is_valid():
+		_match_win_tween.kill()
+	_match_win_tween = null
+	if _match_win_pulse_tween and _match_win_pulse_tween.is_valid():
+		_match_win_pulse_tween.kill()
+	_match_win_pulse_tween = null
+	round_banner.scale = Vector2.ONE
+	round_banner.modulate.a = 1.0
+	round_banner.remove_theme_font_size_override("font_size")
 
 func _build_rematch_overlay() -> void:
 	_rematch_overlay = Control.new()
@@ -2762,6 +2829,10 @@ func _show_rematch_overlay(_winner_id: int) -> void:
 	if _exit_to_menu_button:
 		_exit_to_menu_button.disabled = true
 	_rematch_overlay.visible = true
+	# Fade the buttons in so they ease onto the screen a beat after the win text.
+	_rematch_overlay.modulate.a = 0.0
+	_rematch_overlay.create_tween().tween_property(
+		_rematch_overlay, "modulate:a", 1.0, 0.35).set_trans(Tween.TRANS_SINE)
 	if _rematch_vote_unlock_timer:
 		_rematch_vote_unlock_timer.start(REMATCH_VOTE_DELAY)
 
@@ -3019,11 +3090,13 @@ func _build_loading_overlay() -> void:
 
 
 func _show_loading_overlay() -> void:
+	Trace.mark("loading overlay SHOWN")
 	if _loading_overlay:
 		_loading_overlay.visible = true
 
 
 func _hide_loading_overlay() -> void:
+	Trace.mark("loading overlay HIDDEN")
 	if _loading_overlay:
 		_loading_overlay.visible = false
 
@@ -3397,6 +3470,9 @@ func _set_rounds_to_win(count: int) -> void:
 
 @rpc("authority", "call_local", "reliable")
 func _hide_rematch_overlay() -> void:
+	# A continued match ("5 MORE ROUNDS") doesn't reload the scene, so clear the
+	# oversized win-banner pop/pulse here too.
+	_reset_match_win_banner()
 	if _rematch_vote_unlock_timer and _rematch_vote_unlock_timer.time_left > 0.0:
 		_rematch_vote_unlock_timer.stop()
 	if _rematch_overlay:

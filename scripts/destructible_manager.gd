@@ -30,6 +30,7 @@ static func apply_blast(
 		return
 	if radius <= 0.0 or damage <= 0.0:
 		return
+	var _t := Time.get_ticks_usec()
 	var hit_ids: Array[int] = []
 	var i := 0
 	while i < _registered_ids.size():
@@ -54,6 +55,7 @@ static func apply_blast(
 			node.call("queue_carve_world", world_pos, radius, hit_normal)
 			if node.has_method("apply_pending_carves"):
 				node.call("apply_pending_carves")
+	Trace.prof("carve", Time.get_ticks_usec() - _t)
 
 
 static func carve_sphere(

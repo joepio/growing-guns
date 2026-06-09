@@ -182,19 +182,41 @@ func _spawn_beam() -> bool:
 	if _fx_scene == null:
 		return false
 	var dist := maxf(sky_from.distance_to(target_pos), 0.5)
+	# Narrow, bright targeting laser styled like the explosion fireball: a thin
+	# white-hot core with a red glow sheathing it. Both additive so the centre
+	# reads white and the margin reads red.
 	_beam = MeshInstance3D.new()
 	_beam.name = "StrikeBeam"
-	var mesh := BoxMesh.new()
-	mesh.size = Vector3(0.12, 0.12, dist)
-	_beam.mesh = mesh
+	var core_mesh := BoxMesh.new()
+	core_mesh.size = Vector3(0.035, 0.035, dist)
+	_beam.mesh = core_mesh
 	_beam_mat = StandardMaterial3D.new()
 	_beam_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	_beam_mat.albedo_color = Color(MARKER_COLOR.r, MARKER_COLOR.g, MARKER_COLOR.b, 0.72)
-	_beam_mat.emission_enabled = true
-	_beam_mat.emission = MARKER_COLOR
-	_beam_mat.emission_energy_multiplier = 9.0
 	_beam_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_beam_mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	_beam_mat.albedo_color = Color(1.0, 1.0, 1.0, 1.0)
+	_beam_mat.emission_enabled = true
+	_beam_mat.emission = Color(1.0, 1.0, 1.0)
+	_beam_mat.emission_energy_multiplier = 16.0
 	_beam.material_override = _beam_mat
+
+	# Red glow sheath — wider than the core but still narrower than the old beam.
+	var glow := MeshInstance3D.new()
+	glow.name = "StrikeBeamGlow"
+	var glow_mesh := BoxMesh.new()
+	glow_mesh.size = Vector3(0.085, 0.085, dist)
+	glow.mesh = glow_mesh
+	var glow_mat := StandardMaterial3D.new()
+	glow_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	glow_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	glow_mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	glow_mat.albedo_color = Color(MARKER_COLOR.r, MARKER_COLOR.g, MARKER_COLOR.b, 0.9)
+	glow_mat.emission_enabled = true
+	glow_mat.emission = MARKER_COLOR
+	glow_mat.emission_energy_multiplier = 7.0
+	glow.material_override = glow_mat
+	_beam.add_child(glow)
+
 	_fx_scene.add_child(_beam)
 	_beam.global_position = sky_from.lerp(target_pos, 0.5)
 	_orient_along_path(_beam, sky_from, target_pos)
@@ -382,7 +404,8 @@ func _process(delta: float) -> void:
 	_pulse += delta
 	var pulse := sin(_pulse * (14.0 if _inbound else 6.2))
 	if _beam_mat:
-		var beam_energy := (10.0 + pulse * 3.0) if _inbound else (8.0 + pulse * 2.0)
+		# Brighter white-hot core (the red glow sheath stays steady).
+		var beam_energy := (18.0 + pulse * 5.0) if _inbound else (14.0 + pulse * 3.0)
 		_beam_mat.emission_energy_multiplier = beam_energy
 	if _target_light and not _inbound:
 		_target_light.light_energy = 5.0 + pulse * 1.5

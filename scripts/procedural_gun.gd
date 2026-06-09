@@ -83,7 +83,7 @@ extends Node3D
 # and retire the oldest — so few shots linger but a firefight stays bounded.
 @export var casing_radius_frac: float = 0.7   # fraction of barrel_radius
 @export var casing_length_frac: float = 0.4   # fraction of receiver length
-@export var max_casings: int = 50             # oldest casing retires past this
+@export var max_casings: int = 30             # oldest casing retires past this (active rigid bodies are the top frame-hitch driver)
 @export var casing_eject_speed: float = 2.8   # base m/s (jittered ±30%)
 @export var casing_color: Color = Color(0.85, 0.65, 0.25)  # brass
 # FIFO of this gun's live casings (oldest first). Casings live in current_scene,

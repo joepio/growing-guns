@@ -239,6 +239,7 @@ func show_damage_direction(from_pos: Vector3) -> void:
 
 
 func show_death_effect(show: bool) -> void:
+	Trace.mark("death effect %s (render_player id=%d)" % ["SHOW→opaque" if show else "hide", player_id])
 	if show:
 		hide_round_win()
 	var death: ColorRect = _hud.death
