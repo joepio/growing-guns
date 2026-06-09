@@ -38,6 +38,44 @@ var _prev_listener_dist_sq: float = INF
 # as a long streak; slow bullets stay short and chunky.
 var _trail_inst: MeshInstance3D = null
 var _max_trail_length: float = 2.0
+var _trail_thickness: float = 0.04
+
+# Shared visual resources. Each bullet used to allocate two BoxMeshes and a
+# StandardMaterial3D in setup() — at hundreds of bullets per mag-dump frame
+# (minigun + uzi stacks) that alloc + GPU upload churn was a frame-time spike.
+# A single unit cube (sized per-bullet via instance scale) and a small dedup
+# cache of immutable tracer materials remove nearly all of it.
+static var _bullet_box_mesh: BoxMesh = null
+static var _tracer_mat_cache: Dictionary = {}
+
+static func _get_bullet_box_mesh() -> BoxMesh:
+	if _bullet_box_mesh == null:
+		_bullet_box_mesh = BoxMesh.new()
+		_bullet_box_mesh.size = Vector3.ONE
+	return _bullet_box_mesh
+
+# Tracer materials are never mutated after creation, so identical visuals can
+# share one instance. Key on quantized colour/alpha/emission so a weapon's
+# stream collapses to ~1-2 materials instead of one per bullet.
+static func _get_tracer_material(color: Color, alpha: float, emission_energy: float, additive: bool) -> StandardMaterial3D:
+	var key := "%d_%d_%d_%d_%d_%d" % [
+		int(color.r * 64.0), int(color.g * 64.0), int(color.b * 64.0),
+		int(alpha * 32.0), int(emission_energy * 8.0), 1 if additive else 0]
+	var cached: StandardMaterial3D = _tracer_mat_cache.get(key)
+	if cached != null:
+		return cached
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	if additive:
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+		mat.no_depth_test = true
+	mat.albedo_color = Color(color.r, color.g, color.b, alpha)
+	mat.emission_enabled = true
+	mat.emission = color
+	mat.emission_energy_multiplier = emission_energy
+	_tracer_mat_cache[key] = mat
+	return mat
 
 const HITSCAN_THRESHOLD := 550.0
 const SILENCED_OWNER_TRACER_ALPHA := 0.12
@@ -78,38 +116,30 @@ func setup(origin: Vector3, dir: Vector3, shooter: int, w: Weapon, p_last_in_mag
 
 	look_at(global_position + direction)
 
-	var mat: StandardMaterial3D = StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	var s: float = weapon_stats.get_bullet_scale_for_shot(last_in_mag)
 	var tracer_color := weapon_stats.bullet_color.lerp(Color.WHITE, 0.18)
 	var tracer_alpha := SILENCED_OWNER_TRACER_ALPHA if silenced else 1.0
-	if tracer_alpha < 1.0:
-		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
-		mat.no_depth_test = true
-	mat.albedo_color = Color(tracer_color.r, tracer_color.g, tracer_color.b, tracer_alpha)
-	mat.emission_enabled = true
-	mat.emission = tracer_color
-	mat.emission_energy_multiplier = clampf(1.6 * weapon_stats.get_bullet_scale_for_shot(last_in_mag), 1.2, 4.5) * (0.45 if silenced else 1.0)
+	var emission_energy := clampf(1.6 * s, 1.2, 4.5) * (0.45 if silenced else 1.0)
+	# Shared/cached material + one shared unit cube (sized via instance scale).
+	var mat := _get_tracer_material(tracer_color, tracer_alpha, emission_energy, tracer_alpha < 1.0)
+	var cube := _get_bullet_box_mesh()
 
 	# Head — a small bright dot that always sits at the bullet's tip.
-	var s: float = weapon_stats.get_bullet_scale_for_shot(last_in_mag)
 	var head_inst := MeshInstance3D.new()
-	var head_box := BoxMesh.new()
-	head_box.size = Vector3(0.08 * s, 0.08 * s, 0.14 * s)
-	head_inst.mesh = head_box
+	head_inst.mesh = cube
 	head_inst.material_override = mat
+	head_inst.scale = Vector3(0.08 * s, 0.08 * s, 0.14 * s)
 	add_child(head_inst)
 
-	# Trail — unit-length box anchored so its FRONT face touches the head and
-	# extends backwards along travel direction (+local Z, since look_at puts
-	# our forward at -Z). Each physics tick scales it to match how far we've
-	# come, capped to keep the streak from stretching across the map.
+	# Trail — unit cube anchored so its FRONT face touches the head and extends
+	# backwards along travel direction (+local Z, since look_at puts our forward
+	# at -Z). x/y carry the bullet thickness; each physics tick sets z to match
+	# how far we've come, capped to keep the streak from stretching across the map.
+	_trail_thickness = 0.04 * s
 	_trail_inst = MeshInstance3D.new()
-	var trail_box := BoxMesh.new()
-	trail_box.size = Vector3(0.04 * s, 0.04 * s, 1.0)
-	_trail_inst.mesh = trail_box
+	_trail_inst.mesh = cube
 	_trail_inst.material_override = mat
-	_trail_inst.scale = Vector3(1.0, 1.0, 0.001)  # invisible until first tick
+	_trail_inst.scale = Vector3(_trail_thickness, _trail_thickness, 0.001)  # invisible until first tick
 	add_child(_trail_inst)
 
 	# Faster rounds get longer max streaks. SNIPER (×2.5) → ~8 m; HITSCAN
@@ -167,7 +197,7 @@ func _physics_process(delta: float) -> void:
 
 	if _trail_inst:
 		var trail_len: float = clampf(distance_traveled, 0.001, _max_trail_length)
-		_trail_inst.scale = Vector3(1.0, 1.0, trail_len)
+		_trail_inst.scale = Vector3(_trail_thickness, _trail_thickness, trail_len)
 		# Front face of the unit-Z box sits at the bullet origin; centre is
 		# half a length back along +Z (which is "behind" since forward is -Z).
 		_trail_inst.position = Vector3(0.0, 0.0, trail_len * 0.5)
