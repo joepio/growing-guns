@@ -50,6 +50,20 @@ const MAX_FIRST_PERSON_CASINGS_PER_TRIGGER := 4
 const MAX_SHOT_FX_PER_FRAME := 1
 const MAX_THIRD_PERSON_CASINGS_PER_FRAME := 3
 const HIGH_RATE_REMOTE_CASING_BPS := 90.0
+# Global cap on live third-person shell casings (RigidBody3D ejected by every
+# remote shooter / bot). Previously only per-frame + 4s-lifetime limited, so
+# RPM-spam piled 100+ active bodies — the dominant rigid-body source under heavy
+# fire. FP casings are capped separately in procedural_gun (max_casings).
+const MAX_ACTIVE_TP_CASINGS := 28
+static var _tp_casing_fifo: Array[RigidBody3D] = []
+
+static func _enroll_tp_casing(rb: RigidBody3D) -> void:
+	_tp_casing_fifo.append(rb)
+	rb.tree_exiting.connect(func() -> void: _tp_casing_fifo.erase(rb))
+	while _tp_casing_fifo.size() > MAX_ACTIVE_TP_CASINGS:
+		var oldest: RigidBody3D = _tp_casing_fifo.pop_front()
+		if is_instance_valid(oldest):
+			oldest.queue_free()
 const HIGH_RATE_REMOTE_CASING_INTERVAL_MS := 90
 const GRENADE_RELOAD := 3.0
 const CLUSTER_GRENADE_RELOAD := 4.0
@@ -1850,7 +1864,9 @@ func get_hitbox_rids() -> Array[RID]:
 func _spawn_bullet_blast(pos: Vector3, radius: float, color: Color, play_audio: bool = false) -> void:
 	var scene: Node = get_tree().current_scene
 	var lp: Node = scene.get("local_player") if scene else null
+	var _t := Time.get_ticks_usec()
 	Violence.spawn_bullet_blast(scene, pos, radius, color, lp, play_audio)
+	Trace.prof("blast_vfx", Time.get_ticks_usec() - _t)
 
 func apply_explosion_view_punch(pos: Vector3, radius: float, peak: float = 1.0) -> void:
 	Violence.apply_explosion_view_punch(self, pos, radius, peak)
@@ -2023,10 +2039,13 @@ func _spawn_third_person_casing(w: Weapon) -> void:
 		randf_range(-10.0, 10.0),
 		randf_range(-10.0, 10.0),
 	)
+	# Cap the total live third-person casings (oldest retires past the cap) so a
+	# sustained firefight can't pile up active rigid bodies.
+	_enroll_tp_casing(rb)
 	# Bind the casing's own queue_free: if the casing is freed earlier (round
 	# reset clears the world), the timeout connection auto-disconnects instead
 	# of firing a lambda whose captured `rb` was already freed.
-	get_tree().create_timer(4.0).timeout.connect(rb.queue_free)
+	get_tree().create_timer(2.5).timeout.connect(rb.queue_free)
 
 @rpc("any_peer", "call_local", "reliable")
 func _hit_confirm(is_headshot: bool, dmg: int = 0, hit_pos: Vector3 = Vector3.INF) -> void:
