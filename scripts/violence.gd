@@ -185,6 +185,40 @@ static func _warmup_mm_material(scene: Node, mat: Material) -> void:
 	t.start()
 	t.timeout.connect(mmi.queue_free)
 
+# Spawn a throwaway player-body gib burst far below the arena during the
+# loading screen so the first real overkill doesn't freeze. prewarm_disintegration_cache()
+# already caches the Voronoi variant meshes, but the GPU side is still cold: the
+# chunk render compiles two fresh PSOs (the body material as a double-sided
+# CULL_DISABLED variant + the interior flesh material with vertex colors) and
+# the render thread stalls ~100-250ms on first draw. This exercises that exact
+# path — real meshes, real materials, real chunk geometry — so force_draw()
+# compiles the PSOs while the overlay hides everything. burst_strength 0 keeps
+# the chunks at the hidden origin; the 0.5s lifetime frees them right after.
+static func warmup_gib_render(scene: Node) -> void:
+	if scene == null:
+		return
+	var player_scene: PackedScene = load("res://scenes/player.tscn") as PackedScene
+	if player_scene == null:
+		return
+	var temp: Node = player_scene.instantiate()
+	var body_model: Node = temp.get_node_or_null("BodyModel")
+	if body_model:
+		var meshes: Array[MeshInstance3D] = []
+		collect_meshes(body_model, meshes)
+		# Far below the arena floor: invisible, and the chunks have nothing to
+		# collide with while they live out their short warmup lifetime.
+		var origin := Transform3D(Basis(), Vector3(0.0, -1000.0, 0.0))
+		for src in meshes:
+			if src.mesh == null:
+				continue
+			gib_explode(
+				src.mesh, origin, scene, src.material_override,
+				Vector3.ZERO, 0.0, GIB_CHUNK_COUNT, 0.5,
+			)
+	# Chunks duplicate their own material and build meshes from the cache, so
+	# they don't reference temp's nodes — safe to free immediately.
+	temp.free()
+
 static func _gib_warm_task(mesh: Mesh, chunk_count: int) -> void:
 	var variants: Array = _gib_build_variants(mesh, chunk_count)
 	_gib_cache_mutex.lock()
@@ -1133,6 +1167,7 @@ static var _full_blast_window_ms: int = -10000
 static var _full_blasts_this_window: int = 0
 static var _active_smoke_puffs: int = 0
 static var _pending_smoke_puffs: int = 0
+static var _active_blast_smoke_layers: int = 0
 static var _smoke_burst_window_ms: int = -10000
 static var _smoke_burst_count: int = 0
 static var _explosion_sfx_window_ms: int = -10000
@@ -1147,6 +1182,16 @@ const FULL_BLAST_WINDOW_MS := 500
 const MAX_FULL_BLASTS_PER_WINDOW := 25   # ~50/sec sustained; bursts still capped by MAX_FULL_BLASTS_PER_FRAME + 3m cluster dedup
 const MAX_ACTIVE_SMOKE_PUFFS := 36
 const MAX_PENDING_SMOKE_PUFFS := 12
+# Concurrent blast smoke-billow layers (the "blast_smoke_layers" group). Uncapped
+# this pile grows with explosion rate, and _push_nearby_blast_smoke re-tweens the
+# whole pile per blast → O(blasts × layers). Capping bounds that to O(blasts) and
+# also trims draw calls/overdraw. Only bites during heavy explosion spam; isolated
+# blasts stay well under it.
+const MAX_ACTIVE_BLAST_SMOKE_LAYERS := 32
+# Per-blast, only shove the nearest N smoke layers (the visually relevant ones).
+# Caps push work even within the layer budget; isolated blasts with fewer live
+# layers push all of them.
+const MAX_SMOKE_PUSH_PER_BLAST := 12
 const SMOKE_BURST_WINDOW_MS := 750
 const MAX_SMOKE_BURSTS_PER_WINDOW := 1
 const EXPLOSION_SFX_WINDOW_MS := 500
@@ -1163,6 +1208,20 @@ static func _attach_world_3d(scene: Node, node: Node3D, world_pos: Vector3) -> v
 		node.global_position = world_pos
 	else:
 		node.position = world_pos
+
+
+static var _perf_governor: Node = null
+
+# Adaptive VFX quality in [PerfGovernor.MIN_SCALE, 1.0]; 1.0 (full quality) when
+# the governor autoload is absent (isolated tool scripts / before tree is up).
+static func vfx_quality_scale() -> float:
+	if _perf_governor == null or not is_instance_valid(_perf_governor):
+		var loop := Engine.get_main_loop()
+		if loop is SceneTree:
+			_perf_governor = (loop as SceneTree).root.get_node_or_null("PerfGovernor")
+	if _perf_governor:
+		return _perf_governor.quality_scale
+	return 1.0
 
 
 static func _begin_blast_frame() -> void:
@@ -1184,7 +1243,11 @@ static func _claim_full_blast(pos: Vector3) -> bool:
 	if now - _full_blast_window_ms >= FULL_BLAST_WINDOW_MS:
 		_full_blast_window_ms = now
 		_full_blasts_this_window = 0
-	if _full_blasts_this_frame >= MAX_FULL_BLASTS_PER_FRAME:
+	# Adaptive: under load, fewer blasts get the full (distortion + light + smoke
+	# + cloud + ember) treatment; the rest fall back to the cheap flare. Never
+	# below 1 so explosions always read as explosions.
+	var max_full := maxi(1, int(round(MAX_FULL_BLASTS_PER_FRAME * vfx_quality_scale())))
+	if _full_blasts_this_frame >= max_full:
 		return false
 	if _full_blasts_this_window >= MAX_FULL_BLASTS_PER_WINDOW:
 		return false
@@ -1376,7 +1439,7 @@ static func spawn_blast_flame_shards(scene: Node, pos: Vector3, radius: float, c
 		return
 	if BenchFlags.active and BenchFlags.no_explosion_visuals:
 		return
-	var count := int(round(clampi(int(radius * 0.9), 5, 14) * blast_shard_count_scale))
+	var count := int(round(clampi(int(radius * 0.9), 5, 14) * blast_shard_count_scale * vfx_quality_scale()))
 	if count <= 0:
 		return
 	var rng := RandomNumberGenerator.new()
@@ -1408,7 +1471,7 @@ static func spawn_blast_embers(scene: Node, pos: Vector3, radius: float, color: 
 		return
 	if BenchFlags.active and BenchFlags.no_explosion_visuals:
 		return
-	var count := int(round(clampi(int(radius * 5.0), 30, 110) * blast_ember_count_scale))
+	var count := int(round(clampi(int(radius * 5.0), 30, 110) * blast_ember_count_scale * vfx_quality_scale()))
 	if count <= 0:
 		return
 	var rng := RandomNumberGenerator.new()
@@ -1551,6 +1614,12 @@ static func _get_billow_mm_shader() -> Shader:
 # Builds one cloud layer as a single MultiMesh + material + tween.
 static func _spawn_blast_billow(scene: Node, pos: Vector3, radius: float, count: int,
 		is_fire: bool, tint: Color, layer_life: float, scale_lo: float, scale_hi: float, rise: float) -> void:
+	# Smoke layers (non-fire) join "blast_smoke_layers" and get re-tweened by every
+	# later blast — bound how many can pile up. Bail before building the MultiMesh
+	# so a capped layer costs nothing. Fire billows aren't pushed, so they skip this.
+	var smoke_layer_cap := maxi(4, int(round(MAX_ACTIVE_BLAST_SMOKE_LAYERS * vfx_quality_scale())))
+	if not is_fire and _active_blast_smoke_layers >= smoke_layer_cap:
+		return
 	var rng := RandomNumberGenerator.new()
 	var mm := MultiMesh.new()
 	mm.transform_format = MultiMesh.TRANSFORM_3D
@@ -1607,6 +1676,11 @@ static func _spawn_blast_billow(scene: Node, pos: Vector3, radius: float, count:
 	else:
 		var pivot := Node3D.new()
 		pivot.add_to_group("blast_smoke_layers")
+		# Count against the concurrency cap; tree_exiting fires on any free (tween
+		# finish, round reset, clear_smoke_puffs) so the counter can't leak.
+		_active_blast_smoke_layers += 1
+		pivot.tree_exiting.connect(func() -> void:
+			_active_blast_smoke_layers = maxi(0, _active_blast_smoke_layers - 1))
 		pivot.set_meta("billow_layer_life", layer_life)
 		pivot.set_meta("billow_rise", rise)
 		pivot.set_meta("billow_mat", mat)
@@ -1639,15 +1713,25 @@ static func _push_nearby_blast_smoke(scene: Node, blast_pos: Vector3, blast_radi
 	bench_smoke_push_calls += 1
 	var reach := blast_radius * 3.8 + 14.0
 	var strength := clampf(blast_radius / 8.0, 0.55, 2.8)
+	# Collect in-range layers with their distance, then shove only the nearest
+	# MAX_SMOKE_PUSH_PER_BLAST — those are the ones the eye reads. Skipping the
+	# far ones keeps a dense explosion-spam from re-tweening hundreds of clouds.
+	var candidates: Array = []
 	for node in tree.get_nodes_in_group("blast_smoke_layers"):
 		if not is_instance_valid(node) or not node is Node3D:
 			continue
-		var pivot := node as Node3D
+		var dist := (node as Node3D).global_position.distance_to(blast_pos)
+		if dist >= reach:
+			continue
+		candidates.append({"pivot": node, "dist": dist})
+	if candidates.size() > MAX_SMOKE_PUSH_PER_BLAST:
+		candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a["dist"] < b["dist"])
+		candidates.resize(MAX_SMOKE_PUSH_PER_BLAST)
+	for cand in candidates:
+		var pivot := cand["pivot"] as Node3D
 		var cloud_pos := pivot.global_position
 		var delta := cloud_pos - blast_pos
-		var dist_3d := delta.length()
-		if dist_3d >= reach:
-			continue
+		var dist_3d: float = cand["dist"]
 		var closeness := 1.0 - dist_3d / reach
 		var away: Vector3
 		var horiz_sq := delta.x * delta.x + delta.z * delta.z
@@ -1687,7 +1771,7 @@ static func spawn_blast_fire_smoke(scene: Node, pos: Vector3, radius: float, col
 		return
 	if BenchFlags.active and BenchFlags.no_explosion_visuals:
 		return
-	var count := int(round(clampi(int(radius * 1.1), 8, 24) * blast_smoke_count_scale))
+	var count := int(round(clampi(int(radius * 1.1), 8, 24) * blast_smoke_count_scale * vfx_quality_scale()))
 	if count <= 0:
 		return
 	# Lifetime scales with blast size: a small grenade (r≈6) smokes ~1.3s, a huge
@@ -1704,7 +1788,7 @@ static func spawn_blast_fire_clouds(scene: Node, pos: Vector3, radius: float, co
 		return
 	if BenchFlags.active and BenchFlags.no_explosion_visuals:
 		return
-	var count := int(round(clampi(int(radius * 0.8), 6, 18) * blast_fire_cloud_count_scale))
+	var count := int(round(clampi(int(radius * 0.8), 6, 18) * blast_fire_cloud_count_scale * vfx_quality_scale()))
 	if count <= 0:
 		return
 	# Fire shape burns longer for bigger blasts (r≈6 → ~0.7s, r≈30 → ~2s).
@@ -1809,10 +1893,10 @@ static func _spawn_blast_fireball_light(scene: Node, pos: Vector3, radius: float
 	var range_start := clampf(ball_radius * 1.2, 10.0, 36.0)
 	var range_end := clampf(ball_radius * 3.8, 16.0, 92.0)
 	glow.omni_attenuation = 0.42
-	glow.shadow_enabled = true
-	glow.omni_shadow_mode = OmniLight3D.SHADOW_DUAL_PARABOLOID
-	glow.shadow_bias = 0.08
-	glow.shadow_normal_bias = 1.0
+	# No shadows: this is a ~0.27s flash, so the dual-paraboloid omni shadow map
+	# (scene geometry re-rendered per frame, per concurrent fireball) is pure GPU
+	# cost on weak hardware for a shadow that flickers by too fast to read.
+	glow.shadow_enabled = false
 	_attach_world_3d(scene, glow, pos)
 	_tween_blast_fireball_light(glow, radius, color, energy_mult, range_start, range_end)
 

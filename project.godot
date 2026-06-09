@@ -15,7 +15,7 @@ config/description="High-paced multiplayer arena shooter"
 config/version="0.2.23"
 run/main_scene="res://scenes/game.tscn"
 config/features=PackedStringArray("4.6", "Forward Plus")
-run/max_fps=120
+run/max_fps=360
 config/icon="res://icon.svg"
 
 [audio]
@@ -27,6 +27,7 @@ general/3d_panning_strength=1.0
 NetworkManager="*res://scripts/network_manager.gd"
 SFX="*res://scripts/sfx.gd"
 ProceduralMusic="*res://scripts/procedural_music.gd"
+PerfGovernor="*res://scripts/perf_governor.gd"
 
 [debug]
 

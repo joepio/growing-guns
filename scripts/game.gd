@@ -385,26 +385,8 @@ func _ready() -> void:
 		if bot_requested:
 			_spawn_bots(requested_count, spawn_used)
 		# Warm up GPU pipelines before the first round. Everything (arena,
-		# players, gun) is now in the scene tree. The loading overlay hides
-		# whatever garbage the GPU draws while compiling. We add warmup
-		# meshes for every effect shader, then force the render thread to
-		# process all pending draws synchronously via
-		# RenderingServer.force_draw(). This blocks until the GPU driver has
-		# compiled all PSOs — no guessing, no timer.
-		if not _effect_shaders_warmed and has_node("Arena"):
-			_effect_shaders_warmed = true
-			var arena := $Arena
-			preload("res://scripts/grenade.gd").warmup_shaders(arena)
-			Violence.warmup_blast_materials(arena)
-			ION_CANNON_SCRIPT.warmup_shaders(arena)
-			preload("res://scripts/player.gd").warmup_phoenix_shaders(arena)
-			# Let one frame render so the loading overlay is visible, then force
-			# the GPU to compile all PSOs synchronously while the overlay hides it.
-			await get_tree().process_frame
-			RenderingServer.force_draw()
-			_hide_loading_overlay()
-		else:
-			_hide_loading_overlay()
+		# players, gun) is now in the scene tree, so the host warms here.
+		await _warmup_effect_shaders_and_hide_overlay()
 		_maybe_start_match()
 
 		# Solo-vs-AI fallback: with the main menu gone, every fresh launch
@@ -1218,6 +1200,12 @@ func _do_spawn(
 			listener.owner = cam
 		if not (_splitscreen and _splitscreen.is_enabled()):
 			_ensure_render_player(id, p.local_input_device)
+		# A joining client never warmed shaders / hid the boot overlay in
+		# _ready (only the server branch does). Now that our view exists and
+		# the arena is in the tree, warm and reveal. Host already did this in
+		# _ready, so gate to clients to keep the host path untouched.
+		if not multiplayer.is_server():
+			_warmup_effect_shaders_and_hide_overlay()
 	if _splitscreen and _splitscreen.is_enabled() and split_local:
 		# Manager owns the device→player_id map server-side; on clients we
 		# just need the view layout refreshed so the new SubViewport appears.
@@ -2801,7 +2789,7 @@ const SETTINGS_PATH := "user://settings.cfg"
 const MUSIC_DB_MIN := -40.0  # below this is treated as muted
 const MUSIC_DB_MAX := 0.0
 const MUSIC_DB_DEFAULT := -16.0
-var _retro_enabled: bool = true
+var _retro_enabled: bool = false
 
 func _is_retro_enabled() -> bool:
 	return _retro_enabled
@@ -2815,7 +2803,10 @@ func _load_settings() -> void:
 	var cfg := ConfigFile.new()
 	if cfg.load(SETTINGS_PATH) != OK:
 		return
-	_retro_enabled = cfg.get_value("video", "retro", cfg.get_value("video", "dither", true))
+	# Default OFF for fresh players — not everyone likes the retro/fisheye look.
+	# Anyone who already saved a "video/retro" (or legacy "video/dither") choice
+	# keeps it; only players with neither key fall through to the new false default.
+	_retro_enabled = cfg.get_value("video", "retro", cfg.get_value("video", "dither", false))
 	# Migrate the old bool setting: if music=false was saved, start the slider
 	# at the muted floor so behaviour matches the previous toggle. Otherwise
 	# read the new music_db key (with default volume).
@@ -3035,6 +3026,28 @@ func _show_loading_overlay() -> void:
 func _hide_loading_overlay() -> void:
 	if _loading_overlay:
 		_loading_overlay.visible = false
+
+
+func _warmup_effect_shaders_and_hide_overlay() -> void:
+	# Compile every effect shader's PSO while the loading overlay still hides
+	# the GPU garbage, then drop the overlay. We add warmup meshes for every
+	# effect shader, let one frame render so the overlay is visible, then force
+	# the render thread to process all pending draws synchronously via
+	# RenderingServer.force_draw() — this blocks until the GPU driver has
+	# compiled all PSOs, no guessing, no timer. Idempotent via
+	# _effect_shaders_warmed so the host (warms in _ready) and a joining client
+	# (warms in _do_spawn) never double-warm.
+	if not _effect_shaders_warmed and has_node("Arena"):
+		_effect_shaders_warmed = true
+		var arena := $Arena
+		preload("res://scripts/grenade.gd").warmup_shaders(arena)
+		Violence.warmup_blast_materials(arena)
+		ION_CANNON_SCRIPT.warmup_shaders(arena)
+		preload("res://scripts/player.gd").warmup_phoenix_shaders(arena)
+		Violence.warmup_gib_render(arena)
+		await get_tree().process_frame
+		RenderingServer.force_draw()
+	_hide_loading_overlay()
 
 
 func set_phoenix_fade(player_id: int, alpha: float) -> void:
