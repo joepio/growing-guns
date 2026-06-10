@@ -43,18 +43,18 @@ static func apply_blast(
 		if _registered_centers[i].distance_squared_to(world_pos) <= reach * reach:
 			hit_ids.append(id)
 		i += 1
+	# Queue only — the carve is applied once per physics tick by flush() (the
+	# body marks itself dirty in queue_*). Applying synchronously here made the
+	# per-tick batching dead code and paid full removal+debris cost per blast;
+	# deferring lets all of a body's blasts in a tick merge into one sweep.
 	for id: int in hit_ids:
 		var node: Object = instance_from_id(id)
 		if not is_instance_valid(node):
 			continue
 		if node.has_method("queue_blast_damage"):
 			node.call("queue_blast_damage", world_pos, radius, damage, hit_normal)
-			if node.has_method("apply_pending_carves"):
-				node.call("apply_pending_carves")
 		elif node.has_method("queue_carve_world"):
 			node.call("queue_carve_world", world_pos, radius, hit_normal)
-			if node.has_method("apply_pending_carves"):
-				node.call("apply_pending_carves")
 	Trace.prof("carve", Time.get_ticks_usec() - _t)
 
 
@@ -171,3 +171,17 @@ static func flush() -> void:
 	_dirty_set.clear()
 	for id: int in _dirty:
 		_dirty_set[id] = true
+
+
+# Chunk-removal counter — lets the stress bench report removals/sec (frame time
+# at high blast rates is dominated by removals + debris, not the carve math).
+static var _chunk_removals_total: int = 0
+
+static func note_chunk_removals(n: int) -> void:
+	_chunk_removals_total += n
+
+static func debug_chunk_removals() -> int:
+	return _chunk_removals_total
+
+static func reset_chunk_removals() -> void:
+	_chunk_removals_total = 0

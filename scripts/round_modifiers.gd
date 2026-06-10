@@ -16,6 +16,7 @@ const IDS: PackedStringArray = [
 	"sniper_fight",
 	"air_strikes",
 	"ion_cannon",
+	"blackout",
 ]
 
 const GRAVITY_MULT := 0.6          # −40% gravity
@@ -107,6 +108,12 @@ static func display_info(mod_id: String) -> Dictionary:
 				"title": "ION CANNON",
 				"subtitle": "Orbital beams from above",
 				"color": Color(0.35, 0.72, 1.0),
+			}
+		"blackout":
+			return {
+				"title": "BLACKOUT",
+				"subtitle": "Lights out — use your flashlight",
+				"color": Color(0.3, 0.32, 0.45),
 			}
 		_:
 			return {"title": "", "subtitle": "", "color": Color.WHITE}
