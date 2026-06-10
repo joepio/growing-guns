@@ -113,8 +113,6 @@ var _flashlight: SpotLight3D = null
 @onready var legs_hitbox: Area3D = $LegsHitbox
 @onready var name_label: Label3D = $NameLabel
 @onready var gun_body: MeshInstance3D = $Camera/Muzzle/GunMesh
-@onready var blade: MeshInstance3D = $Camera/Muzzle/Blade
-var _blade_rest_transform: Transform3D
 var gun_barrel: MeshInstance3D = null
 var gun_magazine: MeshInstance3D = null
 var _procedural_gun: Node3D = null
@@ -383,8 +381,8 @@ func _setup_third_person_gun() -> void:
 # Per-player flashlight. Childed to the body (inherits yaw) at head height; its
 # pitch is driven from look_pitch each frame so it points where the player aims
 # for local AND remote players (both yaw + look_pitch are synced). Lives on the
-# player node so every peer sees the cone sweeping. No shadows (perf). Off until
-# the blackout round modifier turns it on via set_flashlight_active().
+# player node so every peer sees the cone sweeping. Off until the blackout round
+# modifier turns it on via set_flashlight_active().
 func _build_flashlight() -> void:
 	_flashlight = SpotLight3D.new()
 	_flashlight.name = "Flashlight"
@@ -404,6 +402,7 @@ func _build_flashlight() -> void:
 	# off-left origin holds regardless of body scale.
 	_flashlight.top_level = true
 	_flashlight.visible = false
+	_flashlight.add_to_group("flashlight_flares")
 	add_child(_flashlight)
 
 
@@ -415,20 +414,39 @@ func set_flashlight_active(on: bool) -> void:
 			var target := _flashlight_target_xform()
 			_flashlight.global_position = target.origin
 			_flashlight.global_basis = target.basis
+			_update_flashlight_flare_meta()
+
+
+func _update_flashlight_flare_meta() -> void:
+	if _flashlight == null or not _flashlight.visible:
+		return
+	_flashlight.set_meta("flare_world_pos", _flashlight.global_position)
+	_flashlight.set_meta("flare_intensity", 1.0)
 
 
 # Where the flashlight wants to be this frame: head + off-left origin, aimed
 # along the player's yaw + look pitch. The beam slerps toward this for the lag.
 func _flashlight_target_xform() -> Transform3D:
 	var origin := to_global(_camera_rest_pos + FLASHLIGHT_OFFSET)
-	var basis := Basis.from_euler(Vector3(_aim_pitch(), rotation.y, 0.0))
-	return Transform3D(basis, origin)
+	return Transform3D(_flashlight_aim_basis(), origin)
 
 
-# Vertical aim: the live look_pitch when we own this body, else the value synced
-# from its owner (remote players / bots viewed on another peer).
+func _flashlight_aim_basis() -> Basis:
+	# Humans: match the live camera aim exactly (same cone the owner sees).
+	if is_multiplayer_authority() and not is_bot:
+		return camera.global_transform.basis
+	var pitch := _aim_pitch()
+	return Basis.from_euler(Vector3(pitch, rotation.y, 0.0))
+
+
+# Vertical aim: live look_pitch for humans, blob rig pitch for bots, synced
+# pitch for remote players viewed on another peer.
 func _aim_pitch() -> float:
-	return look_pitch if is_multiplayer_authority() else _remote_target_pitch
+	if is_bot:
+		return blob_rig.rotation.x
+	if is_multiplayer_authority():
+		return look_pitch
+	return _remote_target_pitch
 
 func _apply_identity_skin_materials() -> StandardMaterial3D:
 	if head_blob == null:
@@ -596,15 +614,6 @@ func _add_o_mouth() -> void:
 	head_blob.add_child(o)
 
 func _process(delta: float) -> void:
-	# Aim the flashlight where this player looks (works for local + remote; runs
-	# in _process so it updates for non-authority remote players too). Position
-	# follows instantly; orientation slerps toward the aim so the beam lags a
-	# touch behind turns (handheld feel). Gated to when it's on (blackout).
-	if _flashlight and _flashlight.visible:
-		var target := _flashlight_target_xform()
-		_flashlight.global_position = target.origin
-		_flashlight.global_basis = _flashlight.global_basis.slerp(
-			target.basis, clampf(delta * FLASHLIGHT_TURN_RATE, 0.0, 1.0))
 	if _ragdoll_head and is_instance_valid(_ragdoll_head):
 		camera.global_transform = _ragdoll_head.global_transform
 		return
@@ -616,6 +625,7 @@ func _process(delta: float) -> void:
 		if not _phoenix_ascending:
 			_interpolate_remote_state(delta)
 	_update_blob_motion(delta)
+	_update_flashlight_aim(delta)
 	if _hit_face_timer > 0.0:
 		_hit_face_timer = maxf(0.0, _hit_face_timer - delta)
 		if _hit_face_timer <= 0.0:
@@ -638,6 +648,17 @@ func _process(delta: float) -> void:
 		# not a lens animation.
 		camera.fov = 30.0 if is_zooming else 75.0
 		camera.rotation.z = lerp_angle(camera.rotation.z, deg_to_rad(tilt_z), delta * TILT_SPEED)
+
+
+func _update_flashlight_aim(delta: float) -> void:
+	if _flashlight == null or not _flashlight.visible:
+		return
+	var target := _flashlight_target_xform()
+	_flashlight.global_position = target.origin
+	_flashlight.global_basis = _flashlight.global_basis.slerp(
+		target.basis, clampf(delta * FLASHLIGHT_TURN_RATE, 0.0, 1.0))
+	_update_flashlight_flare_meta()
+
 
 func _interpolate_remote_state(delta: float) -> void:
 	if not _remote_has_target:
@@ -736,6 +757,7 @@ func _update_blob_motion(delta: float) -> void:
 		var aim_h := global_position.distance_to(_bot_target.global_position)
 		var bot_pitch := -atan2(to_y - from_y, aim_h)
 		blob_rig.rotation.x = lerp_angle(blob_rig.rotation.x, bot_pitch, clampf(delta * 12.0, 0.0, 1.0))
+		look_pitch = blob_rig.rotation.x
 	elif is_multiplayer_authority():
 		var target_pitch := deg_to_rad(clampf(-local_vel.z * 0.7 - vertical_speed * 1.6, -14.0, 14.0))
 		blob_rig.rotation.x = lerp_angle(blob_rig.rotation.x, target_pitch, clampf(delta * 8.0, 0.0, 1.0))
@@ -787,8 +809,6 @@ func _apply_ghost_visuals() -> void:
 	muzzle.visible = not ghost_mode
 	if _third_person_gun:
 		_third_person_gun.visible = not ghost_mode
-	if blade:
-		blade.transparency = 0.0
 
 	var gun_meshes: Array[MeshInstance3D] = []
 	if gun_body: gun_meshes.append(gun_body)
@@ -859,8 +879,6 @@ func _apply_phoenix_visuals(body_alpha: float = PHOENIX_ALPHA_START) -> void:
 		_procedural_gun.visible = false
 	if _third_person_gun:
 		_third_person_gun.visible = false
-	if blade:
-		blade.transparency = 0.0
 	for mesh in _body_meshes():
 		mesh.material_override = _make_phoenix_body_material(body_alpha)
 
@@ -3516,10 +3534,6 @@ func _setup_gun_visuals() -> void:
 	_procedural_gun.name = "ProceduralGun"
 	muzzle.add_child(_procedural_gun)
 
-	# Remember the blade's authored position so scaling it doesn't drift.
-	if blade:
-		_blade_rest_transform = blade.transform
-
 func _update_gun_visuals() -> void:
 	# Push the current weapon stats into the procedural gun. All
 	# stat→geometry mapping lives in procedural_gun.gd.
@@ -3530,18 +3544,6 @@ func _update_gun_visuals() -> void:
 		var bl: float = float(_procedural_gun.get("barrel_length"))
 		var pull: float = clampf((bl - 0.5) * 0.3, 0.0, 0.3)
 		_gun_pull_back = Vector3(0.0, 0.0, pull)
-
-	# Blade — under the gun, grows with melee damage × reach. BIG SWORD makes
-	# it very obviously a sword; default melee keeps it a small knife.
-	if blade:
-		var melee_s: float = sqrt(maxf(0.01, weapon.melee_damage_mult * weapon.melee_scale))
-		blade.scale = Vector3.ONE * melee_s
-		# Anchor the heel of the blade at its rest spot so the tip extends
-		# outward as it grows, rather than clipping into the gun body.
-		var base_pos: Vector3 = _blade_rest_transform.origin
-		var extra_reach: float = 0.25 * (melee_s - 1.0)    # push forward as blade grows (local +Z → forward-ish)
-		blade.transform = Transform3D(_blade_rest_transform.basis,
-			Vector3(base_pos.x, base_pos.y, base_pos.z - extra_reach))
 
 func _update_body_scale() -> void:
 	# BodyModel holds the visual mesh parts; hitboxes are siblings under the

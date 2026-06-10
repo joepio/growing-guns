@@ -349,7 +349,6 @@ func _do_cluster_pop_vfx(pos: Vector3, radius: float) -> void:
 	var scene: Node = get_tree().current_scene
 	if scene and scene.has_method("trigger_explosion_sidechain"):
 		scene.trigger_explosion_sidechain(pos, radius, 0.85)
-	Violence.spawn_blast_scorches(scene, pos, radius)
 	var core := MeshInstance3D.new()
 	var core_mesh := SphereMesh.new()
 	core_mesh.radius = 0.45
@@ -389,9 +388,6 @@ func _do_vfx() -> void:
 		scene.trigger_explosion_sidechain(pos, radius, 1.25)
 	Violence.spawn_heat_distortion(scene, pos, radius, Violence.blast_heat_distortion_duration(radius), Violence.blast_heat_distortion_strength(radius))
 	_spawn_shockwave_ring(scene, pos, radius)
-	# Surface scorch rings — same helper as explosive bullets, raycasts in
-	# the 6 cardinal directions and drops a soot crater on each surface hit.
-	Violence.spawn_blast_scorches(scene, pos, radius)
 
 	var col := Color(1.0, 0.9, 0.32)
 	# Fused fire/smoke body + flame shards + embers — the same stylized layers

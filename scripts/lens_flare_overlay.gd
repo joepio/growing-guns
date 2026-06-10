@@ -110,6 +110,44 @@ func _rocket_flare_intensity(rocket: Node3D) -> float:
 	return 0.0
 
 
+func _flashlight_flare_world_pos(light: Node3D) -> Vector3:
+	if light.has_meta("flare_world_pos"):
+		return light.get_meta("flare_world_pos")
+	return light.global_position
+
+
+func _flashlight_flare_intensity(light: Node3D) -> float:
+	if not light.visible:
+		return 0.0
+	if light.has_meta("flare_intensity"):
+		return clampf(float(light.get_meta("flare_intensity")), 0.0, 1.0)
+	return 1.0
+
+
+func _flashlight_flare_strength(light: Node3D, intensity: float) -> float:
+	if camera == null or not is_instance_valid(camera):
+		return 0.0
+	var dist := camera.global_position.distance_to(_flashlight_flare_world_pos(light))
+	var dist_falloff := 1.0 - clampf(dist / 42.0, 0.0, 1.0)
+	return lerpf(0.08, 0.72, pow(intensity * dist_falloff, 0.55))
+
+
+func _consider_flare_source(best: Dictionary, world_pos: Vector3, intensity: float, strength: float, tint: Vector3) -> Dictionary:
+	if intensity < 0.015:
+		return best
+	var screen_v: Variant = _screen_point(world_pos)
+	if screen_v == null:
+		return best
+	if intensity >= float(best.get("intensity", -1.0)):
+		return {
+			"screen": screen_v,
+			"strength": strength,
+			"tint": tint,
+			"intensity": intensity,
+		}
+	return best
+
+
 func _pick_inbound_flare() -> Dictionary:
 	var best: Dictionary = {}
 	for node in get_tree().get_nodes_in_group("air_strike_rockets"):
@@ -117,19 +155,28 @@ func _pick_inbound_flare() -> Dictionary:
 			continue
 		var rocket := node as Node3D
 		var intensity := _rocket_flare_intensity(rocket)
-		if intensity < 0.015:
+		var strength := lerpf(0.03, 1.05, pow(intensity, 0.65))
+		best = _consider_flare_source(
+			best,
+			_rocket_flare_world_pos(rocket),
+			intensity,
+			strength,
+			Vector3(1.08, 0.88, 0.62),
+		)
+	for node in get_tree().get_nodes_in_group("flashlight_flares"):
+		if not node is Node3D or not is_instance_valid(node):
 			continue
-		var screen_v: Variant = _screen_point(_rocket_flare_world_pos(rocket))
-		if screen_v == null:
-			continue
-		if intensity >= float(best.get("intensity", -1.0)):
-			var strength := lerpf(0.03, 1.05, pow(intensity, 0.65))
-			best = {
-				"screen": screen_v,
-				"strength": strength,
-				"tint": Vector3(1.08, 0.88, 0.62),
-				"intensity": intensity,
-			}
+		var light := node as Node3D
+		var intensity := _flashlight_flare_intensity(light)
+		var strength := _flashlight_flare_strength(light, intensity)
+		var effective_intensity := intensity * strength
+		best = _consider_flare_source(
+			best,
+			_flashlight_flare_world_pos(light),
+			effective_intensity,
+			strength,
+			Vector3(1.05, 0.98, 0.86),
+		)
 	return best
 
 
