@@ -121,13 +121,88 @@ func queue_carve_world(
 func apply_pending_carves() -> bool:
 	if _pending_carves.is_empty():
 		return false
-	var removed_any := false
+	# Merge every carve queued this tick: accumulate damage per chunk first, then
+	# do ONE threshold/removal sweep + ONE debris burst. The old per-carve path
+	# dropped every sub-MIN_ACCUMULATE_DAMAGE hit (so a stream of small blasts
+	# never removed anything) and paid the full removal + debris + physics-churn
+	# cost per blast instead of once per tick.
+	var accum: Dictionary = {}                  # CollisionShape3D -> damage
+	var touched: Array[CollisionShape3D] = []
+	var max_radius := 0.0
 	for carve: Dictionary in _pending_carves:
-		if _apply_carve(carve):
-			removed_any = true
+		var local_center: Vector3 = carve["pos"] as Vector3
+		var radius: float = float(carve["radius"])
+		max_radius = maxf(max_radius, radius)
+		var damage: float = float(carve.get("damage", 800.0))
+		var inward: Vector3 = carve["normal"] as Vector3
+		var max_depth: float = float(carve.get("max_depth", -1.0))
+		var directed: bool = inward.length_squared() > 0.0001 and max_depth > 0.0
+		if directed:
+			inward = inward.normalized()
+		for col: CollisionShape3D in _candidate_cols(local_center, radius):
+			if not is_instance_valid(col) or bool(col.get_meta("destroyed", false)):
+				continue
+			var center: Vector3 = col.get_meta("chunk_center_local") as Vector3
+			var half_diag: float = float(col.get_meta("chunk_half_diag"))
+			if directed:
+				var depth: float = (center - local_center).dot(inward)
+				if depth < -half_diag or depth > max_depth + half_diag:
+					continue
+			var dist: float = center.distance_to(local_center)
+			if dist > radius + half_diag:
+				continue
+			var d: float = DestructibleManager.blast_damage_at(maxf(0.0, dist - half_diag), radius, damage)
+			if accum.has(col):
+				accum[col] = float(accum[col]) + d
+			else:
+				accum[col] = d
+				touched.append(col)
 	_pending_carves.clear()
-	if not removed_any:
+
+	# Single threshold + HP sweep over every chunk touched this tick.
+	var to_remove_cols: Array[CollisionShape3D] = []
+	for col: CollisionShape3D in touched:
+		var amount: float = float(accum[col])
+		if amount < MIN_ACCUMULATE_DAMAGE:
+			continue
+		var chunk_size: Vector3 = col.get_meta("chunk_size") as Vector3
+		var old_hp: float = float(col.get_meta("chunk_hp", _chunk_max_health(chunk_size)))
+		var new_hp: float = old_hp - amount
+		col.set_meta("chunk_hp", new_hp)
+		if new_hp <= 0.0 or amount >= new_hp + MIN_REMOVE_DAMAGE:
+			to_remove_cols.append(col)
+	if to_remove_cols.is_empty():
 		return false
+
+	# Disable + hide every removed chunk, then ONE debris burst + ONE jag job.
+	var burst_center := Vector3.ZERO
+	var burst_size := Vector3.ZERO
+	var exposure_center := Vector3.ZERO
+	for col: CollisionShape3D in to_remove_cols:
+		_hide_intact_instance(col)
+		var mesh_obj: Object = _chunk_meshes.get(col.get_instance_id()) as Object
+		if mesh_obj is MeshInstance3D:
+			(mesh_obj as MeshInstance3D).visible = false
+		burst_center += col.global_position
+		burst_size += col.get_meta("chunk_size") as Vector3
+		exposure_center += col.get_meta("chunk_center_local") as Vector3
+		col.set_meta("destroyed", true)
+		col.disabled = true
+	var n := float(to_remove_cols.size())
+	DestructibleManager.note_chunk_removals(to_remove_cols.size())
+	var scene := _fx_scene()
+	var base_color := _mat.albedo_color if _mat != null else Color(0.45, 0.7, 0.72)
+	Violence.spawn_destruction_debris(
+		scene, burst_center / n, global_basis, burst_size / n, base_color,
+		burst_center / n, max_radius, to_remove_cols.size())
+	exposure_center /= n
+	var exposure_radius := 0.0
+	for col: CollisionShape3D in to_remove_cols:
+		exposure_radius = maxf(exposure_radius,
+			(col.get_meta("chunk_center_local") as Vector3).distance_to(exposure_center))
+	_pending_exposure_carves.append({"pos": exposure_center, "radius": exposure_radius + TARGET_CELL})
+	set_process(true)
+
 	if _count_chunks() <= 0:
 		remove_from_group("destructible")
 		collision_layer = 0
@@ -154,10 +229,13 @@ func _enter_tree() -> void:
 
 func _process(_delta: float) -> void:
 	var jobs := 0
+	var _t := Time.get_ticks_usec()
 	while jobs < MAX_EXPOSURE_JOBS_PER_FRAME and not _pending_exposure_carves.is_empty():
 		var job: Dictionary = _pending_exposure_carves.pop_front()
 		_jaggedize_exposed_chunks(job["pos"] as Vector3, float(job["radius"]))
 		jobs += 1
+	if jobs > 0:
+		Trace.prof("jag", Time.get_ticks_usec() - _t)
 	if _pending_exposure_carves.is_empty():
 		set_process(false)
 
@@ -334,14 +412,6 @@ func _chunk_max_health(chunk_size: Vector3) -> float:
 	return CHUNK_BASE_HEALTH + volume * CHUNK_VOLUME_HEALTH
 
 
-func _damage_chunk(col: CollisionShape3D, amount: float) -> bool:
-	if amount < MIN_ACCUMULATE_DAMAGE:
-		return false
-	var chunk_size: Vector3 = col.get_meta("chunk_size") as Vector3
-	var old_hp: float = float(col.get_meta("chunk_hp", _chunk_max_health(chunk_size)))
-	var new_hp: float = old_hp - amount
-	col.set_meta("chunk_hp", new_hp)
-	return new_hp <= 0.0 or amount >= new_hp + MIN_REMOVE_DAMAGE
 
 
 func _flat_index(x: int, y: int, z: int) -> int:
@@ -378,69 +448,6 @@ func _candidate_cols(local_center: Vector3, radius: float, extra: float = 0.0) -
 				if col != null:
 					cols.append(col)
 	return cols
-
-
-func _apply_carve(carve: Dictionary) -> bool:
-	var local_center: Vector3 = carve["pos"] as Vector3
-	var radius: float = float(carve["radius"])
-	var damage: float = float(carve.get("damage", 800.0))
-	var inward: Vector3 = carve["normal"] as Vector3
-	var max_depth: float = float(carve.get("max_depth", -1.0))
-	var directed: bool = inward.length_squared() > 0.0001 and max_depth > 0.0
-	if directed:
-		inward = inward.normalized()
-	var removed := false
-	var to_remove_cols: Array[CollisionShape3D] = []
-	var scene := _fx_scene()
-	var base_color := _mat.albedo_color if _mat != null else Color(0.45, 0.7, 0.72)
-	for col: CollisionShape3D in _candidate_cols(local_center, radius):
-		if (
-			not is_instance_valid(col)
-			or bool(col.get_meta("destroyed", false))
-		):
-			continue
-		var center: Vector3 = col.get_meta("chunk_center_local") as Vector3
-		var half_diag: float = float(col.get_meta("chunk_half_diag"))
-		if directed:
-			var depth: float = (center - local_center).dot(inward)
-			if depth < -half_diag:
-				continue
-			if depth > max_depth + half_diag:
-				continue
-		var dist := center.distance_to(local_center)
-		if dist > radius + half_diag:
-			continue
-		var chunk_damage: float = DestructibleManager.blast_damage_at(maxf(0.0, dist - half_diag), radius, damage)
-		if _damage_chunk(col, chunk_damage):
-			to_remove_cols.append(col)
-	var burst_center := Vector3.ZERO
-	var burst_size := Vector3.ZERO
-	for col: CollisionShape3D in to_remove_cols:
-		_hide_intact_instance(col)
-		var mesh_obj: Object = _chunk_meshes.get(col.get_instance_id()) as Object
-		if mesh_obj is MeshInstance3D:
-			(mesh_obj as MeshInstance3D).visible = false
-		burst_center += col.global_position
-		burst_size += col.get_meta("chunk_size") as Vector3
-		col.set_meta("destroyed", true)
-		col.disabled = true
-		removed = true
-	if removed and not to_remove_cols.is_empty():
-		var n := float(to_remove_cols.size())
-		Violence.spawn_destruction_debris(
-			scene,
-			burst_center / n,
-			global_basis,
-			burst_size / n,
-			base_color,
-			to_global(local_center),
-			radius,
-			to_remove_cols.size(),
-		)
-	if removed:
-		_pending_exposure_carves.append({"pos": local_center, "radius": radius})
-		set_process(true)
-	return removed
 
 
 func _fx_scene() -> Node:

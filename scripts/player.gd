@@ -46,6 +46,9 @@ const RIFLE_RECOIL_PITCH := 0.018         # radians added to camera pitch per sh
 const RIFLE_RECOIL_KICK := 0.08           # muzzle pushed back (meters) per shot
 const RIFLE_RECOIL_YAW_JITTER := 0.004    # tiny yaw nudge per shot
 const RIFLE_SHAKE := 0.015                # camera shake impulse
+# Flashlight (blackout rounds): off-hand low-left origin + a soft turn lag.
+const FLASHLIGHT_OFFSET := Vector3(-0.32, -0.18, 0.0)  # left + slightly down, head-relative
+const FLASHLIGHT_TURN_RATE := 14.0                     # lower = more lag/trailing
 const MAX_FIRST_PERSON_CASINGS_PER_TRIGGER := 4
 const MAX_SHOT_FX_PER_FRAME := 1
 const MAX_THIRD_PERSON_CASINGS_PER_FRAME := 3
@@ -105,6 +108,7 @@ const GHOST_ALPHA := 0.06
 var _third_person_gun: Node3D = null
 var _third_person_gun_rest_pos: Vector3 = Vector3.ZERO
 var _third_person_gun_rest_rot: Vector3 = Vector3.ZERO
+var _flashlight: SpotLight3D = null
 @onready var torso_hitbox: Area3D = $TorsoHitbox
 @onready var legs_hitbox: Area3D = $LegsHitbox
 @onready var name_label: Label3D = $NameLabel
@@ -315,6 +319,7 @@ func _ready() -> void:
 	name_label.text = player_name
 	_muzzle_rest_pos = muzzle.position
 	_camera_rest_pos = camera.position
+	_build_flashlight()
 	# Capture authored hitbox positions so body-scaling can shift them cleanly.
 	if head_hitbox:
 		_head_hitbox_rest_y = head_hitbox.position.y
@@ -373,6 +378,57 @@ func _setup_third_person_gun() -> void:
 	_third_person_gun = gun_root
 	_third_person_gun_rest_pos = gun_root.position
 	_third_person_gun_rest_rot = gun_root.rotation
+
+
+# Per-player flashlight. Childed to the body (inherits yaw) at head height; its
+# pitch is driven from look_pitch each frame so it points where the player aims
+# for local AND remote players (both yaw + look_pitch are synced). Lives on the
+# player node so every peer sees the cone sweeping. No shadows (perf). Off until
+# the blackout round modifier turns it on via set_flashlight_active().
+func _build_flashlight() -> void:
+	_flashlight = SpotLight3D.new()
+	_flashlight.name = "Flashlight"
+	# Narrow, focused beam (a wide cone spilled light onto distant buildings).
+	_flashlight.spot_range = 40.0
+	_flashlight.spot_angle = 20.0
+	_flashlight.spot_attenuation = 1.0
+	_flashlight.light_energy = 14.0
+	_flashlight.light_color = Color(1.0, 0.97, 0.88)
+	# Cast shadows for the dramatic flashlight-in-the-dark look. Only ~N players,
+	# only during blackout rounds, so the per-light shadow cost is acceptable.
+	_flashlight.shadow_enabled = true
+	_flashlight.shadow_bias = 0.04
+	_flashlight.shadow_normal_bias = 1.5
+	# We drive its world transform ourselves (top_level) so the beam can lag a
+	# touch behind the player's turn — a handheld off-hand feel — and so the
+	# off-left origin holds regardless of body scale.
+	_flashlight.top_level = true
+	_flashlight.visible = false
+	add_child(_flashlight)
+
+
+func set_flashlight_active(on: bool) -> void:
+	if _flashlight:
+		_flashlight.visible = on
+		if on:
+			# Snap to the current aim so it doesn't visibly swing in on activation.
+			var target := _flashlight_target_xform()
+			_flashlight.global_position = target.origin
+			_flashlight.global_basis = target.basis
+
+
+# Where the flashlight wants to be this frame: head + off-left origin, aimed
+# along the player's yaw + look pitch. The beam slerps toward this for the lag.
+func _flashlight_target_xform() -> Transform3D:
+	var origin := to_global(_camera_rest_pos + FLASHLIGHT_OFFSET)
+	var basis := Basis.from_euler(Vector3(_aim_pitch(), rotation.y, 0.0))
+	return Transform3D(basis, origin)
+
+
+# Vertical aim: the live look_pitch when we own this body, else the value synced
+# from its owner (remote players / bots viewed on another peer).
+func _aim_pitch() -> float:
+	return look_pitch if is_multiplayer_authority() else _remote_target_pitch
 
 func _apply_identity_skin_materials() -> StandardMaterial3D:
 	if head_blob == null:
@@ -540,6 +596,15 @@ func _add_o_mouth() -> void:
 	head_blob.add_child(o)
 
 func _process(delta: float) -> void:
+	# Aim the flashlight where this player looks (works for local + remote; runs
+	# in _process so it updates for non-authority remote players too). Position
+	# follows instantly; orientation slerps toward the aim so the beam lags a
+	# touch behind turns (handheld feel). Gated to when it's on (blackout).
+	if _flashlight and _flashlight.visible:
+		var target := _flashlight_target_xform()
+		_flashlight.global_position = target.origin
+		_flashlight.global_basis = _flashlight.global_basis.slerp(
+			target.basis, clampf(delta * FLASHLIGHT_TURN_RATE, 0.0, 1.0))
 	if _ragdoll_head and is_instance_valid(_ragdoll_head):
 		camera.global_transform = _ragdoll_head.global_transform
 		return

@@ -197,6 +197,18 @@ var _tab_refresh_timer: float = 0.0
 var _explosion_flash_overlay: ColorRect = null
 var _arena_env: Environment = null
 var current_round_modifier: String = ""
+# Dev override: when _force_round_modifier is true, every round uses
+# _forced_round_modifier instead of a random roll (set via the . dev menu).
+var _force_round_modifier: bool = false
+var _forced_round_modifier: String = ""
+
+# Called by the dev panel: lock a modifier across rounds (force=true) or return
+# to random rolls (force=false). Applies immediately too.
+func dev_set_forced_modifier(mod_id: String, force: bool) -> void:
+	_force_round_modifier = force
+	_forced_round_modifier = mod_id if force else ""
+	if force and multiplayer.is_server():
+		_set_round_modifier.rpc(mod_id)
 var current_arena_size_min: float = -1.0
 var current_arena_size_max: float = -1.0
 var _fog_base_saved: bool = false
@@ -207,9 +219,27 @@ var _fog_base_depth_begin: float = 0.0
 var _fog_base_depth_end: float = 0.0
 var _fog_base_depth_curve: float = 1.0
 var _fog_base_aerial_perspective: float = 0.0
+var _blackout_base_saved: bool = false
+var _blackout_base_ambient: float = 0.6
+var _blackout_base_sun: float = 1.2
+var _blackout_base_fill: float = 1.4
+var _blackout_base_sky_contrib: float = 0.0
+var _blackout_base_bg_energy: float = 1.0
+var _blackout_base_bg_mode: int = Environment.BG_SKY
+var _blackout_base_fog_enabled: bool = true
 var _base_tonemap_exposure: float = 1.0
 var _exposure_duck: float = 0.0
 var _exposure_duck_vel: float = 0.0
+# Sustained-blast guard: a single explosion may dim deep (dramatic), but rapid
+# repeated explosions used to re-max the duck every frame and pin exposure at
+# the near-black floor — leaving the whole screen dark during explosion spam.
+# This "pressure" rises with trigger frequency and lifts the exposure floor so
+# spam settles at a dim-but-visible level instead of going black.
+var _sidechain_pressure: float = 0.0
+const SIDECHAIN_PRESSURE_MAX := 6.0      # ~6 blasts in quick succession = full pressure
+const SIDECHAIN_PRESSURE_DECAY := 3.0    # units/sec — ~2s of calm fully relaxes it
+const SIDECHAIN_FLOOR_MIN := 0.08        # isolated blast can dip near-black (punchy)
+const SIDECHAIN_FLOOR_MAX := 0.5         # under sustained spam, never darker than this
 var _flash_alpha: float = 0.0
 var _flash_alpha_vel: float = 0.0
 # Target the alpha lerps TOWARD on the rise — instant set on _flash_alpha
@@ -731,6 +761,11 @@ func _input(event: InputEvent) -> void:
 				if multiplayer.is_server():
 					dev_spawn_pickup()
 					_announce.rpc("PICKUP DROPPED", 1.0)
+			KEY_B:
+				if multiplayer.is_server():
+					var on := current_round_modifier != "blackout"
+					dev_set_forced_modifier("blackout" if on else "", on)
+					_announce.rpc("BLACKOUT %s" % ("ON" if on else "OFF"), 1.0)
 			KEY_0:
 				var t = _dev_panel.get_target()
 				if t:
@@ -1195,6 +1230,9 @@ func _do_spawn(
 	# being in-tree.
 	p.global_position = pos
 	p.rotation.y = yaw
+	# Match the freshly-spawned player's flashlight to the active round modifier.
+	if p.has_method("set_flashlight_active"):
+		p.set_flashlight_active(current_round_modifier == "blackout")
 	if id == multiplayer.get_unique_id():
 		local_player = p
 		# Push the saved mouse-sens slider value onto the freshly spawned
@@ -1475,7 +1513,9 @@ func _start_round_now() -> void:
 	_round_damage_seen = false
 	_hide_round_win_on_screens.rpc()
 	if multiplayer.is_server():
-		_set_round_modifier.rpc(ROUND_MODIFIERS_SCRIPT.pick_for_round())
+		# A modifier forced via the dev menu sticks across rounds; otherwise roll.
+		var mod := _forced_round_modifier if _force_round_modifier else ROUND_MODIFIERS_SCRIPT.pick_for_round()
+		_set_round_modifier.rpc(mod)
 	# Round opens at "low" — the track plays calmly until the first shot.
 	# Shooting bumps to mid, taking damage bumps to high.
 	_round_music_level = 1
@@ -2092,17 +2132,9 @@ func begin_player_air_strike(target: Vector3, shooter_id: int = 0) -> void:
 func dev_test_air_strike() -> void:
 	if not multiplayer.is_server():
 		return
-	_clear_air_strike_markers.rpc()
-	_clear_ion_cannon_markers.rpc()
-	_air_strike_cancel_gen += 1
+	# Fire ONE strike — do not set the air_strikes modifier or arm the auto-loop.
 	_air_strike_pending = false
-	if not ROUND_MODIFIERS_SCRIPT.needs_air_strikes(current_round_modifier):
-		_set_round_modifier.rpc("air_strikes")
-		_apply_round_modifier_environment()
-		_show_round_modifier_on_screens.rpc()
-	_air_strikes_armed = true
-	var target := _dev_air_strike_target()
-	begin_player_air_strike(target)
+	begin_player_air_strike(_dev_air_strike_target())
 	_announce.rpc("AIR STRIKE INCOMING", 1.2)
 
 
@@ -2119,16 +2151,9 @@ func begin_player_ion_cannon(target: Vector3, shooter_id: int = 0) -> void:
 func dev_test_ion_cannon() -> void:
 	if not multiplayer.is_server():
 		return
-	_clear_ion_cannon_markers.rpc()
-	_ion_cannon_cancel_gen += 1
+	# Fire ONE beam — do not set the ion_cannon modifier or arm the auto-loop.
 	_ion_cannon_pending = false
-	if not ROUND_MODIFIERS_SCRIPT.needs_ion_cannon(current_round_modifier):
-		_set_round_modifier.rpc("ion_cannon")
-		_apply_round_modifier_environment()
-		_show_round_modifier_on_screens.rpc()
-	_ion_cannons_armed = true
-	var target := _dev_air_strike_target()
-	begin_player_ion_cannon(target)
+	begin_player_ion_cannon(_dev_air_strike_target())
 	_announce.rpc("ION CANNON INCOMING", 1.2)
 
 func _dev_air_strike_target() -> Vector3:
@@ -2228,6 +2253,68 @@ func _apply_round_modifier_environment() -> void:
 		_arena_env.fog_depth_curve = _fog_base_depth_curve
 		_arena_env.fog_aerial_perspective = _fog_base_aerial_perspective
 		_fog_base_saved = false
+
+	# BLACKOUT: crush the global lights (ambient + sun + fill) so only the
+	# players' flashlights illuminate the arena. We dim the global FILL lights,
+	# not tonemap_exposure — exposure would dim the flashlight cones too.
+	var arena := get_node_or_null("Arena")
+	var sun: DirectionalLight3D = arena.get_node_or_null("Sun") as DirectionalLight3D if arena else null
+	var fill: Light3D = arena.get_node_or_null("FillLight") as Light3D if arena else null
+	if current_round_modifier == "blackout":
+		if not _blackout_base_saved:
+			_blackout_base_ambient = _arena_env.ambient_light_energy
+			_blackout_base_sun = sun.light_energy if sun else 0.0
+			_blackout_base_fill = fill.light_energy if fill else 0.0
+			_blackout_base_sky_contrib = _arena_env.ambient_light_sky_contribution
+			_blackout_base_bg_energy = _arena_env.background_energy_multiplier
+			_blackout_base_bg_mode = _arena_env.background_mode
+			_blackout_base_fog_enabled = _arena_env.fog_enabled
+			_blackout_base_saved = true
+		# Zero ALL global light so non-emissive surfaces go truly black — any
+		# residual (even 0.02) + the Filmic tonemapper's toe was lifting walls
+		# back into view. Only the flashlight + emissive accents light the scene.
+		_arena_env.ambient_light_energy = 0.0
+		_arena_env.ambient_light_sky_contribution = 0.0
+		_arena_env.background_energy_multiplier = 0.0
+		# Swap the bright procedural sky for a near-black background — the energy
+		# multiplier doesn't darken the *visible* sky render, so it was glowing
+		# and backlighting everything. A faint cool tint keeps a hint of horizon.
+		_arena_env.background_mode = Environment.BG_COLOR
+		_arena_env.background_color = Color(0.015, 0.012, 0.025)
+		# The base palette fog tints the distance/sky with a light colour over the
+		# black background — kill it so the horizon goes dark too.
+		_arena_env.fog_enabled = false
+		if sun:
+			sun.light_energy = 0.0
+		if fill:
+			fill.light_energy = 0.0
+	elif _blackout_base_saved:
+		_arena_env.ambient_light_energy = _blackout_base_ambient
+		_arena_env.ambient_light_sky_contribution = _blackout_base_sky_contrib
+		_arena_env.background_energy_multiplier = _blackout_base_bg_energy
+		_arena_env.background_mode = _blackout_base_bg_mode as Environment.BGMode
+		_arena_env.fog_enabled = _blackout_base_fog_enabled
+		if sun:
+			sun.light_energy = _blackout_base_sun
+		if fill:
+			fill.light_energy = _blackout_base_fill
+		_blackout_base_saved = false
+
+	if Trace.enabled:
+		print("[blackout-dbg] mod=%s amb=%.3f sun=%s fill=%s bg_mode=%d fog=%s exp=%.2f" % [
+			current_round_modifier,
+			_arena_env.ambient_light_energy,
+			("%.3f" % sun.light_energy) if sun else "NULL",
+			("%.3f" % fill.light_energy) if fill else "NULL",
+			_arena_env.background_mode,
+			str(_arena_env.fog_enabled),
+			_arena_env.tonemap_exposure])
+
+	# Toggle every player's flashlight to match (auto-on only in blackout).
+	var blackout := current_round_modifier == "blackout"
+	for child in players_root.get_children():
+		if child.has_method("set_flashlight_active"):
+			child.call("set_flashlight_active", blackout)
 
 @rpc("authority", "call_local", "reliable")
 func _show_round_modifier_on_screens() -> void:
@@ -3332,6 +3419,7 @@ func trigger_explosion_sidechain(
 		return
 	_exposure_duck = maxf(_exposure_duck, amount * 1.05)
 	_exposure_duck_vel = maxf(_exposure_duck_vel, 4.6 + amount * 2.8)
+	_sidechain_pressure = minf(_sidechain_pressure + 1.0, SIDECHAIN_PRESSURE_MAX)
 	var alpha_peak := minf(amount * 0.62, 0.96)
 	if sustain_sec >= 0.0 and release_sec > 0.0:
 		var now_ms := Time.get_ticks_msec()
@@ -3346,9 +3434,12 @@ func trigger_explosion_sidechain(
 
 func _update_explosion_sidechain(delta: float) -> void:
 	if _arena_env:
-		# Floor at 0.05 so a huge duck can't crash exposure to black (renders
-		# as full black). 0.05 = ~4 stops below base — still very dark.
-		var target_exposure := maxf(0.05, _base_tonemap_exposure - _exposure_duck * 0.75)
+		# Floor rises with sustained-blast pressure: an isolated blast can dip to
+		# SIDECHAIN_FLOOR_MIN (punchy near-black), but during spam the floor lifts
+		# toward SIDECHAIN_FLOOR_MAX so the screen stays visible instead of black.
+		var floor_exp: float = lerpf(SIDECHAIN_FLOOR_MIN, SIDECHAIN_FLOOR_MAX,
+			clampf(_sidechain_pressure / SIDECHAIN_PRESSURE_MAX, 0.0, 1.0))
+		var target_exposure := maxf(floor_exp, _base_tonemap_exposure - _exposure_duck * 0.75)
 		_arena_env.tonemap_exposure = lerpf(_arena_env.tonemap_exposure, target_exposure, clampf(delta * 20.0, 0.0, 1.0))
 	if _flash_adsr_active:
 		var now_ms := Time.get_ticks_msec()
@@ -3371,6 +3462,7 @@ func _update_explosion_sidechain(delta: float) -> void:
 	if _explosion_flash_overlay:
 		_explosion_flash_overlay.color.a = _flash_alpha
 	_exposure_duck = move_toward(_exposure_duck, 0.0, _exposure_duck_vel * delta)
+	_sidechain_pressure = move_toward(_sidechain_pressure, 0.0, SIDECHAIN_PRESSURE_DECAY * delta)
 
 func show_death_effect_for(player_id: int, show: bool) -> void:
 	if _splitscreen and _splitscreen.is_enabled() and _splitscreen.has_method("show_death_effect_for"):

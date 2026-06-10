@@ -7,6 +7,8 @@ extends PanelContainer
 # go through `_game` (set via setup()) so this script doesn't reach into
 # game.gd's private members directly.
 
+const ROUND_MODIFIERS := preload("res://scripts/round_modifiers.gd")
+
 var _game: Node = null
 var _content: VBoxContainer = null
 # 0 = "Local player" (follow whoever Game.local_player resolves to);
@@ -140,6 +142,7 @@ func _refresh() -> void:
 			call_deferred("_refresh"))
 
 	_player_picker()
+	_modifier_picker()
 	_pickup_spawner_section()
 	_heading("— CARDS —", Color(1.0, 0.6, 0.9), 15)
 	if target and is_instance_valid(target):
@@ -202,6 +205,44 @@ func _player_picker() -> void:
 	opt.select(selected_idx)
 	opt.item_selected.connect(func(idx: int) -> void:
 		_target_id = int(opt.get_item_id(idx))
+		call_deferred("_refresh"))
+	hbox.add_child(opt)
+	_content.add_child(hbox)
+
+
+# Force the active round modifier (host only). A pick LOCKS the modifier across
+# rounds; "Random" returns to normal per-round rolls.
+func _modifier_picker() -> void:
+	if _game == null or not _game.has_method("dev_set_forced_modifier"):
+		return
+	var hbox := HBoxContainer.new()
+	hbox.add_theme_constant_override("separation", 8)
+	var lbl := Label.new()
+	lbl.text = "Round modifier:"
+	lbl.add_theme_color_override("font_color", Color(0.7, 0.7, 0.85))
+	hbox.add_child(lbl)
+	var opt := OptionButton.new()
+	opt.focus_mode = Control.FOCUS_NONE
+	var forcing: bool = bool(_game.get("_force_round_modifier"))
+	var forced: String = str(_game.get("_forced_round_modifier"))
+	opt.add_item("Random (roll each round)", 0)   # idx 0 → unlock
+	opt.add_item("(none — no modifier)", 1)       # idx 1 → force empty
+	if not forcing:
+		opt.select(0)
+	elif forced.is_empty():
+		opt.select(1)
+	for mod_id in ROUND_MODIFIERS.IDS:
+		opt.add_item(str(mod_id))                 # idx 2+ → force that modifier
+		if forcing and str(mod_id) == forced:
+			opt.select(opt.get_item_count() - 1)
+	opt.disabled = not multiplayer.is_server()
+	opt.item_selected.connect(func(sel: int) -> void:
+		if sel == 0:
+			_game.dev_set_forced_modifier("", false)              # random
+		elif sel == 1:
+			_game.dev_set_forced_modifier("", true)               # locked: none
+		else:
+			_game.dev_set_forced_modifier(opt.get_item_text(sel), true)
 		call_deferred("_refresh"))
 	hbox.add_child(opt)
 	_content.add_child(hbox)

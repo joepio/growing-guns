@@ -98,6 +98,7 @@ func _physics_process(delta: float) -> void:
 			_debris_nodes.clear()
 			_debris_queue.clear()
 			Violence.reset_debris_bench_counters()
+			DestructibleManager.reset_chunk_removals()
 		return
 	_frame_ms.append(Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0)
 	_physics_ms.append(Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0)
@@ -154,10 +155,11 @@ func _record_stage(rate: float) -> void:
 		"debris_queue": _istats(_debris_queue),
 		"premium_bursts": Violence.debug_debris_premium_bursts(),
 		"cheap_bursts": Violence.debug_debris_cheap_bursts(),
+		"removals_per_sec": int(DestructibleManager.debug_chunk_removals() / SAMPLE_SEC),
 	}
 	_results.append(row)
 	print(
-		"[destruction-stress-bench] rate=%4.0f/s act=%4.0f/s phys=%5.2fms frame=%5.2fms debris=%4d queue=%4d prem=%d cheap=%d"
+		"[destruction-stress-bench] rate=%4.0f/s act=%4.0f/s phys=%5.2fms frame=%5.2fms debris=%4d queue=%4d removals=%5d/s prem=%d cheap=%d"
 		% [
 			rate,
 			row.rate_actual,
@@ -165,6 +167,7 @@ func _record_stage(rate: float) -> void:
 			row.frame_ms.mean,
 			row.debris_nodes.mean,
 			row.debris_queue.mean,
+			row.removals_per_sec,
 			row.premium_bursts,
 			row.cheap_bursts,
 		]
