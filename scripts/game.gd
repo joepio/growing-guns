@@ -1580,7 +1580,6 @@ func _start_round_now() -> void:
 		p.set_frozen.rpc(false)
 		p.clear_ragdoll.rpc()
 	_clear_projectiles.rpc()
-	_clear_craters.rpc()
 	_clear_blood_splats.rpc()
 	_clear_smoke_puffs.rpc()
 	_clear_pickups.rpc()
@@ -2008,12 +2007,6 @@ func _clear_projectiles() -> void:
 	for node in get_tree().get_nodes_in_group("projectiles"):
 		if is_instance_valid(node):
 			node.queue_free()
-
-@rpc("authority", "call_local", "reliable")
-func _clear_craters() -> void:
-	# Persistent bullet-impact scorch marks reset between rounds — old craters
-	# from last round shouldn't litter the new arena.
-	Violence.clear_craters(self)
 
 @rpc("authority", "call_local", "reliable")
 func _clear_blood_splats() -> void:
