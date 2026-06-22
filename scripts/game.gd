@@ -1,5 +1,6 @@
 extends Node3D
 
+const MenuHelpers = preload("res://scripts/menu_helpers.gd")
 const PLAYER_SCENE := preload("res://scenes/player.tscn")
 const HUD_ICON_SCRIPT := preload("res://scripts/hud_icon.gd")
 const DEV_PANEL_SCRIPT := preload("res://scripts/dev_panel.gd")
@@ -37,6 +38,15 @@ const ARENA_OFFSET := Vector3(1.7405052, 4.5380306, 16.383654)
 enum State { WAITING, PLAYING, PICKING_CARD, MATCH_OVER }
 
 const CARDS_PER_PICK := 3
+const GAME_MODE_VERSUS := "versus"
+const GAME_MODE_COOP := "coop"
+const COOP_BASE_ENEMIES := 3
+const COOP_ENEMIES_PER_WAVE := 1
+const COOP_MAX_ENEMIES := BOT_ID_LIMIT - BOT_ID_BASE
+const COOP_PLAYER_HEALTH_MULT := 3.0
+const COOP_ENEMY_HEALTH_MULT := 0.5
+const COOP_ENEMY_SPAWN_INTERVAL := 1.35
+const COOP_ENEMY_FIRST_SPAWN_DELAY := 0.65
 const SPAWN_CAPSULE_RADIUS := 0.4
 const SPAWN_CAPSULE_HEIGHT := 1.8
 const SPAWN_CLEARANCE_RADIUS := 0.58
@@ -82,6 +92,34 @@ func _human_count() -> int:
 		if not _is_bot_id(int(raw_id)):
 			n += 1
 	return n
+
+func is_coop_mode() -> bool:
+	return game_mode == GAME_MODE_COOP
+
+func _is_human_player_id(pid: int) -> bool:
+	return pid != 0 and not _is_bot_id(pid)
+
+func are_players_allied(a: int, b: int) -> bool:
+	if not is_coop_mode():
+		return false
+	if a == 0 or b == 0 or a == b:
+		return false
+	return _is_bot_id(a) == _is_bot_id(b)
+
+func should_block_player_damage(victim_id: int, attacker_id: int) -> bool:
+	return are_players_allied(victim_id, attacker_id)
+
+func _cmdline_has(arg: String) -> bool:
+	return arg in OS.get_cmdline_args() or arg in OS.get_cmdline_user_args()
+
+func _configure_game_mode() -> void:
+	game_mode = GAME_MODE_VERSUS
+	if _cmdline_has("--coop"):
+		game_mode = GAME_MODE_COOP
+	if NetworkManager.has_meta("game_mode") and str(NetworkManager.get_meta("game_mode")) == GAME_MODE_COOP:
+		game_mode = GAME_MODE_COOP
+	if NetworkManager.has_meta("coop_mode") and bool(NetworkManager.get_meta("coop_mode")):
+		game_mode = GAME_MODE_COOP
 const SPAWN_MIN_SPACING := 8.0   # meters — two fresh spawns must be at least this far apart
 const SPAWN_HARD_MIN_SPACING := 2.5  # never stack closer than this, even on tiny platforms
 
@@ -93,6 +131,10 @@ var rounds_to_win: int = 10
 @onready var banner_timer: Timer = $HUD/BannerTimer
 
 var state: int = State.WAITING
+var game_mode: String = GAME_MODE_VERSUS
+var coop_wave: int = 1
+var _coop_enemy_spawn_queue: Array[String] = []
+var _coop_enemy_spawn_timer: float = -1.0
 var round_wins: Dictionary = {}
 var current_round: int = 1
 var pending_pick_cards: Array = []
@@ -298,6 +340,7 @@ func _ready() -> void:
 	# Networking auto-bootstrap moved further down — see the IrohServer.start()
 	# call right before the multiplayer.is_server() branch. Iroh is the only
 	# transport now; LAN/ENet auto-connect was removed with the main menu.
+	_configure_game_mode()
 
 	NetworkManager.player_list_changed.connect(_update_scoreboard)
 	NetworkManager.player_list_changed.connect(_refresh_bot_counter)
@@ -322,7 +365,9 @@ func _ready() -> void:
 		_on_network_status_changed(notice, true)
 	if not NetworkManager.last_network_error.is_empty():
 		_on_network_status_changed(NetworkManager.last_network_error, true)
-	_load_settings()
+	MenuHelpers.load_settings()
+	MenuHelpers.settings_changed_callback = _apply_settings
+	MenuHelpers.player_name_committed_callback = _on_player_name_committed
 	_apply_settings()
 	# Web-zip distribution doesn't auto-update like the itch.io app does —
 	# this fires a one-shot HTTPRequest against the repo's VERSION file and
@@ -346,10 +391,10 @@ func _ready() -> void:
 	# callsign before they can play, and a blocking modal at boot is fragile. If
 	# we have no saved name (first launch), default to a generated handle and let
 	# the player rename anytime from the pause menu. Saved name is used as-is.
-	if _player_name.is_empty():
-		_player_name = "Player_%d" % (randi() % 1000)
-		_save_settings()
-	NetworkManager.local_player_name = _player_name
+	if MenuHelpers.player_name.is_empty():
+		MenuHelpers.player_name = "Player_%d" % (randi() % 1000)
+		MenuHelpers.save_settings()
+	NetworkManager.local_player_name = MenuHelpers.player_name
 
 	# Voronoi gib bakes are expensive — do them once at boot, not on first kill.
 	Trace.span_begin("prewarm_disintegration_cache")
@@ -381,7 +426,7 @@ func _ready() -> void:
 	if not offline and not NetworkManager.is_iroh_join_in_progress() \
 			and (multiplayer.multiplayer_peer == null \
 			or multiplayer.multiplayer_peer is OfflineMultiplayerPeer):
-		var hosted_id := NetworkManager.host_game_iroh(_player_name)
+		var hosted_id := NetworkManager.host_game_iroh(MenuHelpers.player_name)
 		if hosted_id.is_empty():
 			var err := NetworkManager.last_network_error
 			if err.is_empty():
@@ -399,11 +444,12 @@ func _ready() -> void:
 		# branch below spawns us with a camera. OfflineMultiplayerPeer reports
 		# is_server() == true, so the rest of boot proceeds normally.
 		push_warning("Playing offline: iroh networking unavailable or skipped.")
-		NetworkManager.local_player_name = _player_name
-		NetworkManager.players[1] = _player_name
+		NetworkManager.local_player_name = MenuHelpers.player_name
+		NetworkManager.players[1] = MenuHelpers.player_name
 		NetworkManager.player_list_changed.emit()
 
 	if multiplayer.is_server():
+		_set_game_mode.rpc(game_mode, coop_wave)
 		if not multiplayer.peer_connected.is_connected(_on_peer_connected):
 			multiplayer.peer_connected.connect(_on_peer_connected)
 		multiplayer.peer_disconnected.connect(_on_peer_disconnected)
@@ -421,6 +467,8 @@ func _ready() -> void:
 
 		var bot_requested: bool = NetworkManager.has_meta("spawn_bot_on_start") and NetworkManager.get_meta("spawn_bot_on_start")
 		var requested_count: int = int(NetworkManager.get_meta("bot_count_on_start", 1)) if bot_requested else 0
+		if is_coop_mode() and not bot_requested:
+			requested_count = 0
 		if bot_requested:
 			_spawn_bots(requested_count, spawn_used)
 		# Warm up GPU pipelines before the first round. Everything (arena,
@@ -437,7 +485,7 @@ func _ready() -> void:
 		# lobby"?) opt out; the splitscreen path also opts out because each
 		# device adds its own real player.
 		var host_started: bool = NetworkManager.has_meta("host_started") and NetworkManager.get_meta("host_started")
-		if not bot_requested and not host_started and not _splitscreen.is_enabled():
+		if not is_coop_mode() and not bot_requested and not host_started and not _splitscreen.is_enabled():
 			_spawn_bots.call_deferred(1, spawn_used)
 
 		# Iroh host: re-show the "ID copied — share it" notice on the in-game
@@ -620,6 +668,7 @@ func _process(delta: float) -> void:
 			_tab_refresh_timer = 0.5
 			_refresh_tab_overlay()
 	if multiplayer.is_server() and state == State.PLAYING:
+		_update_coop_enemy_spawner(delta)
 		_update_lava_leak(delta)
 		_update_round_music_phase()
 		_update_pickup_spawner(delta)
@@ -821,7 +870,8 @@ func _on_peer_connected(_id: int) -> void:
 	# The boot-time bot is only a solo fallback. As soon as a real remote peer
 	# arrives, remove it before the joining player spawns so the default match
 	# becomes humans-only.
-	_despawn_all_bots()
+	if not is_coop_mode():
+		_clear_coop_enemies()
 
 
 func _on_peer_disconnected(id: int) -> void:
@@ -856,8 +906,9 @@ func _request_spawn(pname: String) -> void:
 	var sender := multiplayer.get_remote_sender_id()
 	if sender == 0:
 		sender = 1
-	# A real peer is joining — boot any SP bots that are around.
-	_despawn_all_bots()
+	# A real peer is joining — boot any SP fallback bots that are around.
+	if not is_coop_mode():
+		_despawn_all_bots()
 	NetworkManager.players[sender] = pname
 	if not round_wins.has(sender):
 		round_wins[sender] = 0
@@ -883,6 +934,7 @@ func _request_spawn(pname: String) -> void:
 				existing.global_position, _is_bot_id(int(pid)), -1, false, existing.rotation.y,
 				int(_bot_appearance_seeds.get(pid, 0)))
 	_broadcast_scores.rpc(round_wins)
+	_set_game_mode.rpc_id(sender, game_mode, coop_wave)
 	if state != State.WAITING:
 		_set_game_state.rpc_id(sender, state)
 	_maybe_start_match()
@@ -1296,7 +1348,8 @@ func _spawn_bots(count: int, avoid: Array[Vector3] = []) -> void:
 	if spawned_any:
 		NetworkManager.player_list_changed.emit()
 		_broadcast_scores.rpc(round_wins)
-		_maybe_start_match()
+		if not is_coop_mode():
+			_maybe_start_match()
 		_refresh_bot_counter()
 
 
@@ -1357,6 +1410,113 @@ func _despawn_all_bots() -> void:
 		_hide_card_pick.rpc()
 	_hide_rematch_overlay.rpc()
 	_set_game_state.rpc(State.WAITING)
+
+
+func _clear_coop_enemies() -> void:
+	var bot_ids := _bot_ids()
+	if bot_ids.is_empty():
+		return
+	for pid in bot_ids:
+		_despawn_bot(int(pid))
+	NetworkManager.player_list_changed.emit()
+	_broadcast_scores.rpc(round_wins)
+	_refresh_bot_counter()
+
+
+func _coop_enemy_count_for_wave(wave: int) -> int:
+	var humans: int = maxi(1, _human_count())
+	var count: int = COOP_BASE_ENEMIES + maxi(0, wave - 1) * COOP_ENEMIES_PER_WAVE
+	count += max(0, humans - 1)
+	return clampi(count, 1, COOP_MAX_ENEMIES)
+
+
+func _ensure_coop_enemy_count() -> void:
+	if not multiplayer.is_server() or not is_coop_mode():
+		return
+	var desired := _coop_enemy_count_for_wave(coop_wave)
+	var current := _bot_ids().size()
+	if current < desired:
+		_spawn_bots(desired - current, _current_player_positions())
+	elif current > desired:
+		var ids := _bot_ids()
+		ids.sort()
+		for i in current - desired:
+			_despawn_bot(int(ids.pop_back()))
+		NetworkManager.player_list_changed.emit()
+		_broadcast_scores.rpc(round_wins)
+		_refresh_bot_counter()
+
+
+func _begin_coop_enemy_wave() -> void:
+	if not multiplayer.is_server() or not is_coop_mode():
+		return
+	_coop_enemy_spawn_queue = _coop_enemy_archetype_queue(coop_wave)
+	_coop_enemy_spawn_timer = COOP_ENEMY_FIRST_SPAWN_DELAY if not _coop_enemy_spawn_queue.is_empty() else -1.0
+	_broadcast_scores.rpc(round_wins)
+
+
+func _update_coop_enemy_spawner(delta: float) -> void:
+	if not is_coop_mode() or _coop_enemy_spawn_queue.is_empty():
+		return
+	_coop_enemy_spawn_timer -= delta
+	if _coop_enemy_spawn_timer > 0.0:
+		return
+	var archetype := str(_coop_enemy_spawn_queue.pop_front())
+	_spawn_coop_enemy(archetype)
+	_coop_enemy_spawn_timer = COOP_ENEMY_SPAWN_INTERVAL
+
+
+func _spawn_coop_enemy(archetype: String) -> void:
+	var pid := _next_bot_id()
+	if pid == 0:
+		return
+	var enemy_name := _coop_enemy_name(archetype, pid)
+	var appearance_seed := randi() & 0x7fffffff
+	_bot_appearance_seeds[pid] = appearance_seed
+	NetworkManager.players[pid] = enemy_name
+	round_wins[pid] = 0
+	_ping_ms_by_player[pid] = -1
+	var pick := _pick_spawn(_current_player_positions())
+	var sky_pos: Vector3 = pick["pos"] + Vector3(0.0, 60.0, 0.0)
+	_do_spawn.rpc(pid, enemy_name, sky_pos, true, -1, false, pick["yaw"], appearance_seed)
+	var p := players_root.get_node_or_null(str(pid))
+	if p:
+		p.apply_enemy_archetype.rpc(archetype, coop_wave)
+		_apply_coop_spawn_health(p)
+		p.set_launching.rpc(true, 45.0)
+	NetworkManager.player_list_changed.emit()
+	_broadcast_scores.rpc(round_wins)
+	_refresh_bot_counter()
+
+
+func _coop_enemy_archetype_queue(wave: int) -> Array[String]:
+	var total := _coop_enemy_count_for_wave(wave)
+	var out: Array[String] = []
+	for i in total:
+		out.append(_pick_coop_enemy_archetype(wave, i))
+	return out
+
+
+func _pick_coop_enemy_archetype(wave: int, index: int) -> String:
+	if wave >= 8 and index == 0:
+		return "demolition"
+	if wave >= 5 and index % 5 == 0:
+		return "sniper"
+	if wave >= 7 and randf() < 0.22:
+		return "demolition"
+	if wave >= 4 and randf() < 0.24:
+		return "sniper"
+	return "grunt"
+
+
+func _coop_enemy_name(archetype: String, pid: int) -> String:
+	match archetype:
+		"sniper":
+			return "SNIPER %02d" % (pid - BOT_ID_BASE + 1)
+		"demolition":
+			return "BOMBER %02d" % (pid - BOT_ID_BASE + 1)
+		_:
+			return "GRUNT %02d" % (pid - BOT_ID_BASE + 1)
 
 
 func _update_ping_monitor(delta: float) -> void:
@@ -1447,16 +1607,31 @@ func _set_game_state(new_state: int) -> void:
 	state = new_state
 
 
+@rpc("authority", "call_local", "reliable")
+func _set_game_mode(mode: String, wave: int = 1) -> void:
+	game_mode = GAME_MODE_COOP if mode == GAME_MODE_COOP else GAME_MODE_VERSUS
+	coop_wave = max(1, wave)
+	current_round = coop_wave if is_coop_mode() else current_round
+	_update_scoreboard()
+
+
 func _maybe_start_match() -> void:
 	if not multiplayer.is_server():
 		return
 	if state != State.WAITING:
 		return
-	if NetworkManager.players.size() < 2:
+	if is_coop_mode():
+		if _human_count() < 1:
+			_set_music_energy.rpc(1)
+			return
+		_despawn_all_bots()
+	elif NetworkManager.players.size() < 2:
 		_set_music_energy.rpc(1)
 		return
 	_set_game_state.rpc(State.PLAYING)
 	current_round = 1
+	coop_wave = 1
+	_set_game_mode.rpc(game_mode, coop_wave)
 	_music_track_started_ms = 0  # fresh soundtrack each match
 	_reset_round_tracking()
 	for pid in NetworkManager.players:
@@ -1510,11 +1685,16 @@ func _start_round_now() -> void:
 	Trace.mark("_start_round_now (round %d)" % current_round)
 	Trace.span_begin("_start_round_now total")
 	_reset_round_tracking()
+	if multiplayer.is_server() and is_coop_mode():
+		_clear_coop_enemies()
 	_round_damage_seen = false
 	_hide_round_win_on_screens.rpc()
 	if multiplayer.is_server():
 		# A modifier forced via the dev menu sticks across rounds; otherwise roll.
-		var mod := _forced_round_modifier if _force_round_modifier else ROUND_MODIFIERS_SCRIPT.pick_for_round()
+		# In coop/wave mode, we do not use round modifiers (map variants).
+		var mod := ""
+		if not is_coop_mode():
+			mod = _forced_round_modifier if _force_round_modifier else ROUND_MODIFIERS_SCRIPT.pick_for_round()
 		_set_round_modifier.rpc(mod)
 	# Round opens at "low" — the track plays calmly until the first shot.
 	# Shooting bumps to mid, taking damage bumps to high.
@@ -1574,6 +1754,7 @@ func _start_round_now() -> void:
 		# floor contact, so there's no central timer gating the round start.
 		var sky_pos: Vector3 = pick["pos"] + Vector3(0.0, 60.0, 0.0)
 		p.server_respawn.rpc(sky_pos, pick["yaw"])
+		_apply_coop_spawn_health(p)
 		# Clear any leftover freeze (e.g. losers were frozen during card-pick
 		# at the end of the previous round) before kicking off the launch —
 		# otherwise the player lands and can't move.
@@ -1598,6 +1779,8 @@ func _start_round_now() -> void:
 	# Now launch players into the fight.
 	for p in round_players:
 		p.set_launching.rpc(true, 80.0)
+	if multiplayer.is_server() and is_coop_mode():
+		_begin_coop_enemy_wave()
 	if multiplayer.is_server() and ROUND_MODIFIERS_SCRIPT.needs_air_strikes(current_round_modifier):
 		_air_strikes_armed = true
 		_air_strike_timer = randf_range(0.5, 1.25)
@@ -1606,6 +1789,18 @@ func _start_round_now() -> void:
 		_ion_cannon_timer = randf_range(0.75, 1.5)
 	Trace.span_end("_start_round_now total")
 	Trace.mark("round %d PLAYING — players launched" % current_round)
+
+
+func _apply_coop_spawn_health(p: Node) -> void:
+	if not is_coop_mode() or p == null or not p.has_method("set_spawn_health"):
+		return
+	var pid := int(p.get("player_id"))
+	var weapon: Weapon = p.get("weapon") as Weapon
+	var base_health := 100
+	if weapon != null:
+		base_health += int(weapon.max_hp_bonus)
+	var mult := COOP_ENEMY_HEALTH_MULT if _is_bot_id(pid) else COOP_PLAYER_HEALTH_MULT
+	p.set_spawn_health.rpc(maxi(1, int(ceil(float(base_health) * mult))))
 
 func _update_air_strikes(delta: float) -> void:
 	if not _air_strikes_armed or not ROUND_MODIFIERS_SCRIPT.needs_air_strikes(current_round_modifier):
@@ -1850,6 +2045,8 @@ func _clear_ion_cannon_markers() -> void:
 			node.queue_free()
 
 func _update_lava_leak(delta: float) -> void:
+	if is_coop_mode():
+		return
 	if _lava_leak_started:
 		return
 	_round_elapsed += delta
@@ -1859,7 +2056,7 @@ func _update_lava_leak(delta: float) -> void:
 
 
 func _trigger_lava_leak(spread_seconds: float) -> void:
-	if not multiplayer.is_server() or _lava_leak_started:
+	if not multiplayer.is_server() or _lava_leak_started or is_coop_mode():
 		return
 	var start_ms := Time.get_ticks_msec()
 	_lava_leak_started = true
@@ -1890,7 +2087,7 @@ func _stop_lava_leak() -> void:
 func _set_music_energy(level: int, immediate: bool = false, next_bar: bool = false) -> void:
 	if level > 0:
 		_round_music_level = level
-	if _music_db <= MUSIC_DB_MIN + 0.5:
+	if MenuHelpers.music_db <= MenuHelpers.MUSIC_DB_MIN + 0.5:
 		ProceduralMusic.set_energy(0, true)
 		return
 	ProceduralMusic.set_energy(level, immediate, next_bar)
@@ -2077,6 +2274,8 @@ func _reset_round_tracking() -> void:
 	_ion_cannon_timer = -1.0
 	_ion_cannons_armed = false
 	_ion_cannon_pending = false
+	_coop_enemy_spawn_queue.clear()
+	_coop_enemy_spawn_timer = -1.0
 	_reset_pickup_spawner()
 
 func _reset_pickup_spawner() -> void:
@@ -2219,7 +2418,10 @@ func _clear_pickups() -> void:
 
 @rpc("authority", "call_local", "reliable")
 func _set_round_modifier(mod_id: String) -> void:
-	current_round_modifier = mod_id if mod_id in ROUND_MODIFIERS_SCRIPT.IDS else ""
+	if is_coop_mode():
+		current_round_modifier = ""
+	else:
+		current_round_modifier = mod_id if mod_id in ROUND_MODIFIERS_SCRIPT.IDS else ""
 	Trace.mark("round modifier set: '%s' (is_server=%s)" % [current_round_modifier, multiplayer.is_server()])
 	_apply_round_modifier_environment()
 
@@ -2379,7 +2581,16 @@ func report_kill(killer_id: int, victim_id: int) -> void:
 			killer_node.confirm_kill.rpc_id(killer_node.get_multiplayer_authority())
 	var victim_node := players_root.get_node_or_null(str(victim_id))
 	if victim_node and NetworkManager.players.size() >= 3:
-		victim_node.set_ghost_mode.rpc(true)
+		var is_wave_enemy := is_coop_mode() and _is_bot_id(victim_id)
+		if not is_wave_enemy:
+			victim_node.set_ghost_mode.rpc(true)
+
+	if is_coop_mode():
+		if _alive_human_ids().is_empty():
+			_end_coop_match()
+		elif _alive_enemy_ids().is_empty() and _coop_enemy_spawn_queue.is_empty():
+			_end_coop_wave()
+		return
 
 	var alive := _alive_player_ids()
 	if alive.size() <= 1:
@@ -2398,6 +2609,20 @@ func _alive_player_ids() -> Array[int]:
 		if not players_root.has_node(str(pid)):
 			continue
 		alive.append(pid)
+	return alive
+
+func _alive_human_ids() -> Array[int]:
+	var alive: Array[int] = []
+	for pid in _alive_player_ids():
+		if _is_human_player_id(pid):
+			alive.append(pid)
+	return alive
+
+func _alive_enemy_ids() -> Array[int]:
+	var alive: Array[int] = []
+	for pid in _alive_player_ids():
+		if _is_bot_id(pid):
+			alive.append(pid)
 	return alive
 
 func _fallback_round_winner(victim_id: int) -> int:
@@ -2455,6 +2680,45 @@ func _end_round(winner_id: int) -> void:
 			_show_spectating.rpc_id(_peer_for_player(loser_id), _waiting_for_pickers_spectator_label())
 	_show_round_winner_wait.rpc(winner_id, _active_picker_names())
 	_maybe_finish_card_picks()
+
+
+func _end_coop_wave() -> void:
+	_round_damage_seen = false
+	_set_game_state.rpc(State.PICKING_CARD)
+	_announce.rpc("WAVE %d CLEARED" % coop_wave, 1.4)
+	for raw_id in NetworkManager.players:
+		var pid := int(raw_id)
+		if _is_bot_id(pid):
+			continue
+		if not players_root.has_node(str(pid)):
+			continue
+		if not completed_picks.has(pid) and not pending_pick_cards_by_player.has(pid):
+			_begin_card_pick_for_loser(pid)
+	_show_round_winner_wait.rpc(0, _active_picker_names())
+	_maybe_finish_card_picks()
+
+
+func _end_coop_match() -> void:
+	_coop_enemy_spawn_queue.clear()
+	_coop_enemy_spawn_timer = -1.0
+	_set_game_state.rpc(State.MATCH_OVER)
+	for raw_id in NetworkManager.players:
+		var p := players_root.get_node_or_null(str(raw_id))
+		if p:
+			p.set_frozen.rpc(true)
+	_coop_match_over.rpc(coop_wave)
+
+
+@rpc("authority", "call_local", "reliable")
+func _coop_match_over(wave: int) -> void:
+	_hide_card_pick()
+	_hide_round_win_on_screens()
+	_set_banner("WAVE %d FAILED" % wave, 99.0, MATCH_WIN_FONT_SIZE)
+	if _rematch_overlay == null:
+		_build_rematch_overlay()
+	get_tree().create_timer(MATCH_WIN_BUTTONS_DELAY).timeout.connect(
+		_show_rematch_overlay.bind(0), CONNECT_ONE_SHOT)
+	_sync_mouse_mode()
 
 func _begin_card_pick_for_loser(loser_id: int) -> void:
 	if completed_picks.has(loser_id) or pending_pick_cards_by_player.has(loser_id):
@@ -2577,6 +2841,21 @@ func _warmup_round_audio() -> void:
 func _maybe_finish_card_picks() -> void:
 	if state != State.PICKING_CARD:
 		return
+	if is_coop_mode():
+		for raw_id in NetworkManager.players:
+			var pid := int(raw_id)
+			if _is_bot_id(pid):
+				continue
+			if not players_root.has_node(str(pid)):
+				continue
+			if not completed_picks.has(pid):
+				return
+		coop_wave += 1
+		current_round = coop_wave
+		_set_game_mode.rpc(game_mode, coop_wave)
+		_set_game_state.rpc(State.PLAYING)
+		_start_round_now()
+		return
 	for raw_loser_id in eliminated_players.keys():
 		var loser_id := int(raw_loser_id)
 		if not completed_picks.has(loser_id):
@@ -2605,6 +2884,12 @@ func _show_round_winner_wait(winner_id: int, picker_names: PackedStringArray = P
 
 
 func _waiting_for_pickers_label(picker_names: PackedStringArray) -> String:
+	if is_coop_mode():
+		if picker_names.is_empty():
+			return "WAVE CLEARED — WAITING FOR PICKS…"
+		if picker_names.size() == 1:
+			return "WAVE CLEARED — WAITING FOR %s…" % picker_names[0]
+		return "WAVE CLEARED — WAITING FOR %s…" % ", ".join(picker_names)
 	if picker_names.is_empty():
 		return "ROUND WON — WAITING FOR PICKS…"
 	if picker_names.size() == 1:
@@ -2616,6 +2901,12 @@ func _waiting_for_pickers_label(picker_names: PackedStringArray) -> String:
 # already picked, while other losers are still picking).
 func _waiting_for_pickers_spectator_label() -> String:
 	var names := _active_picker_names()
+	if is_coop_mode():
+		if names.is_empty():
+			return "WAITING FOR TEAM PICKS…"
+		if names.size() == 1:
+			return "WAITING FOR %s…" % names[0]
+		return "WAITING FOR %s…" % ", ".join(names)
 	if names.is_empty():
 		return "WAITING FOR OTHER PICKS…"
 	if names.size() == 1:
@@ -2628,6 +2919,14 @@ func _waiting_for_pickers_spectator_label() -> String:
 # for losers who finished their pick early).
 func _active_picker_names() -> PackedStringArray:
 	var out := PackedStringArray()
+	if is_coop_mode():
+		for raw_id in pending_pick_cards_by_player.keys():
+			var pid := int(raw_id)
+			if completed_picks.has(pid) or _is_bot_id(pid):
+				continue
+			var pname: String = NetworkManager.players.get(pid, "Player")
+			out.append(pname)
+		return out
 	for raw_id in eliminated_players.keys():
 		var pid := int(raw_id)
 		if completed_picks.has(pid):
@@ -2902,9 +3201,10 @@ func _show_rematch_overlay(_winner_id: int) -> void:
 	_rematch_requested = false
 	if _rematch_button:
 		_rematch_button.disabled = true
-		_rematch_button.text = "REMATCH"
+		_rematch_button.text = "TRY AGAIN FROM WAVE 1" if is_coop_mode() else "REMATCH"
 	if _extend_button:
 		_extend_button.disabled = true
+		_extend_button.visible = not is_coop_mode()
 		_extend_button.text = "5 MORE ROUNDS"
 	if _exit_to_menu_button:
 		_exit_to_menu_button.disabled = true
@@ -2920,14 +3220,16 @@ func _show_rematch_overlay(_winner_id: int) -> void:
 func _grab_rematch_overlay_focus() -> void:
 	if _extend_button and is_instance_valid(_extend_button) and not _extend_button.disabled:
 		_extend_button.grab_focus()
+	elif _rematch_button and is_instance_valid(_rematch_button) and not _rematch_button.disabled:
+		_rematch_button.grab_focus()
 
 
 func _unlock_rematch_vote_buttons() -> void:
 	if _rematch_overlay == null or not _rematch_overlay.visible:
 		return
-	if _rematch_button and _rematch_button.text == "REMATCH":
+	if _rematch_button and (_rematch_button.text == "REMATCH" or _rematch_button.text == "TRY AGAIN FROM WAVE 1"):
 		_rematch_button.disabled = false
-	if _extend_button and _extend_button.text == "5 MORE ROUNDS":
+	if _extend_button and _extend_button.visible and _extend_button.text == "5 MORE ROUNDS":
 		_extend_button.disabled = false
 	if _exit_to_menu_button:
 		_exit_to_menu_button.disabled = false
@@ -2936,58 +3238,18 @@ func _unlock_rematch_vote_buttons() -> void:
 var _retro_material: ShaderMaterial = null
 
 # -------------------- VIDEO SETTINGS --------------------
-const SETTINGS_PATH := "user://settings.cfg"
-const MUSIC_DB_MIN := -40.0  # below this is treated as muted
-const MUSIC_DB_MAX := 0.0
-const MUSIC_DB_DEFAULT := -16.0
-var _retro_enabled: bool = false
-
+# Settings state is unified and handled via MenuHelpers static variables
 func _is_retro_enabled() -> bool:
-	return _retro_enabled
-var _music_db: float = MUSIC_DB_DEFAULT
-var _mouse_sens_mult: float = 1.0
-var _movement_tilt_enabled: bool = true
-var _player_name: String = ""
-
-
-func _load_settings() -> void:
-	var cfg := ConfigFile.new()
-	if cfg.load(SETTINGS_PATH) != OK:
-		return
-	# Default OFF for fresh players — not everyone likes the retro/fisheye look.
-	# Anyone who already saved a "video/retro" (or legacy "video/dither") choice
-	# keeps it; only players with neither key fall through to the new false default.
-	_retro_enabled = cfg.get_value("video", "retro", cfg.get_value("video", "dither", false))
-	# Migrate the old bool setting: if music=false was saved, start the slider
-	# at the muted floor so behaviour matches the previous toggle. Otherwise
-	# read the new music_db key (with default volume).
-	var music_legacy: bool = cfg.get_value("audio", "music", true)
-	var music_legacy_default: float = MUSIC_DB_DEFAULT if music_legacy else MUSIC_DB_MIN
-	_music_db = float(cfg.get_value("audio", "music_db", music_legacy_default))
-	_mouse_sens_mult = float(cfg.get_value("input", "mouse_sens_mult", 1.0))
-	_movement_tilt_enabled = cfg.get_value("input", "movement_tilt", true)
-	_player_name = String(cfg.get_value("player", "name", ""))
-
-
-func _save_settings() -> void:
-	var cfg := ConfigFile.new()
-	cfg.set_value("video", "retro", _retro_enabled)
-	cfg.set_value("audio", "music_db", _music_db)
-	cfg.set_value("input", "mouse_sens_mult", _mouse_sens_mult)
-	cfg.set_value("input", "movement_tilt", _movement_tilt_enabled)
-	cfg.set_value("player", "name", _player_name)
-	cfg.save(SETTINGS_PATH)
+	return MenuHelpers.retro_enabled
 
 
 func _apply_settings() -> void:
 	if _retro_material:
-		_retro_material.set_shader_parameter("dither_strength", 1.0)
-		_retro_material.set_shader_parameter("fisheye_strength", 1.0)
-	# Music: drive the procedural music's volume directly. Treat the bottom
-	# of the slider as "off" — saves the audio bus when the user wants silence.
-	var muted: bool = _music_db <= MUSIC_DB_MIN + 0.5
+		_retro_material.set_shader_parameter("dither_strength", 1.0 if MenuHelpers.retro_enabled else 0.0)
+		_retro_material.set_shader_parameter("fisheye_strength", 1.0 if MenuHelpers.retro_enabled else 0.0)
+	var muted: bool = MenuHelpers.music_db <= MenuHelpers.MUSIC_DB_MIN + 0.5
 	ProceduralMusic.enabled = not muted
-	ProceduralMusic.music_db = _music_db
+	ProceduralMusic.music_db = MenuHelpers.music_db
 	if not muted:
 		ProceduralMusic.set_energy(_round_music_level, true)
 	else:
@@ -2998,8 +3260,8 @@ func _apply_settings() -> void:
 
 func _apply_mouse_sens_to_local() -> void:
 	if local_player and is_instance_valid(local_player):
-		local_player.set("mouse_sens_mult", _mouse_sens_mult)
-		local_player.set("tilt_enabled", _movement_tilt_enabled)
+		local_player.set("mouse_sens_mult", MenuHelpers.mouse_sens_mult)
+		local_player.set("tilt_enabled", MenuHelpers.movement_tilt_enabled)
 
 func _apply_retro_shader(node: Control) -> void:
 	var shader := Shader.new()
@@ -3020,6 +3282,18 @@ func _apply_retro_shader(node: Control) -> void:
 		};
 
 		void fragment() {
+			if (fisheye_strength < 0.01 && dither_strength < 0.01) {
+				COLOR = texture(screen_texture, SCREEN_UV);
+				if (cursor_visible > 0.5) {
+					vec2 res = 1.0 / SCREEN_PIXEL_SIZE;
+					vec2 d = (SCREEN_UV - mouse_uv) * res;
+					bool arrow = d.x >= 0.0 && d.y >= 0.0 && (d.x + d.y) <= 12.0;
+					bool outline = d.x >= -1.5 && d.y >= -1.5 && (d.x + d.y) <= 13.5 && !arrow;
+					if (arrow) COLOR.rgb = vec3(1.0);
+					else if (outline) COLOR.rgb = vec3(0.05);
+				}
+				return;
+			}
 			vec2 uv = SCREEN_UV;
 			vec2 centered_uv = uv - 0.5;
 			float aspect = SCREEN_PIXEL_SIZE.y / SCREEN_PIXEL_SIZE.x;
@@ -3558,6 +3832,7 @@ func _hide_rematch_overlay() -> void:
 	# A continued match ("5 MORE ROUNDS") doesn't reload the scene, so clear the
 	# oversized win-banner pop/pulse here too.
 	_reset_match_win_banner()
+	_set_banner("", 0.0)
 	if _rematch_vote_unlock_timer and _rematch_vote_unlock_timer.time_left > 0.0:
 		_rematch_vote_unlock_timer.stop()
 	if _rematch_overlay:
@@ -3567,8 +3842,11 @@ func _hide_rematch_overlay() -> void:
 	if _rematch_button:
 		_rematch_button.disabled = false
 		_rematch_button.text = "REMATCH"
+	if _rematch_subtitle:
+		_rematch_subtitle.text = ""
 	if _extend_button:
 		_extend_button.disabled = false
+		_extend_button.visible = true
 		_extend_button.text = "5 MORE ROUNDS"
 	if _exit_to_menu_button:
 		_exit_to_menu_button.disabled = false
@@ -3781,38 +4059,6 @@ func _sync_mouse_mode() -> void:
 	if Input.mouse_mode != desired:
 		Input.mouse_mode = desired
 
-func _grab_first_menu_focus(root: Node) -> void:
-	if root == null:
-		return
-	var focus_target := _find_focusable_menu_control(root)
-	if focus_target:
-		focus_target.grab_focus()
-	call_deferred("_grab_first_menu_focus_deferred", root)
-
-func _grab_first_menu_focus_deferred(root: Node) -> void:
-	if not is_instance_valid(root):
-		return
-	var focus_target := _find_focusable_menu_control(root)
-	if focus_target:
-		focus_target.grab_focus()
-
-func _find_focusable_menu_control(node: Node) -> Control:
-	if node is Control:
-		var control := node as Control
-		if not control.visible:
-			return null
-		if control.focus_mode != Control.FOCUS_NONE and not (control is LineEdit):
-			var disabled := false
-			if control is BaseButton:
-				disabled = (control as BaseButton).disabled
-			if not disabled:
-				return control
-	for child in node.get_children():
-		var focusable := _find_focusable_menu_control(child)
-		if focusable:
-			return focusable
-	return null
-
 # -------------------- PAUSE MENU (ESC) --------------------
 
 func _toggle_pause_menu() -> void:
@@ -3827,8 +4073,9 @@ func _toggle_pause_menu() -> void:
 		_refresh_pause_seed_label()
 		_update_join_form()
 		_refresh_bot_counter()
+		_refresh_pause_mode_buttons()
 		_sync_mouse_mode()
-		_grab_first_menu_focus(_pause_menu)
+		MenuHelpers.grab_first_menu_focus(_pause_menu)
 		# Pause the world if this is a solo match (local player + bots only).
 		if _human_count() <= 1:
 			get_tree().paused = true
@@ -3872,16 +4119,7 @@ func _build_modal_scaffold(node_name: String, vb_separation: int) -> Dictionary:
 	return {"root": root, "vb": vb}
 
 func _menu_panel_style() -> StyleBoxFlat:
-	var sb := StyleBoxFlat.new()
-	sb.bg_color = Color(0.08, 0.08, 0.1, 0.95)
-	sb.border_color = Color(0.35, 0.7, 1.0)
-	sb.set_border_width_all(2)
-	sb.set_corner_radius_all(8)
-	sb.content_margin_left = 28
-	sb.content_margin_right = 28
-	sb.content_margin_top = 22
-	sb.content_margin_bottom = 22
-	return sb
+	return MenuHelpers.menu_panel_style()
 
 func _make_menu_title(text: String, font_size: int, outline_size: int) -> Label:
 	var title := Label.new()
@@ -3894,18 +4132,25 @@ func _make_menu_title(text: String, font_size: int, outline_size: int) -> Label:
 	return title
 
 func _build_pause_menu() -> void:
-	var scaffold := _build_modal_scaffold("PauseMenu", 12)
+	var scaffold := _build_modal_scaffold("PauseMenu", 8)
 	var root: Control = scaffold["root"]
 	var vb: VBoxContainer = scaffold["vb"]
 
-	# Game title — readable from across the room.
-	var title := _make_menu_title("GROWING GUNS", 36, 6)
-	vb.add_child(title)
+	var panel := vb.get_parent() as PanelContainer
+	if panel:
+		panel.custom_minimum_size = Vector2(350, 0)
 
-	# Spacer to separate title from the multiplayer rows.
-	var spacer1 := Control.new()
-	spacer1.custom_minimum_size = Vector2(0, 6)
-	vb.add_child(spacer1)
+	# Game title — readable from across the room. Moved out of the box to the top center.
+	var title := _make_menu_title("GROWING GUNS", 42, 6)
+	title.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	title.anchor_left = 0.5
+	title.anchor_right = 0.5
+	title.offset_left = -250.0
+	title.offset_top = 35.0
+	title.offset_right = 250.0
+	title.offset_bottom = 95.0
+	title.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	root.add_child(title)
 
 	# ── Share my game ID ──
 	var share_label := Label.new()
@@ -3921,12 +4166,12 @@ func _build_pause_menu() -> void:
 	var id_field := LineEdit.new()
 	id_field.editable = false
 	id_field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	id_field.custom_minimum_size = Vector2(360, 36)
+	id_field.custom_minimum_size = Vector2(0, 32)
 	id_field.placeholder_text = "(no game ID — not hosting)"
 	id_row.add_child(id_field)
 	var copy_btn := Button.new()
 	copy_btn.text = "COPY"
-	copy_btn.custom_minimum_size = Vector2(80, 36)
+	copy_btn.custom_minimum_size = Vector2(70, 32)
 	id_row.add_child(copy_btn)
 	# Stash so _toggle_pause_menu can refresh the field every time the menu opens.
 	_pause_id_field = id_field
@@ -3945,13 +4190,13 @@ func _build_pause_menu() -> void:
 	var join_input := LineEdit.new()
 	join_input.placeholder_text = "Paste a Game ID…"
 	join_input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	join_input.custom_minimum_size = Vector2(360, 36)
+	join_input.custom_minimum_size = Vector2(0, 32)
 	join_input.text_changed.connect(_on_join_input_changed)
 	join_input.text_submitted.connect(func(_t: String) -> void: _pause_join())
 	join_row.add_child(join_input)
 	var join_btn := Button.new()
 	join_btn.text = "JOIN"
-	join_btn.custom_minimum_size = Vector2(80, 36)
+	join_btn.custom_minimum_size = Vector2(70, 32)
 	join_btn.disabled = true
 	join_btn.pressed.connect(_pause_join)
 	join_row.add_child(join_btn)
@@ -3977,23 +4222,23 @@ func _build_pause_menu() -> void:
 
 	var bot_minus := Button.new()
 	bot_minus.text = "-"
-	bot_minus.custom_minimum_size = Vector2(44, 36)
+	bot_minus.custom_minimum_size = Vector2(40, 32)
 	bot_minus.pressed.connect(_pause_remove_bot)
 	bot_row.add_child(bot_minus)
 
 	var bot_count := Label.new()
 	bot_count.text = "0"
-	bot_count.custom_minimum_size = Vector2(0, 36)
+	bot_count.custom_minimum_size = Vector2(0, 32)
 	bot_count.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	bot_count.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	bot_count.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	bot_count.add_theme_font_size_override("font_size", 18)
+	bot_count.add_theme_font_size_override("font_size", 16)
 	bot_count.add_theme_color_override("font_color", Color(1.0, 0.95, 0.78))
 	bot_row.add_child(bot_count)
 
 	var bot_plus := Button.new()
 	bot_plus.text = "+"
-	bot_plus.custom_minimum_size = Vector2(44, 36)
+	bot_plus.custom_minimum_size = Vector2(40, 32)
 	bot_plus.pressed.connect(_pause_add_bot)
 	bot_row.add_child(bot_plus)
 
@@ -4004,30 +4249,40 @@ func _build_pause_menu() -> void:
 
 	# Spacer before action buttons.
 	var spacer2 := Control.new()
-	spacer2.custom_minimum_size = Vector2(0, 8)
+	spacer2.custom_minimum_size = Vector2(0, 4)
 	vb.add_child(spacer2)
 
-	var restart_btn := Button.new()
-	restart_btn.text = "RESTART MATCH"
-	restart_btn.custom_minimum_size = Vector2(0, 44)
-	restart_btn.pressed.connect(_pause_restart_match)
-	vb.add_child(restart_btn)
+	# Versus Button
+	var versus_btn := Button.new()
+	versus_btn.text = "VERSUS"
+	versus_btn.custom_minimum_size = Vector2(0, 32)
+	versus_btn.pressed.connect(func() -> void: _pause_change_mode(GAME_MODE_VERSUS))
+	vb.add_child(versus_btn)
+	_pause_versus_btn = versus_btn
+
+	# Wave Survival Button
+	var wave_btn := Button.new()
+	wave_btn.text = "WAVE SURVIVAL"
+	wave_btn.custom_minimum_size = Vector2(0, 32)
+	wave_btn.pressed.connect(func() -> void: _pause_change_mode(GAME_MODE_COOP))
+	vb.add_child(wave_btn)
+	_pause_wave_btn = wave_btn
 
 	var splitscreen_btn := Button.new()
 	splitscreen_btn.text = "SPLITSCREEN"
-	splitscreen_btn.custom_minimum_size = Vector2(0, 44)
+	splitscreen_btn.custom_minimum_size = Vector2(0, 32)
 	splitscreen_btn.pressed.connect(_pause_start_splitscreen)
 	vb.add_child(splitscreen_btn)
 
 	var settings_btn := Button.new()
 	settings_btn.text = "SETTINGS"
-	settings_btn.custom_minimum_size = Vector2(0, 44)
+	settings_btn.custom_minimum_size = Vector2(0, 32)
 	settings_btn.pressed.connect(_open_settings)
 	vb.add_child(settings_btn)
 
 	var resume := Button.new()
 	resume.text = "RESUME"
-	resume.custom_minimum_size = Vector2(0, 44)
+	resume.custom_minimum_size = Vector2(0, 32)
 	resume.pressed.connect(_toggle_pause_menu)
 	# Esc / Enter close the menu; the _input handler also routes those keys
 	# through here, but the Shortcut keeps focus-driven controllers happy.
@@ -4040,7 +4295,7 @@ func _build_pause_menu() -> void:
 
 	var exit_btn := Button.new()
 	exit_btn.text = "EXIT GAME"
-	exit_btn.custom_minimum_size = Vector2(0, 44)
+	exit_btn.custom_minimum_size = Vector2(0, 32)
 	exit_btn.pressed.connect(_quit_game)
 	vb.add_child(exit_btn)
 
@@ -4069,6 +4324,8 @@ func _build_pause_menu() -> void:
 
 # Pause-menu controls — set in _build_pause_menu, used by the action handlers
 # below so we don't need to walk the scene tree to find them.
+var _pause_versus_btn: Button = null
+var _pause_wave_btn: Button = null
 var _pause_id_field: LineEdit = null
 var _pause_copy_button: Button = null
 var _pause_join_input: LineEdit = null
@@ -4079,196 +4336,36 @@ var _pause_bot_minus_button: Button = null
 var _pause_bot_plus_button: Button = null
 var _pause_seed_label: Label = null
 var _settings_panel: Control = null
-var _settings_retro_toggle: CheckButton = null
-var _settings_music_slider: HSlider = null
-var _settings_music_value_label: Label = null
-var _settings_mouse_slider: HSlider = null
-var _settings_mouse_value_label: Label = null
-var _settings_tilt_toggle: CheckButton = null
-
-
 func _open_settings() -> void:
-	if _settings_panel == null:
-		_build_settings_panel()
+	if _settings_panel:
+		_settings_panel.queue_free()
+	_settings_panel = MenuHelpers.build_settings_panel($HUD, _close_settings)
 	if _pause_menu:
 		_pause_menu.visible = false
-	# Sync controls to the live state in case the values changed via some
-	# other path (CLI flag, save edit, etc.) since the panel was last opened.
-	if _settings_retro_toggle:
-		_settings_retro_toggle.set_pressed_no_signal(_retro_enabled)
-	if _settings_music_slider:
-		_settings_music_slider.set_value_no_signal(_music_db)
-		if _settings_music_value_label:
-			_settings_music_value_label.text = _music_label_for(_music_db)
-	if _settings_mouse_slider:
-		_settings_mouse_slider.set_value_no_signal(_mouse_sens_mult)
-		if _settings_mouse_value_label:
-			_settings_mouse_value_label.text = "%.2fx" % _mouse_sens_mult
-	if _settings_tilt_toggle:
-		_settings_tilt_toggle.set_pressed_no_signal(_movement_tilt_enabled)
 	_settings_panel.visible = true
-	_grab_first_menu_focus(_settings_panel)
-
-
-func _music_label_for(db: float) -> String:
-	if db <= MUSIC_DB_MIN + 0.5:
-		return "Off"
-	return "%.0f dB" % db
+	MenuHelpers.grab_first_menu_focus(_settings_panel)
 
 
 func _close_settings() -> void:
 	if _settings_panel:
-		_settings_panel.visible = false
+		_settings_panel.queue_free()
+		_settings_panel = null
 	if _pause_menu:
 		_pause_menu.visible = true
-		_grab_first_menu_focus(_pause_menu)
+		MenuHelpers.grab_first_menu_focus(_pause_menu)
 
 
-func _build_settings_panel() -> void:
-	# Mirrors the visual style of _build_pause_menu so the two screens read
-	# as part of the same flow. Toggles persist immediately on change.
-	var scaffold := _build_modal_scaffold("SettingsPanel", 14)
-	var root: Control = scaffold["root"]
-	var vb: VBoxContainer = scaffold["vb"]
-	vb.custom_minimum_size = Vector2(420, 0)
-
-	var title := _make_menu_title("SETTINGS", 30, 5)
-	vb.add_child(title)
-
-	var spacer1 := Control.new()
-	spacer1.custom_minimum_size = Vector2(0, 6)
-	vb.add_child(spacer1)
-
-	# Player name — pre-filled from settings.cfg, broadcast on commit so the
-	# scoreboard + every peer's floating name tag pick it up immediately.
-	var name_row := HBoxContainer.new()
-	name_row.add_theme_constant_override("separation", 12)
-	var name_label := Label.new()
-	name_label.text = "Player name"
-	name_label.custom_minimum_size = Vector2(170, 0)
-	name_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	name_label.add_theme_color_override("font_color", Color(0.85, 0.85, 0.95))
-	name_row.add_child(name_label)
-	var name_input := LineEdit.new()
-	name_input.text = _player_name
-	name_input.placeholder_text = "Your callsign…"
-	name_input.max_length = 20
-	name_input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	name_input.custom_minimum_size = Vector2(0, 36)
-	name_row.add_child(name_input)
-	vb.add_child(name_row)
-	var commit_name := func() -> void:
-		var entered: String = name_input.text.strip_edges()
-		if entered.is_empty() or entered == _player_name:
-			name_input.text = _player_name
-			return
-		_player_name = entered
-		NetworkManager.local_player_name = entered
-		_save_settings()
-		# Update everyone's NetworkManager.players + scoreboard.
-		var my_id := multiplayer.get_unique_id()
-		if my_id != 0:
-			NetworkManager._register_player.rpc(my_id, entered)
-		# Update the floating name label on this peer's player node across peers.
-		var local_player_node := players_root.get_node_or_null(str(my_id))
-		if local_player_node and local_player_node.has_method("set_display_name"):
-			local_player_node.set_display_name.rpc(entered)
-	name_input.text_submitted.connect(func(_t: String) -> void: commit_name.call())
-	name_input.focus_exited.connect(commit_name)
-
-	var retro_toggle := CheckButton.new()
-	retro_toggle.text = "Retro shader look"
-	retro_toggle.button_pressed = _retro_enabled
-	retro_toggle.toggled.connect(func(on: bool) -> void:
-		_retro_enabled = on
-		_apply_settings()
-		_save_settings())
-	vb.add_child(retro_toggle)
-	_settings_retro_toggle = retro_toggle
-
-	# Music volume slider — bottom of range = "Off".
-	var music_row := _build_slider_row("Music", _music_db, MUSIC_DB_MIN, MUSIC_DB_MAX, 1.0, _music_label_for(_music_db))
-	vb.add_child(music_row["row"])
-	_settings_music_slider = music_row["slider"]
-	_settings_music_value_label = music_row["value_label"]
-	_settings_music_slider.value_changed.connect(func(v: float) -> void:
-		_music_db = v
-		if _settings_music_value_label:
-			_settings_music_value_label.text = _music_label_for(v)
-		_apply_settings()
-		_save_settings())
-
-	# Mouse sensitivity multiplier — 1.0 = base MOUSE_SENS in player.gd.
-	var mouse_row := _build_slider_row("Mouse sensitivity", _mouse_sens_mult, 0.3, 3.0, 0.05, "%.2fx" % _mouse_sens_mult)
-	vb.add_child(mouse_row["row"])
-	_settings_mouse_slider = mouse_row["slider"]
-	_settings_mouse_value_label = mouse_row["value_label"]
-	_settings_mouse_slider.value_changed.connect(func(v: float) -> void:
-		_mouse_sens_mult = v
-		if _settings_mouse_value_label:
-			_settings_mouse_value_label.text = "%.2fx" % v
-		_apply_settings()
-		_save_settings())
-
-	# Movement tilt — strafe-driven camera + gun roll. Some players hate it.
-	var tilt_toggle := CheckButton.new()
-	tilt_toggle.text = "Movement tilt"
-	tilt_toggle.button_pressed = _movement_tilt_enabled
-	tilt_toggle.toggled.connect(func(on: bool) -> void:
-		_movement_tilt_enabled = on
-		_apply_settings()
-		_save_settings())
-	vb.add_child(tilt_toggle)
-	_settings_tilt_toggle = tilt_toggle
-
-	var spacer2 := Control.new()
-	spacer2.custom_minimum_size = Vector2(0, 8)
-	vb.add_child(spacer2)
-
-	var back_btn := Button.new()
-	back_btn.text = "BACK"
-	back_btn.custom_minimum_size = Vector2(0, 44)
-	back_btn.pressed.connect(_close_settings)
-	# Esc returns to the pause menu — without this you'd be stuck in
-	# settings since Game._input early-returns while the tree is paused.
-	var back_shortcut := Shortcut.new()
-	var back_ev := InputEventAction.new()
-	back_ev.action = "ui_cancel"
-	back_shortcut.events.append(back_ev)
-	back_btn.shortcut = back_shortcut
-	vb.add_child(back_btn)
-
-	_settings_panel = root
-	_settings_panel.visible = false
+func _on_player_name_committed(new_name: String) -> void:
+	var my_id := multiplayer.get_unique_id()
+	if my_id != 0:
+		NetworkManager._register_player.rpc(my_id, new_name)
+	var local_player_node := players_root.get_node_or_null(str(my_id))
+	if local_player_node and local_player_node.has_method("set_display_name"):
+		local_player_node.set_display_name.rpc(new_name)
 
 
 func _build_slider_row(label_text: String, value: float, min_val: float, max_val: float, step: float, value_text: String) -> Dictionary:
-	# Returns {row: HBoxContainer, slider: HSlider, value_label: Label} so the
-	# caller can wire signals and update the live value display.
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 12)
-	var label := Label.new()
-	label.text = label_text
-	label.custom_minimum_size = Vector2(170, 0)
-	label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	label.add_theme_color_override("font_color", Color(0.85, 0.85, 0.95))
-	row.add_child(label)
-	var slider := HSlider.new()
-	slider.min_value = min_val
-	slider.max_value = max_val
-	slider.step = step
-	slider.value = clampf(value, min_val, max_val)
-	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	slider.custom_minimum_size = Vector2(180, 28)
-	row.add_child(slider)
-	var value_label := Label.new()
-	value_label.text = value_text
-	value_label.custom_minimum_size = Vector2(70, 0)
-	value_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	value_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	value_label.add_theme_color_override("font_color", Color(0.7, 0.7, 0.85))
-	row.add_child(value_label)
-	return {"row": row, "slider": slider, "value_label": value_label}
+	return MenuHelpers.build_slider_row(label_text, value, min_val, max_val, step, value_text)
 
 
 # Last map swap inputs — used by the pause menu's seed label (and any future
@@ -4353,31 +4450,15 @@ func _update_join_form() -> void:
 
 
 func _extract_iroh_node_id(text: String) -> String:
-	var stripped := text.strip_edges()
-	var pieces := stripped.split("\n", false)
-	if pieces.size() == 1:
-		pieces = stripped.split("\t", false)
-	for raw_piece in pieces:
-		var piece := str(raw_piece).strip_edges()
-		if _is_valid_iroh_node_id(piece):
-			return piece
-	return stripped
+	return MenuHelpers.extract_iroh_node_id(text)
 
 
 func _is_valid_iroh_node_id(text: String) -> bool:
-	var id := text.strip_edges()
-	if id.length() < IROH_GAME_ID_MIN_LENGTH or id.length() > IROH_GAME_ID_MAX_LENGTH:
-		return false
-	if id.contains(" "):
-		return false
-	return true
+	return MenuHelpers.is_valid_iroh_node_id(text)
 
 
 func _is_own_iroh_game_id(game_id: String) -> bool:
-	var own_id := NetworkManager.current_iroh_game_id.strip_edges()
-	if own_id.is_empty():
-		return false
-	return game_id.strip_edges() == own_id
+	return MenuHelpers.is_own_iroh_game_id(game_id)
 
 
 func _refresh_bot_counter() -> void:
@@ -4426,7 +4507,7 @@ func _pause_join() -> void:
 	# which waits for connected_to_server before requesting a spawn.
 	get_tree().paused = false
 	NetworkManager.leave_game()
-	if not NetworkManager.join_game_iroh(game_id, _player_name if not _player_name.is_empty() else "Player_%d" % (randi() % 1000)):
+	if not NetworkManager.join_game_iroh(game_id, MenuHelpers.player_name if not MenuHelpers.player_name.is_empty() else "Player_%d" % (randi() % 1000)):
 		_join_in_progress = false
 		_update_join_form()
 		if not NetworkManager.last_network_error.is_empty():
@@ -4474,6 +4555,41 @@ func _pause_restart_match() -> void:
 		_restart_match()
 
 
+func _pause_change_mode(mode: String) -> void:
+	if not multiplayer.is_server():
+		_announce("ONLY HOST CAN CHANGE MODE", 2.0)
+		return
+	if game_mode == mode:
+		_pause_restart_match()
+		return
+
+	game_mode = mode
+	NetworkManager.set_meta("game_mode", mode)
+	_set_game_mode.rpc(mode, 1)
+	_update_scoreboard()
+
+	if _pause_menu and _pause_menu.visible:
+		_toggle_pause_menu()
+
+	_restart_match()
+
+
+func _refresh_pause_mode_buttons() -> void:
+	if _pause_versus_btn == null or _pause_wave_btn == null:
+		return
+
+	var is_host := multiplayer.is_server()
+	_pause_versus_btn.disabled = not is_host
+	_pause_wave_btn.disabled = not is_host
+
+	if game_mode == GAME_MODE_VERSUS:
+		_pause_versus_btn.text = "★ VERSUS MODE (ACTIVE)"
+		_pause_wave_btn.text = "SWITCH TO WAVE SURVIVAL"
+	else:
+		_pause_versus_btn.text = "SWITCH TO VERSUS MODE"
+		_pause_wave_btn.text = "★ WAVE SURVIVAL (ACTIVE)"
+
+
 func _quit_game() -> void:
 	get_tree().paused = false
 	get_tree().quit()
@@ -4487,6 +4603,15 @@ func show_damage_direction_for(player_id: int, from_pos: Vector3) -> void:
 		renderer.show_damage_direction(from_pos)
 
 func _update_scoreboard() -> void:
+	if is_coop_mode():
+		var enemies_alive := (_alive_enemy_ids().size() + _coop_enemy_spawn_queue.size()) if state == State.PLAYING else _bot_ids().size()
+		var humans_alive := _alive_human_ids().size() if state == State.PLAYING else _human_count()
+		scoreboard.text = "— CO-OP WAVE %d —\nPLAYERS  %d\nENEMIES  %d" % [
+			coop_wave,
+			humans_alive,
+			enemies_alive,
+		]
+		return
 	var lines: Array[String] = ["— ROUNDS —"]
 	for id in NetworkManager.players:
 		var wins := int(round_wins.get(id, 0))
@@ -4542,13 +4667,13 @@ func _refresh_tab_overlay() -> void:
 	for c in _tab_content.get_children():
 		c.queue_free()
 	var header := Label.new()
-	header.text = "SCOREBOARD"
+	header.text = "CO-OP WAVE %d" % coop_wave if is_coop_mode() else "SCOREBOARD"
 	header.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	header.add_theme_font_size_override("font_size", 28)
 	header.add_theme_color_override("font_color", Color(1, 0.9, 0.5))
 	_tab_content.add_child(header)
 	var sub := Label.new()
-	sub.text = "first to %d rounds wins" % rounds_to_win
+	sub.text = "clear the wave, choose cards, survive" if is_coop_mode() else "first to %d rounds wins" % rounds_to_win
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	sub.add_theme_font_size_override("font_size", 13)
 	sub.add_theme_color_override("font_color", Color(0.65, 0.65, 0.8))
@@ -4570,7 +4695,10 @@ func _tab_player_row(id: int) -> Control:
 	hbox.add_child(nlbl)
 	var wins := int(round_wins.get(id, 0))
 	var score_lbl := Label.new()
-	score_lbl.text = "%d / %d" % [wins, rounds_to_win]
+	if is_coop_mode():
+		score_lbl.text = "ENEMY" if _is_bot_id(id) else "ALLY"
+	else:
+		score_lbl.text = "%d / %d" % [wins, rounds_to_win]
 	score_lbl.add_theme_font_size_override("font_size", 20)
 	score_lbl.add_theme_color_override("font_color", Color(1, 0.85, 0.4))
 	hbox.add_child(score_lbl)
@@ -4648,7 +4776,10 @@ func _tab_card_pill(text: String, col: Color) -> Control:
 func _restart_match() -> void:
 	if not multiplayer.is_server():
 		return
+	_hide_rematch_overlay.rpc()
 	_set_game_state.rpc(State.WAITING)
+	coop_wave = 1
+	current_round = 1
 	round_wins.clear()
 	for pid in NetworkManager.players:
 		round_wins[pid] = 0

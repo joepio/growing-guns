@@ -129,10 +129,17 @@ func _tick_bob(delta: float) -> void:
 func _try_collect() -> void:
 	if _collected:
 		return
+	var game := get_tree().current_scene
+	var is_coop := false
+	if game and game.has_method("is_coop_mode"):
+		is_coop = game.is_coop_mode()
+	
 	for node in get_tree().get_nodes_in_group("players"):
 		if not node is Node3D:
 			continue
 		var player := node as Node3D
+		if is_coop and bool(player.get("is_bot")):
+			continue
 		if bool(player.get("ghost_mode")):
 			continue
 		if int(player.get("health")) <= 0:

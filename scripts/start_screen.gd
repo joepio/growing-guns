@@ -1,0 +1,357 @@
+extends Node3D
+
+const MenuHelpers = preload("res://scripts/menu_helpers.gd")
+const GAME_SCENE := "res://scenes/game.tscn"
+const GAME_MODE_VERSUS := "versus"
+const GAME_MODE_COOP := "coop"
+const PLAYER_SCENE := preload("res://scenes/player.tscn")
+
+@onready var _camera: Camera3D = $Camera3D
+@onready var _arena: Node3D = $Arena
+@onready var _versus_button: Button = $UI/MenuPanel/VBox/VersusButton
+@onready var _wave_button: Button = $UI/MenuPanel/VBox/WaveButton
+@onready var _notice: Label = $UI/MenuPanel/VBox/Notice
+@onready var _vbox: VBoxContainer = $UI/MenuPanel/VBox
+
+var _orbit_t := 0.0
+var _orbit_origin := Vector3.ZERO
+
+# Multiplayer and settings UI elements
+var _players_root: Node3D
+var _share_field: LineEdit
+var _copy_button: Button
+var _join_input: LineEdit
+var _join_button: Button
+var _settings_button: Button
+var _settings_panel: Control
+
+# Settings state is unified and handled via MenuHelpers static variables
+
+var state: int = 1  # State.PLAYING == 1 (required so bots can shoot in the background)
+
+
+func _ready() -> void:
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	
+	# Load settings first using the unified settings system
+	MenuHelpers.load_settings()
+	if MenuHelpers.player_name.is_empty():
+		MenuHelpers.player_name = "Player_%d" % (randi() % 1000)
+		MenuHelpers.save_settings()
+	NetworkManager.local_player_name = MenuHelpers.player_name
+	
+	# Register settings callbacks
+	MenuHelpers.settings_changed_callback = _apply_settings
+	MenuHelpers.player_name_committed_callback = _on_player_name_committed
+	
+	# Generate background arena
+	if _arena and _arena.has_method("apply_seed"):
+		_arena.call("apply_seed", randi(), 60.0, 90.0)
+		_orbit_origin = _arena.global_position
+	
+	# Container for background fight bots
+	_players_root = Node3D.new()
+	_players_root.name = "Players"
+	add_child(_players_root)
+	
+	# Spawn background fighting bots
+	_spawn_background_bots()
+	
+	_versus_button.pressed.connect(_start_versus)
+	_wave_button.pressed.connect(_start_wave_survival)
+	
+	# Build the start screen multiplayer / settings UI
+	_build_start_screen_multiplayer_ui()
+	
+	# Auto-host online iroh room immediately so the match ID is ready
+	if NetworkManager.multiplayer.multiplayer_peer == null or NetworkManager.multiplayer.multiplayer_peer is OfflineMultiplayerPeer:
+		NetworkManager.host_game_iroh(MenuHelpers.player_name)
+		
+	if _share_field:
+		_share_field.text = NetworkManager.current_iroh_game_id
+		
+	if not NetworkManager.network_status_changed.is_connected(_on_network_status_changed):
+		NetworkManager.network_status_changed.connect(_on_network_status_changed)
+		
+	_show_network_notice()
+	_versus_button.grab_focus()
+	_position_camera(0.0)
+
+
+func _process(delta: float) -> void:
+	_orbit_t += delta * 0.055
+	_position_camera(_orbit_t)
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	if event.is_action_pressed("ui_cancel"):
+		if _settings_panel and _settings_panel.visible:
+			_close_settings_menu()
+			get_viewport().set_input_as_handled()
+		else:
+			get_tree().quit()
+	if event is InputEventKey and event.pressed and not event.echo:
+		if _settings_panel == null or not _settings_panel.visible:
+			match event.keycode:
+				KEY_1:
+					_start_versus()
+				KEY_2:
+					_start_wave_survival()
+
+
+func _position_camera(t: float) -> void:
+	if _camera == null:
+		return
+	var radius := 68.0
+	var height := 28.0
+	var pos := _orbit_origin + Vector3(cos(t) * radius, height, sin(t) * radius)
+	_camera.global_position = pos
+	_camera.look_at(_orbit_origin + Vector3(0.0, 6.5, 0.0), Vector3.UP)
+
+
+func _start_versus() -> void:
+	_start_game(GAME_MODE_VERSUS)
+
+
+func _start_wave_survival() -> void:
+	_start_game(GAME_MODE_COOP)
+
+
+func _start_game(mode: String) -> void:
+	# If we are hosting, keep the same connection! Otherwise, clean up and host fresh in game.tscn
+	if NetworkManager.current_iroh_game_id.is_empty():
+		NetworkManager.leave_game()
+	NetworkManager.set_meta("game_mode", mode)
+	if NetworkManager.has_meta("coop_mode"):
+		NetworkManager.remove_meta("coop_mode")
+	get_tree().change_scene_to_file(GAME_SCENE)
+
+
+func _show_network_notice() -> void:
+	_notice.visible = false
+	if not NetworkManager.has_meta("network_notice"):
+		return
+	var notice := str(NetworkManager.get_meta("network_notice"))
+	NetworkManager.remove_meta("network_notice")
+	if notice.is_empty():
+		return
+	_notice.text = notice
+	_notice.visible = true
+
+
+# ── Background Bots spawning ──
+func _spawn_background_bots() -> void:
+	var spawnpoints := get_tree().get_nodes_in_group("spawnpoints")
+	if spawnpoints.is_empty():
+		return
+		
+	spawnpoints.shuffle()
+	var count := mini(4, spawnpoints.size())
+	
+	for i in count:
+		var sp := spawnpoints[i] as Node3D
+		var p := PLAYER_SCENE.instantiate()
+		p.player_id = 200 + i  # Unique ID base for start screen background bots
+		p.name = str(p.player_id)
+		p.is_bot = true
+		p.player_name = "AI_%d" % i
+		p.set_multiplayer_authority(1)
+		_players_root.add_child(p)
+		
+		p.global_position = sp.global_position
+		p.rotation.y = randf() * TAU
+		
+		var spawn_pos: Vector3 = sp.global_position
+		p.died.connect(func(_killer_id): _on_bot_died(p, spawn_pos))
+		
+		# Equip bot with 4 random cards
+		var cards := CardLibrary.all()
+		for j in 4:
+			if not cards.is_empty():
+				var card_id: String = cards.pick_random()["id"]
+				p.apply_card(card_id)
+
+
+func _on_bot_died(bot: Node3D, spawn_pos: Vector3) -> void:
+	if not is_instance_valid(bot):
+		return
+	# Wait 3.0s and respawn them
+	get_tree().create_timer(3.0).timeout.connect(func():
+		if is_instance_valid(bot):
+			bot.call("clear_ragdoll")
+			bot.call("_set_dead_visuals", false)
+			bot.call("server_respawn", spawn_pos, randf() * TAU)
+	)
+
+
+# ── UI Construction ──
+func _build_start_screen_multiplayer_ui() -> void:
+	# Make the main panel a bit wider to hold IDs cleanly
+	var menu_panel = $UI/MenuPanel
+	menu_panel.custom_minimum_size = Vector2(350, 0)
+	
+	var exit_note = $UI/MenuPanel/VBox/ExitNote
+	var notice = $UI/MenuPanel/VBox/Notice
+	
+	# Add spacer
+	var spacer_mid := Control.new()
+	spacer_mid.custom_minimum_size = Vector2(0, 4)
+	_vbox.add_child(spacer_mid)
+	
+	# Settings button
+	_settings_button = Button.new()
+	_settings_button.text = "SETTINGS"
+	_settings_button.custom_minimum_size = Vector2(0, 32)
+	_vbox.add_child(_settings_button)
+	_settings_button.pressed.connect(_open_settings_menu)
+	
+	var sep := HSeparator.new()
+	_vbox.add_child(sep)
+	
+	# Share Match ID
+	var share_lbl := Label.new()
+	share_lbl.text = "Share your Match ID:"
+	share_lbl.add_theme_color_override("font_color", Color(0.7, 0.7, 0.85))
+	_vbox.add_child(share_lbl)
+	
+	var share_row := HBoxContainer.new()
+	share_row.add_theme_constant_override("separation", 8)
+	_vbox.add_child(share_row)
+	
+	_share_field = LineEdit.new()
+	_share_field.editable = false
+	_share_field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_share_field.custom_minimum_size = Vector2(0, 32)
+	_share_field.placeholder_text = "Starting host..."
+	share_row.add_child(_share_field)
+	
+	_copy_button = Button.new()
+	_copy_button.text = "COPY"
+	_copy_button.custom_minimum_size = Vector2(70, 32)
+	share_row.add_child(_copy_button)
+	_copy_button.pressed.connect(_on_copy_pressed)
+	
+	# Join Friend
+	var join_lbl := Label.new()
+	join_lbl.text = "Or join a friend's match:"
+	join_lbl.add_theme_color_override("font_color", Color(0.7, 0.7, 0.85))
+	_vbox.add_child(join_lbl)
+	
+	var join_row := HBoxContainer.new()
+	join_row.add_theme_constant_override("separation", 8)
+	_vbox.add_child(join_row)
+	
+	_join_input = LineEdit.new()
+	_join_input.placeholder_text = "Paste friend's Game ID..."
+	_join_input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_join_input.custom_minimum_size = Vector2(0, 32)
+	_join_input.text_changed.connect(_on_join_input_changed)
+	_join_input.text_submitted.connect(func(_t): _on_join_pressed())
+	join_row.add_child(_join_input)
+	
+	_join_button = Button.new()
+	_join_button.text = "JOIN"
+	_join_button.custom_minimum_size = Vector2(70, 32)
+	_join_button.disabled = true
+	join_row.add_child(_join_button)
+	_join_button.pressed.connect(_on_join_pressed)
+	
+	# Reorder labels to make notice / quit help be at bottom
+	_vbox.move_child(exit_note, _vbox.get_child_count() - 1)
+	if notice:
+		_vbox.move_child(notice, _vbox.get_child_count() - 1)
+		
+	# Force the menu panel to resize to its new minimum size including the dynamic controls
+	menu_panel.size = Vector2.ZERO
+
+
+func _on_copy_pressed() -> void:
+	if _share_field and not _share_field.text.is_empty():
+		DisplayServer.clipboard_set(_share_field.text)
+		_copy_button.text = "COPIED!"
+		get_tree().create_timer(1.5).timeout.connect(func():
+			if _copy_button:
+				_copy_button.text = "COPY"
+		)
+
+
+func _on_join_pressed() -> void:
+	if _join_input == null or _join_input.text.strip_edges().is_empty():
+		return
+	var game_id := _join_input.text.strip_edges()
+	
+	_join_button.disabled = true
+	_join_button.text = "JOINING..."
+	
+	if NetworkManager.multiplayer.multiplayer_peer != null:
+		NetworkManager.leave_game()
+		
+	if not NetworkManager.join_game_iroh(game_id, MenuHelpers.player_name):
+		_join_button.disabled = false
+		_join_button.text = "JOIN"
+		_show_status("Could not initiate join connection.", true)
+		return
+		
+	get_tree().change_scene_to_file(GAME_SCENE)
+
+
+func _on_join_input_changed(text: String) -> void:
+	var extracted := MenuHelpers.extract_iroh_node_id(text)
+	if _join_input:
+		var old_caret := _join_input.caret_column
+		_join_input.set_text(extracted)
+		_join_input.caret_column = mini(old_caret, extracted.length())
+		
+	var is_valid := MenuHelpers.is_valid_iroh_node_id(extracted)
+	var is_own := MenuHelpers.is_own_iroh_game_id(extracted)
+	_join_button.disabled = not is_valid or is_own
+
+
+func _on_network_status_changed(message: String, is_error: bool) -> void:
+	_show_status(message, is_error)
+	if not is_error and _share_field:
+		_share_field.text = NetworkManager.current_iroh_game_id
+
+
+func _show_status(message: String, is_error: bool) -> void:
+	if _notice:
+		_notice.text = message
+		_notice.visible = not message.is_empty()
+		if is_error:
+			_notice.add_theme_color_override("font_color", Color(1.0, 0.45, 0.35))
+		else:
+			_notice.add_theme_color_override("font_color", Color(0.45, 1.0, 0.65))
+
+
+# ── Settings menu implementation ──
+func _open_settings_menu() -> void:
+	if _settings_panel:
+		_settings_panel.queue_free()
+	_settings_panel = MenuHelpers.build_settings_panel($UI, _close_settings_menu, true)
+	$UI/MenuPanel.visible = false
+	_settings_panel.visible = true
+	MenuHelpers.grab_first_menu_focus(_settings_panel)
+
+
+func _close_settings_menu() -> void:
+	if _settings_panel:
+		_settings_panel.queue_free()
+		_settings_panel = null
+	$UI/MenuPanel.visible = true
+	MenuHelpers.grab_first_menu_focus($UI/MenuPanel)
+
+
+func _apply_settings() -> void:
+	var muted: bool = MenuHelpers.music_db <= MenuHelpers.MUSIC_DB_MIN + 0.5
+	ProceduralMusic.enabled = not muted
+	ProceduralMusic.music_db = MenuHelpers.music_db
+	if not muted:
+		ProceduralMusic.set_energy(1, true)
+	else:
+		ProceduralMusic.set_energy(0, true)
+
+
+func _on_player_name_committed(new_name: String) -> void:
+	NetworkManager.host_game_iroh(new_name)
+	if _share_field:
+		_share_field.text = NetworkManager.current_iroh_game_id

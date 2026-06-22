@@ -344,6 +344,16 @@ func _handle_collision(result: Dictionary) -> void:
 
 	var hit_player: Node3D = shooter_node.call("_player_from_hit_collider", collider)
 
+	if hit_player:
+		var game := get_tree().current_scene
+		if game and game.has_method("should_block_player_damage") \
+				and game.should_block_player_damage(int(hit_player.get("player_id")), shooter_id):
+			var ally_rids: Array = hit_player.call("get_hitbox_rids") if hit_player.has_method("get_hitbox_rids") else [hit_player.get_rid()]
+			excluded_rids.append_array(ally_rids)
+			if _ray_query:
+				_ray_query.exclude = excluded_rids
+			return
+
 	if hit_player and hit_player.get("ghost_mode") == true:
 		var ghosts_rids: Array = hit_player.call("get_hitbox_rids") if hit_player.has_method("get_hitbox_rids") else [hit_player.get_rid()]
 		excluded_rids.append_array(ghosts_rids)
@@ -522,6 +532,10 @@ func _find_homing_target() -> Node3D:
 		if not p.is_in_group("players"):
 			continue
 		if int(p.get("player_id")) == shooter_id:
+			continue
+		var game := get_tree().current_scene
+		if game and game.has_method("should_block_player_damage") \
+				and game.should_block_player_damage(int(p.get("player_id")), shooter_id):
 			continue
 		if p.get("ghost_mode") == true:
 			continue

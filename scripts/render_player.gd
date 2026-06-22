@@ -129,6 +129,10 @@ func show_card_pick(card_ids: Array) -> void:
 	bg.color.a = 0.0
 	var title: Label = _hud.card_title
 	if title:
+		if game and game.has_method("is_coop_mode") and game.is_coop_mode():
+			title.text = "WAVE COMPLETE - PICK A CARD"
+		else:
+			title.text = "PICK A CARD"
 		title.modulate.a = 1.0
 		title.position.y = 0.0
 		if title.has_meta("tween"):
@@ -269,10 +273,14 @@ func _blend_death_into_card_pick() -> void:
 	var death := _stop_death_tween()
 	var tw := death.create_tween()
 	death.set_meta("tween", tw)
-	tw.tween_property(death, "color", Color(0.30, 0.0, 0.0, 1.0), 0.55)\
-		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
-	tw.tween_property(death, "color", Color(0.09, 0.0, 0.0, 1.0), 0.65)\
-		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	if game and game.has_method("is_coop_mode") and game.is_coop_mode():
+		tw.tween_property(death, "color", Color(0.05, 0.05, 0.08, 0.5), 0.6)\
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	else:
+		tw.tween_property(death, "color", Color(0.30, 0.0, 0.0, 1.0), 0.55)\
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+		tw.tween_property(death, "color", Color(0.09, 0.0, 0.0, 1.0), 0.65)\
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
 
 
 func _fade_card_pick_to_game() -> void:
@@ -510,6 +518,7 @@ func _build() -> void:
 
 	var retro_layer := CanvasLayer.new()
 	retro_layer.layer = 100
+	retro_layer.visible = false
 	viewport.add_child(retro_layer)
 	var retro := ColorRect.new()
 	retro.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -1111,7 +1120,7 @@ func _update_hud(player: Node) -> void:
 
 	_hud.crosshair.set("spread", player.call("get_effective_spread"))
 	_hud.ghost.color.a = 0.28 if is_ghost and not bool(_hud.card_overlay.visible) else 0.0
-	_hud.retro_layer.visible = bool(game.get("_retro_enabled"))
+	_hud.retro_layer.visible = game.call("_is_retro_enabled")
 
 
 func _layout_hp_panel(player: Node, is_ghost: bool) -> void:
