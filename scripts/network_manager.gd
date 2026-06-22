@@ -12,6 +12,8 @@ extends Node
 signal player_list_changed
 signal network_status_changed(message: String, is_error: bool)
 
+const START_SCENE := "res://scenes/start_screen.tscn"
+
 var players: Dictionary = {}
 var local_player_name: String = "Player"
 var last_network_error: String = ""
@@ -164,7 +166,7 @@ func _on_connection_failed() -> void:
 	clear_iroh_join_state()
 	set_meta("network_notice", message)
 	player_list_changed.emit()
-	get_tree().change_scene_to_file("res://scenes/game.tscn")
+	get_tree().change_scene_to_file(START_SCENE)
 
 
 func _on_server_disconnected() -> void:
@@ -176,9 +178,7 @@ func _on_server_disconnected() -> void:
 	_fail(message)
 	set_meta("network_notice", message)
 	player_list_changed.emit()
-	# No main menu in the new flow — reloading game.tscn re-hosts a fresh
-	# iroh server in _ready, putting the user back into solo-vs-AI.
-	get_tree().change_scene_to_file("res://scenes/game.tscn")
+	get_tree().change_scene_to_file(START_SCENE)
 
 
 @rpc("any_peer", "call_local", "reliable")

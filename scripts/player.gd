@@ -1108,7 +1108,7 @@ func _show_hit_face(duration: float = HIT_FACE_DURATION) -> void:
 	Violence.set_hit_face_state(self, true)
 
 func _unhandled_input(event: InputEvent) -> void:
-	if not is_multiplayer_authority():
+	if is_bot or not is_multiplayer_authority():
 		return
 	if local_input_device >= 0:
 		return
@@ -1798,10 +1798,14 @@ func _apply_artillery_splash(
 	top_y: float,
 ) -> void:
 	var shooter := _sibling_player(shooter_id)
+	var game_scene := get_tree().current_scene
 	for p: Node3D in get_tree().get_nodes_in_group("players"):
 		if not is_instance_valid(p):
 			continue
 		if p.get("ghost_mode") == true:
+			continue
+		if p.player_id != shooter_id and game_scene and game_scene.has_method("should_block_player_damage") \
+				and game_scene.should_block_player_damage(p.player_id, shooter_id):
 			continue
 		var player_y := p.global_position.y
 		if player_y < bottom_y or player_y > top_y:
@@ -2771,6 +2775,7 @@ func _melee_swung(origin: Vector3, dir: Vector3, attacker_id: int, damage_mult: 
 	# Dedupe by player — head/torso/legs hitboxes for the same player would
 	# otherwise show up as 3 separate hits.
 	var hit_targets: Dictionary = {}
+	var game_scene := get_tree().current_scene
 	for hit in hits:
 		var collider: Node = hit.get("collider")
 		var target := _player_from_hit_collider(collider)
@@ -2779,6 +2784,9 @@ func _melee_swung(origin: Vector3, dir: Vector3, attacker_id: int, damage_mult: 
 		if target.get("ghost_mode") == true:
 			continue
 		if target.player_id == attacker_id:
+			continue
+		if game_scene and game_scene.has_method("should_block_player_damage") \
+				and game_scene.should_block_player_damage(target.player_id, attacker_id):
 			continue
 		# Line-of-sight gate: don't slash through walls.
 		var los_q := PhysicsRayQueryParameters3D.create(origin, target.global_position + Vector3.UP * 0.6)
@@ -2924,6 +2932,10 @@ func _apply_damage(
 ) -> void:
 	if ghost_mode or frozen or health <= 0 or god_mode or _phoenix_ascending:
 		return
+	var game_scene := get_tree().current_scene
+	if from_id != player_id and game_scene and game_scene.has_method("should_block_player_damage") \
+			and game_scene.should_block_player_damage(player_id, from_id):
+		return
 	if _dash_iframe_timer > 0.0:
 		return
 	var new_health := health - amount
@@ -2932,7 +2944,6 @@ func _apply_damage(
 	if overkill_disintegrate:
 		overkill_severity = clampf(float(-new_health - Violence.OVERKILL_DISINTEGRATE_HEALTH) / 50.0, 0.4, 2.5)
 	health = maxi(0, new_health)
-	var game_scene := get_tree().current_scene
 	if game_scene and game_scene.has_method("_report_player_damage"):
 		if multiplayer.is_server():
 			game_scene._report_player_damage(player_id, from_id, amount, health)
@@ -3131,6 +3142,64 @@ func server_respawn(pos: Vector3, yaw: float = 0.0) -> void:
 	_last_sync_yaw = rotation.y
 	_last_sync_pitch = look_pitch
 
+
+@rpc("any_peer", "call_local", "reliable")
+func set_spawn_health(amount: int) -> void:
+	var sender := multiplayer.get_remote_sender_id()
+	if sender != 1 and sender != 0:
+		return
+	if not is_multiplayer_authority():
+		return
+	health = maxi(1, amount)
+
+
+@rpc("authority", "call_local", "reliable")
+func apply_enemy_archetype(archetype: String, wave: int = 1) -> void:
+	if not is_bot:
+		return
+	weapon.reset()
+	match archetype:
+		"sniper":
+			weapon.damage_mult = 1.45 + float(wave) * 0.04
+			weapon.fire_rate_mult = 0.38
+			weapon.reload_mult = 0.85
+			weapon.mag_size_bonus = -3
+			weapon.spread = 0.0018
+			weapon.recoil_per_shot = 0.006
+			weapon.bullet_speed_mult = 2.8
+			weapon.bullet_drop = 0.0
+			weapon.headshot_mult = 1.35
+			weapon.body_scale = 0.92
+			weapon.bullet_color = Color(0.55, 0.9, 1.0)
+			weapon.special = Weapon.SPECIAL_ZOOM
+		"demolition":
+			weapon.damage_mult = 0.72 + float(wave) * 0.025
+			weapon.fire_rate_mult = 0.52
+			weapon.reload_mult = 0.8
+			weapon.mag_size_bonus = -2
+			weapon.spread = 0.018
+			weapon.bullet_speed_mult = 0.72
+			weapon.explosive_radius = 3.2 + minf(float(wave) * 0.18, 2.8)
+			weapon.explosive_damage = 35.0 + float(wave) * 4.0
+			weapon.special = Weapon.SPECIAL_CLUSTER_GRENADE if wave >= 10 else Weapon.SPECIAL_GRENADE
+			weapon.special_cooldown_mult = 0.78
+			weapon.body_scale = 1.08
+			weapon.bullet_color = Color(1.0, 0.42, 0.12)
+		_:
+			weapon.damage_mult = 0.48 + float(wave) * 0.025
+			weapon.fire_rate_mult = 0.9 + minf(float(wave) * 0.035, 0.5)
+			weapon.reload_mult = 1.12
+			weapon.mag_size_bonus = -2
+			weapon.spread = 0.018
+			weapon.recoil_per_shot = 0.012
+			weapon.bullet_speed_mult = 0.82
+			weapon.body_scale = 0.78
+			weapon.head_scale = 0.9
+			weapon.bullet_color = Color(1.0, 0.82, 0.28)
+	mag = weapon.get_mag_size()
+	_update_body_scale()
+	_update_gun_visuals()
+
 @rpc("any_peer", "call_local", "reliable")
 func begin_phoenix_ascension(revive_pos: Vector3, start_ms: int = 0) -> void:
 	var sender := multiplayer.get_remote_sender_id()
@@ -3232,7 +3301,7 @@ func set_ghost_mode(enabled: bool) -> void:
 		if body_model:
 			body_model.visible = true
 		_set_dead_visuals(false)
-		if is_multiplayer_authority():
+		if is_multiplayer_authority() and not is_bot:
 			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	else:
 		health = MAX_HEALTH + weapon.max_hp_bonus
@@ -3273,7 +3342,7 @@ func set_frozen(f: bool) -> void:
 	frozen = f
 	if f:
 		velocity = Vector3.ZERO
-	elif is_multiplayer_authority():
+	elif is_multiplayer_authority() and not is_bot:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 
@@ -3958,15 +4027,20 @@ func _tick_footsteps(delta: float) -> void:
 		SFX.footstep(global_position, size)
 
 func _bot_find_target() -> Node3D:
-	# Pick the nearest non-ghost player (bot or human) — bots fight everything.
+	# Pick the nearest non-ghost enemy. In versus, bots fight everything; in
+	# co-op, the game scene defines bot-vs-human teams.
 	var best: Node3D = null
 	var best_d: float = INF
+	var game_scene := get_tree().current_scene
 	for p in get_parent().get_children():
 		if p == self:
 			continue
 		if not p.is_in_group("players"):
 			continue
 		if p.get("ghost_mode") == true:
+			continue
+		if game_scene and game_scene.has_method("are_players_allied") \
+				and game_scene.are_players_allied(player_id, int(p.get("player_id"))):
 			continue
 		var p3 := p as Node3D
 		if p3 == null:

@@ -1,0 +1,97 @@
+[gd_scene load_steps=4 format=3 uid="uid://bstartscreen01"]
+
+[ext_resource type="Script" path="res://scripts/start_screen.gd" id="1_start"]
+[ext_resource type="PackedScene" uid="uid://barenaproc01" path="res://scenes/arena_procedural.tscn" id="2_arena"]
+
+[sub_resource type="StyleBoxFlat" id="MenuPanelStyle"]
+bg_color = Color(0.055, 0.055, 0.07, 0.92)
+border_color = Color(0.35, 0.7, 1, 0.95)
+border_width_left = 2
+border_width_top = 2
+border_width_right = 2
+border_width_bottom = 2
+corner_radius_top_left = 8
+corner_radius_top_right = 8
+corner_radius_bottom_right = 8
+corner_radius_bottom_left = 8
+content_margin_left = 22.0
+content_margin_top = 20.0
+content_margin_right = 22.0
+content_margin_bottom = 20.0
+
+[node name="StartScreen" type="Node3D"]
+script = ExtResource("1_start")
+
+[node name="Arena" parent="." instance=ExtResource("2_arena")]
+
+[node name="Camera3D" type="Camera3D" parent="."]
+current = true
+fov = 66.0
+
+[node name="UI" type="CanvasLayer" parent="."]
+
+[node name="Dim" type="ColorRect" parent="UI"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+color = Color(0, 0, 0, 0.32)
+
+[node name="Title" type="Label" parent="UI"]
+anchors_preset = 5
+anchor_left = 0.5
+anchor_right = 0.5
+offset_left = -250.0
+offset_top = 40.0
+offset_right = 250.0
+offset_bottom = 100.0
+grow_horizontal = 2
+theme_override_colors/font_color = Color(1, 0.9, 0.45, 1)
+theme_override_colors/font_outline_color = Color(0.35, 0, 0.08, 1)
+theme_override_constants/outline_size = 6
+theme_override_font_sizes/font_size = 48
+text = "GROWING GUNS"
+horizontal_alignment = 1
+vertical_alignment = 1
+
+[node name="MenuPanel" type="PanelContainer" parent="UI"]
+anchors_preset = 4
+anchor_top = 0.5
+anchor_bottom = 0.5
+offset_left = 62.0
+offset_top = -172.0
+offset_right = 412.0
+offset_bottom = 172.0
+grow_vertical = 2
+theme_override_styles/panel = SubResource("MenuPanelStyle")
+
+[node name="VBox" type="VBoxContainer" parent="UI/MenuPanel"]
+theme_override_constants/separation = 8
+
+[node name="VersusButton" type="Button" parent="UI/MenuPanel/VBox"]
+custom_minimum_size = Vector2(280, 32)
+theme_override_font_sizes/font_size = 16
+text = "VERSUS"
+
+[node name="WaveButton" type="Button" parent="UI/MenuPanel/VBox"]
+custom_minimum_size = Vector2(280, 32)
+theme_override_font_sizes/font_size = 16
+text = "WAVE SURVIVAL"
+
+[node name="ExitNote" type="Label" parent="UI/MenuPanel/VBox"]
+theme_override_colors/font_color = Color(0.45, 0.48, 0.58, 1)
+theme_override_font_sizes/font_size = 12
+text = "1 / 2 selects · Esc exits"
+horizontal_alignment = 1
+
+[node name="Notice" type="Label" parent="UI/MenuPanel/VBox"]
+visible = false
+theme_override_colors/font_color = Color(1, 0.45, 0.35, 1)
+theme_override_colors/font_outline_color = Color(0, 0, 0, 0.85)
+theme_override_constants/outline_size = 3
+theme_override_font_sizes/font_size = 12
+text = "Network notice"
+horizontal_alignment = 1
+autowrap_mode = 3

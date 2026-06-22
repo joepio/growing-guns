@@ -38,6 +38,9 @@ static func apply(
 			continue
 		if not _has_line_of_sight(scene, pos, p, los_mode):
 			continue
+		if int(p.get("player_id")) != shooter_id and scene.has_method("should_block_player_damage") \
+				and scene.should_block_player_damage(int(p.get("player_id")), shooter_id):
+			continue
 
 		var linear_falloff := clampf(1.0 - (dist / radius), 0.0, 1.0)
 		var falloff := lerpf(min_falloff, 1.0, linear_falloff)
