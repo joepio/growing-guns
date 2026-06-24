@@ -3395,6 +3395,9 @@ func heal(amount: int) -> void:
 func apply_round_pickup(kind: String) -> void:
 	# Mirror apply_card — mutate every peer's copy of this player so online
 	# clients stay in sync and the server can see pickup effects for remotes.
+	var game := get_tree().current_scene
+	if is_bot and game and game.has_method("is_coop_mode") and game.is_coop_mode():
+		return
 	var dice_detail := ""
 	var owner := is_multiplayer_authority()
 	match kind:
@@ -3432,7 +3435,7 @@ func apply_round_pickup(kind: String) -> void:
 	_update_body_scale()
 	if owner:
 		SFX.pling(1.15)
-		var g := get_tree().current_scene
+		var g := game
 		if g and g.has_method("show_pickup_collected_for"):
 			g.show_pickup_collected_for(player_id, kind, dice_detail)
 

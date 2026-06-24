@@ -135,6 +135,8 @@ var game_mode: String = GAME_MODE_VERSUS
 var coop_wave: int = 1
 var _coop_enemy_spawn_queue: Array[String] = []
 var _coop_enemy_spawn_timer: float = -1.0
+var _coop_wave_enemy_total: int = 0
+var _coop_wave_kills: int = 0
 var round_wins: Dictionary = {}
 var current_round: int = 1
 var pending_pick_cards: Array = []
@@ -935,6 +937,8 @@ func _request_spawn(pname: String) -> void:
 				int(_bot_appearance_seeds.get(pid, 0)))
 	_broadcast_scores.rpc(round_wins)
 	_set_game_mode.rpc_id(sender, game_mode, coop_wave)
+	if is_coop_mode():
+		_set_coop_wave_progress.rpc_id(sender, _coop_wave_kills, _coop_wave_enemy_total)
 	if state != State.WAITING:
 		_set_game_state.rpc_id(sender, state)
 	_maybe_start_match()
@@ -1452,7 +1456,28 @@ func _begin_coop_enemy_wave() -> void:
 		return
 	_coop_enemy_spawn_queue = _coop_enemy_archetype_queue(coop_wave)
 	_coop_enemy_spawn_timer = COOP_ENEMY_FIRST_SPAWN_DELAY if not _coop_enemy_spawn_queue.is_empty() else -1.0
+	_coop_wave_enemy_total = _coop_enemy_spawn_queue.size()
+	_coop_wave_kills = 0
+	_set_coop_wave_progress.rpc(_coop_wave_kills, _coop_wave_enemy_total)
 	_broadcast_scores.rpc(round_wins)
+
+	# Announce the new wave with counts and types
+	var counts := {}
+	for arch in _coop_enemy_spawn_queue:
+		counts[arch] = counts.get(arch, 0) + 1
+	var parts: Array[String] = []
+	for arch in ["grunt", "sniper", "demolition"]:
+		if counts.has(arch):
+			var display_name = "bomber" if arch == "demolition" else arch
+			parts.append("%dx %s" % [counts[arch], display_name])
+	for arch in counts:
+		if not arch in ["grunt", "sniper", "demolition"]:
+			parts.append("%dx %s" % [counts[arch], arch])
+	
+	var list_str := ", ".join(parts)
+	var announcement := "WAVE %d\n%s" % [coop_wave, list_str]
+	_announce.rpc(announcement, 3.0, 40)
+
 
 
 func _update_coop_enemy_spawner(delta: float) -> void:
@@ -1612,6 +1637,13 @@ func _set_game_mode(mode: String, wave: int = 1) -> void:
 	game_mode = GAME_MODE_COOP if mode == GAME_MODE_COOP else GAME_MODE_VERSUS
 	coop_wave = max(1, wave)
 	current_round = coop_wave if is_coop_mode() else current_round
+	_update_scoreboard()
+
+
+@rpc("authority", "call_local", "reliable")
+func _set_coop_wave_progress(kills: int, total: int) -> void:
+	_coop_wave_kills = max(0, kills)
+	_coop_wave_enemy_total = max(0, total)
 	_update_scoreboard()
 
 
@@ -2276,6 +2308,8 @@ func _reset_round_tracking() -> void:
 	_ion_cannon_pending = false
 	_coop_enemy_spawn_queue.clear()
 	_coop_enemy_spawn_timer = -1.0
+	_coop_wave_enemy_total = 0
+	_coop_wave_kills = 0
 	_reset_pickup_spawner()
 
 func _reset_pickup_spawner() -> void:
@@ -2586,6 +2620,9 @@ func report_kill(killer_id: int, victim_id: int) -> void:
 			victim_node.set_ghost_mode.rpc(true)
 
 	if is_coop_mode():
+		if _is_bot_id(victim_id):
+			_coop_wave_kills = mini(_coop_wave_enemy_total, _coop_wave_kills + 1)
+			_set_coop_wave_progress.rpc(_coop_wave_kills, _coop_wave_enemy_total)
 		if _alive_human_ids().is_empty():
 			_end_coop_match()
 		elif _alive_enemy_ids().is_empty() and _coop_enemy_spawn_queue.is_empty():
@@ -3282,18 +3319,6 @@ func _apply_retro_shader(node: Control) -> void:
 		};
 
 		void fragment() {
-			if (fisheye_strength < 0.01 && dither_strength < 0.01) {
-				COLOR = texture(screen_texture, SCREEN_UV);
-				if (cursor_visible > 0.5) {
-					vec2 res = 1.0 / SCREEN_PIXEL_SIZE;
-					vec2 d = (SCREEN_UV - mouse_uv) * res;
-					bool arrow = d.x >= 0.0 && d.y >= 0.0 && (d.x + d.y) <= 12.0;
-					bool outline = d.x >= -1.5 && d.y >= -1.5 && (d.x + d.y) <= 13.5 && !arrow;
-					if (arrow) COLOR.rgb = vec3(1.0);
-					else if (outline) COLOR.rgb = vec3(0.05);
-				}
-				return;
-			}
 			vec2 uv = SCREEN_UV;
 			vec2 centered_uv = uv - 0.5;
 			float aspect = SCREEN_PIXEL_SIZE.y / SCREEN_PIXEL_SIZE.x;
@@ -4604,14 +4629,13 @@ func show_damage_direction_for(player_id: int, from_pos: Vector3) -> void:
 
 func _update_scoreboard() -> void:
 	if is_coop_mode():
-		var enemies_alive := (_alive_enemy_ids().size() + _coop_enemy_spawn_queue.size()) if state == State.PLAYING else _bot_ids().size()
-		var humans_alive := _alive_human_ids().size() if state == State.PLAYING else _human_count()
-		scoreboard.text = "— CO-OP WAVE %d —\nPLAYERS  %d\nENEMIES  %d" % [
-			coop_wave,
-			humans_alive,
-			enemies_alive,
+		scoreboard.visible = true
+		scoreboard.text = "KILLED   %d/%d" % [
+			_coop_wave_kills,
+			_coop_wave_enemy_total,
 		]
 		return
+	scoreboard.visible = false
 	var lines: Array[String] = ["— ROUNDS —"]
 	for id in NetworkManager.players:
 		var wins := int(round_wins.get(id, 0))
