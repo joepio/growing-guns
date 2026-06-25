@@ -1,5 +1,7 @@
 class_name Violence extends RefCounted
 
+const DestructibleManager = preload("res://scripts/destructible_manager.gd")
+
 # Default chunk count when fracturing a body. Must match the value used by
 # gib_warm_tree() at scene load — varying it forces synchronous bakes on the
 # main thread (~200ms per mesh). Kept low: each gibbed mesh spawns this many
@@ -784,6 +786,16 @@ static func _spawn_env_blood_stain(
 	return blob
 
 
+static func clear_blood_splats_near(scene_root: Node, pos: Vector3, radius: float) -> void:
+	if scene_root == null or radius <= 0.0 or not is_instance_valid(scene_root):
+		return
+	var r2 := radius * radius
+	for n in scene_root.get_tree().get_nodes_in_group("blood_splats"):
+		if n is Node3D and is_instance_valid(n):
+			if (n as Node3D).global_position.distance_squared_to(pos) <= r2:
+				(n as Node3D).queue_free()
+
+
 const PLAYER_BLOOD_WOUND_MAX := 32
 
 
@@ -1445,7 +1457,8 @@ const _BLAST_PROJECTILE_CODE := "
 		v_b = (1.0 - smoothstep(fade_start, 1.0, age)) * COLOR.a;
 	}
 	void fragment() {
-		ALBEDO = tint * brightness;   // additive (blend_add); HDR brightness blooms
+		vec3 px = floor(tint * 12.0 + 0.5) / 12.0;
+		ALBEDO = px * brightness;     // additive (blend_add); HDR brightness blooms
 		ALPHA = v_b;                  // fade modulates the added light
 	}
 "
@@ -1617,19 +1630,34 @@ const _BILLOW_MM_CODE := "
 		// stretch eases gently to zero instead of dropping off a cliff at the end.
 		float fade_out = pow(1.0 - t, tail_power) * (1.0 - smoothstep(0.5, 1.0, t));
 		ALPHA = v_opk * fade_in * fade_out * smoothstep(0.0, 0.5, facing);
+		ALPHA = floor(ALPHA * 6.0 + 0.5) / 6.0;
+		vec2 px_cell = floor(UV * vec2(8.0, 5.0));
+		float cell_band = mod(px_cell.x + px_cell.y, 3.0) - 1.0;
 		if (is_fire > 0.5) {
-			vec3 hot = mix(fire_cool, fire_hot, v_heat);
-			float glow = mix(fire_glow_lo, fire_glow_hi, v_heat) * (1.0 - smoothstep(0.0, 0.55, v_age));
-			vec3 body = mix(hot * 0.3, vec3(0.45, 0.16, 0.04), fres);
-			ALBEDO = body + hot * glow * facing;   // unshaded ignores EMISSION; HDR via ALBEDO
+			float heat_band = floor(clamp(v_heat + cell_band * 0.08, 0.0, 1.0) * 4.0 + 0.5) / 4.0;
+			float face_band = floor(facing * 4.0 + 0.5) / 4.0;
+			float age_band = floor((1.0 - smoothstep(0.0, 0.75, v_age)) * 4.0 + 0.5) / 4.0;
+			float fire_band = floor(clamp(heat_band * 0.55 + face_band * 0.30 + age_band * 0.15, 0.0, 1.0) * 5.0 + 0.5) / 5.0;
+			vec3 c0 = vec3(0.28, 0.04, 0.015);
+			vec3 c1 = vec3(0.62, 0.08, 0.02);
+			vec3 c2 = vec3(1.00, 0.24, 0.04);
+			vec3 c3 = vec3(1.00, 0.62, 0.12);
+			vec3 c4 = vec3(1.00, 0.95, 0.72);
+			vec3 color = c0;
+			color = mix(color, c1, step(0.20, fire_band));
+			color = mix(color, c2, step(0.40, fire_band));
+			color = mix(color, c3, step(0.65, fire_band));
+			color = mix(color, c4, step(0.85, fire_band));
+			ALBEDO = color * mix(3.5, 14.0, fire_band);
 		} else {
 			// Darkness varies across the surface — some patches near-black, some
 			// lighter — for turbulent, non-uniform smoke.
 			float shade = 0.45 + 0.85 * (v_shade * 0.5 + 0.5);
-			vec3 base = v_body * shade;
-			vec3 body = mix(base, base * 0.1, fres);
-			float glow = v_heat * (1.0 - smoothstep(0.0, 0.45, v_age));  // v_heat = subtle warm underglow
-			ALBEDO = body + warm_glow * glow * facing;
+			shade = floor(clamp(shade + cell_band * 0.08, 0.0, 1.0) * 4.0 + 0.5) / 4.0;
+			float grey = dot(v_body, vec3(0.3333)) * shade;
+			grey = mix(grey, grey * 0.22, fres);
+			grey = floor(grey * 6.0 + 0.5) / 6.0;
+			ALBEDO = vec3(grey);
 		}
 	}
 "
@@ -1639,8 +1667,8 @@ static func _get_smoke_billow_mesh() -> Mesh:
 		var s := SphereMesh.new()
 		s.radius = 0.5
 		s.height = 1.0
-		s.radial_segments = 10
-		s.rings = 6
+		s.radial_segments = 5
+		s.rings = 3
 		_smoke_billow_mesh = s
 	return _smoke_billow_mesh
 
@@ -2151,8 +2179,8 @@ static func spawn_heat_distortion(scene: Node, pos: Vector3, radius: float, dura
 		_heat_mesh = SphereMesh.new()
 		_heat_mesh.radius = 0.22
 		_heat_mesh.height = 0.44
-		_heat_mesh.radial_segments = 20
-		_heat_mesh.rings = 10
+		_heat_mesh.radial_segments = 8
+		_heat_mesh.rings = 4
 	shell.mesh = _heat_mesh
 	if _heat_shader == null:
 		_heat_shader = Shader.new()
@@ -2160,7 +2188,7 @@ static func spawn_heat_distortion(scene: Node, pos: Vector3, radius: float, dura
 			shader_type spatial;
 			render_mode unshaded, cull_disabled, depth_draw_never;
 
-			uniform sampler2D screen_tex : hint_screen_texture, filter_linear_mipmap;
+			uniform sampler2D screen_tex : hint_screen_texture, filter_nearest;
 			uniform float distortion_strength = 0.04;
 			uniform float zoom_strength = 0.015;
 			uniform float opacity = 0.18;
@@ -2172,7 +2200,9 @@ static func spawn_heat_distortion(scene: Node, pos: Vector3, radius: float, dura
 				vec2 offset = n.xy * distortion_strength * weight;
 				vec2 zoom = (SCREEN_UV - vec2(0.5)) * zoom_strength * weight;
 				vec2 uv = SCREEN_UV - zoom + offset;
+				uv = (floor(uv * vec2(180.0, 101.0)) + vec2(0.5)) / vec2(180.0, 101.0);
 				vec3 col = texture(screen_tex, uv).rgb;
+				col = floor(col * 18.0 + 0.5) / 18.0;
 				ALBEDO = col;
 				ALPHA = opacity * weight;
 			}
@@ -2222,8 +2252,8 @@ static func spawn_shockwave_ring(scene: Node, pos: Vector3, radius: float) -> vo
 		_shock_mesh = SphereMesh.new()
 		_shock_mesh.radius = 0.25
 		_shock_mesh.height = 0.5
-		_shock_mesh.radial_segments = 32
-		_shock_mesh.rings = 16
+		_shock_mesh.radial_segments = 8
+		_shock_mesh.rings = 4
 	shell.mesh = _shock_mesh
 	if _shock_shader == null:
 		_shock_shader = Shader.new()
@@ -2231,7 +2261,7 @@ static func spawn_shockwave_ring(scene: Node, pos: Vector3, radius: float) -> vo
 			shader_type spatial;
 			render_mode unshaded, cull_disabled, depth_draw_never, blend_mix;
 
-			uniform sampler2D screen_tex : hint_screen_texture, filter_linear_mipmap;
+			uniform sampler2D screen_tex : hint_screen_texture, filter_nearest;
 			uniform float distortion_strength = 0.05;
 			uniform float ring_thickness = 7.0;
 			uniform float opacity = 0.9;
@@ -2241,7 +2271,10 @@ static func spawn_shockwave_ring(scene: Node, pos: Vector3, radius: float) -> vo
 				float fresnel = pow(1.0 - abs(dot(normalize(VIEW), NORMAL)), ring_thickness);
 				vec3 n = normalize((VIEW_MATRIX * vec4(NORMAL, 0.0)).xyz);
 				vec2 offset = n.xy * distortion_strength * fresnel;
-				vec3 col = texture(screen_tex, SCREEN_UV + offset).rgb;
+				vec2 uv = SCREEN_UV + offset;
+				uv = (floor(uv * vec2(180.0, 101.0)) + vec2(0.5)) / vec2(180.0, 101.0);
+				vec3 col = texture(screen_tex, uv).rgb;
+				col = floor(col * 18.0 + 0.5) / 18.0;
 				ALBEDO = col;
 				ALPHA = fresnel * opacity;
 			}
@@ -3455,6 +3488,25 @@ static func spawn_overkill_blood_splats(scene: Node, pos: Vector3, dir: Vector3,
 		)
 
 
+static func spawn_overkill_blood_splats_after_destruction(scene: Node, pos: Vector3, dir: Vector3, severity: float) -> void:
+	if scene == null or not is_instance_valid(scene):
+		return
+	var tree := scene.get_tree()
+	if tree == null:
+		return
+	tree.create_timer(0.0, false, true).timeout.connect(
+		_spawn_deferred_overkill_blood_splats.bind(scene, pos, dir, severity),
+		CONNECT_ONE_SHOT
+	)
+
+
+static func _spawn_deferred_overkill_blood_splats(scene: Node, pos: Vector3, dir: Vector3, severity: float) -> void:
+	if scene == null or not is_instance_valid(scene):
+		return
+	DestructibleManager.flush()
+	spawn_overkill_blood_splats(scene, pos, dir, severity)
+
+
 # -------------------- 3. PLAYER-COUPLED HELPERS --------------------
 #
 # These take a `player` Node and read/mutate its state. Player.gd's @rpc
@@ -3686,7 +3738,7 @@ static func spawn_ragdoll(
 			var splat_sev := clampf(blast_radius / 3.5 + blast_severity * 0.95, 1.0, 2.6)
 			if overkill_disintegrate:
 				splat_sev = maxf(splat_sev, overkill_severity)
-			spawn_overkill_blood_splats(scene, mist_origin, dir_n, splat_sev)
+			spawn_overkill_blood_splats_after_destruction(scene, mist_origin, dir_n, splat_sev)
 		var first: bool = true
 		for src in meshes:
 			if src.mesh == null or _gib_is_cosmetic_mesh(src):

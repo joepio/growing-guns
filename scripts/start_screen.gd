@@ -1,6 +1,7 @@
 extends Node3D
 
 const MenuHelpers = preload("res://scripts/menu_helpers.gd")
+const RetroFilter = preload("res://scripts/retro_filter.gd")
 const GAME_SCENE := "res://scenes/game.tscn"
 const GAME_MODE_VERSUS := "versus"
 const GAME_MODE_COOP := "coop"
@@ -24,6 +25,8 @@ var _join_input: LineEdit
 var _join_button: Button
 var _settings_button: Button
 var _settings_panel: Control
+var _retro_layer: CanvasLayer = null
+var _retro_material: ShaderMaterial = null
 
 # Settings state is unified and handled via MenuHelpers static variables
 
@@ -62,6 +65,8 @@ func _ready() -> void:
 	
 	# Build the start screen multiplayer / settings UI
 	_build_start_screen_multiplayer_ui()
+	_build_retro_filter()
+	_apply_settings()
 	
 	# Auto-host online iroh room immediately so the match ID is ready
 	if NetworkManager.multiplayer.multiplayer_peer == null or NetworkManager.multiplayer.multiplayer_peer is OfflineMultiplayerPeer:
@@ -342,6 +347,7 @@ func _close_settings_menu() -> void:
 
 
 func _apply_settings() -> void:
+	RetroFilter.apply(_retro_layer, _retro_material, MenuHelpers.retro_enabled)
 	var muted: bool = MenuHelpers.music_db <= MenuHelpers.MUSIC_DB_MIN + 0.5
 	ProceduralMusic.enabled = not muted
 	ProceduralMusic.music_db = MenuHelpers.music_db
@@ -355,3 +361,9 @@ func _on_player_name_committed(new_name: String) -> void:
 	NetworkManager.host_game_iroh(new_name)
 	if _share_field:
 		_share_field.text = NetworkManager.current_iroh_game_id
+
+
+func _build_retro_filter() -> void:
+	var built := RetroFilter.build(self)
+	_retro_layer = built["layer"] as CanvasLayer
+	_retro_material = built["material"] as ShaderMaterial

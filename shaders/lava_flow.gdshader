@@ -5,8 +5,9 @@ render_mode unshaded, cull_disabled, fog_disabled;
 uniform float time_scale_factor = 0.04;
 uniform float uv_scale = 1.0;
 uniform float world_scale = 0.8;
+uniform float pixel_world_size = 0.75;
 uniform float emission_strength = 0.85;
-uniform sampler2D noise_texture : repeat_enable, filter_linear;
+uniform sampler2D noise_texture : repeat_enable, filter_nearest;
 
 varying vec3 v_world_pos;
 
@@ -55,11 +56,13 @@ void vertex() {
 }
 
 void fragment() {
-	vec2 p = v_world_pos.xz * world_scale;
+	vec2 pixel_world = (floor(v_world_pos.xz / pixel_world_size) + vec2(0.5)) * pixel_world_size;
+	vec2 p = pixel_world * world_scale;
 	p *= uv_scale;
 	float rz = flow(p);
 	vec3 col = vec3(0.2, 0.07, 0.01) / max(rz, 0.08);
 	col = pow(col, vec3(1.4));
+	col = floor(col * 24.0 + 0.5) / 24.0;
 	ALBEDO = col;
 	EMISSION = col * emission_strength;
 }

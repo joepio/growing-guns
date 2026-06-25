@@ -191,7 +191,7 @@ func _spawn_column() -> void:
 		mesh.height = layout.height
 		mesh.top_radius = START_RADIUS * float(layer.get("radius_scale", 1.0))
 		mesh.bottom_radius = mesh.top_radius * 1.03
-		mesh.radial_segments = 44 if i <= 1 else 36 if i <= 4 else 28
+		mesh.radial_segments = 8
 		var shell := MeshInstance3D.new()
 		shell.name = "IonShell%d" % i
 		shell.mesh = mesh
@@ -522,7 +522,7 @@ func _spawn_ion_detonation_fx(scene: Node, pos: Vector3, radius: float) -> void:
 	cyl.top_radius = radius
 	cyl.bottom_radius = radius
 	cyl.height = cyl_height
-	cyl.radial_segments = 56
+	cyl.radial_segments = 8
 	cyl.rings = 2
 	shell.mesh = cyl
 	var shell_tint := ION_CORE.lerp(ION_COLOR, 0.18)

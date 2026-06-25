@@ -281,6 +281,8 @@ func _add_sphere(parent: Node3D, radius: float, color: Color, energy: float, pos
 	var mesh := SphereMesh.new()
 	mesh.radius = radius
 	mesh.height = radius * 2.0
+	mesh.radial_segments = 7
+	mesh.rings = 4
 	mi.mesh = mesh
 	mi.material_override = _mat(color, energy)
 	mi.position = pos
@@ -301,6 +303,8 @@ func _add_cylinder(
 	mesh.top_radius = top_r
 	mesh.bottom_radius = bottom_r
 	mesh.height = height
+	mesh.radial_segments = 6
+	mesh.rings = 1
 	mi.mesh = mesh
 	mi.material_override = _mat(color, energy)
 	mi.position = pos

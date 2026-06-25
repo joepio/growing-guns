@@ -330,7 +330,7 @@ func layout_for_size(view_size: Vector2) -> void:
 	# squished under retro.
 	var fisheye_pull_x := 0.0           # multiplicative: shift each item by base_x * pull
 	var fisheye_y_offset := 0.0         # additive: shift bottom row up by this many px
-	if game and game.has_method("_is_retro_enabled") and game.call("_is_retro_enabled"):
+	if game and game.has_method("_is_fisheye_enabled") and game.call("_is_fisheye_enabled"):
 		fisheye_pull_x = 0.08
 		# Pull the row toward the vertical centre by the same fraction the x
 		# pull uses — view_size.y is the reference, so a half-screen split gets
@@ -516,19 +516,6 @@ func _build() -> void:
 	round_win.add_theme_constant_override("outline_size", 7)
 	root.add_child(round_win)
 
-	var retro_layer := CanvasLayer.new()
-	retro_layer.layer = 100
-	retro_layer.visible = false
-	viewport.add_child(retro_layer)
-	var retro := ColorRect.new()
-	retro.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	retro.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	var base_mat: ShaderMaterial = game.get("_retro_material") as ShaderMaterial
-	if base_mat:
-		retro.material = base_mat.duplicate(true)
-		(retro.material as ShaderMaterial).set_shader_parameter("cursor_visible", 0.0)
-	retro_layer.add_child(retro)
-
 	_hud = {
 		"hp_panel": hp_panel,
 		"ammo_panel": ammo_panel,
@@ -546,7 +533,6 @@ func _build() -> void:
 		"pickup_toast": pickup_toast,
 		"modifier_toast": modifier_toast,
 		"round_win": round_win,
-		"retro_layer": retro_layer,
 	}
 
 
@@ -1120,7 +1106,6 @@ func _update_hud(player: Node) -> void:
 
 	_hud.crosshair.set("spread", player.call("get_effective_spread"))
 	_hud.ghost.color.a = 0.28 if is_ghost and not bool(_hud.card_overlay.visible) else 0.0
-	_hud.retro_layer.visible = game.call("_is_retro_enabled")
 
 
 func _layout_hp_panel(player: Node, is_ghost: bool) -> void:

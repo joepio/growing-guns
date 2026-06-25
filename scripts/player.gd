@@ -604,8 +604,8 @@ func _add_o_mouth() -> void:
 	var mesh := TorusMesh.new()
 	mesh.inner_radius = 0.018
 	mesh.outer_radius = 0.055
-	mesh.rings = 12
-	mesh.ring_segments = 8
+	mesh.rings = 6
+	mesh.ring_segments = 6
 	o.mesh = mesh
 	o.material_override = mouth.material_override
 	o.position = Vector3(0.0, -0.145, -0.43)
@@ -941,7 +941,7 @@ func _spawn_phoenix_column(at_world: Vector3) -> void:
 	mesh.height = PHOENIX_COLUMN_HEIGHT
 	mesh.top_radius = PHOENIX_COLUMN_RADIUS * 0.88
 	mesh.bottom_radius = PHOENIX_COLUMN_RADIUS
-	mesh.radial_segments = 20
+	mesh.radial_segments = 8
 	mesh.rings = 1
 	column.mesh = mesh
 	column.material_override = _make_phoenix_column_material()
@@ -2546,6 +2546,8 @@ func _spawn_teleport_vfx(pos: Vector3) -> void:
 	var sphere := SphereMesh.new()
 	sphere.radius = 0.6
 	sphere.height = 1.2
+	sphere.radial_segments = 8
+	sphere.rings = 4
 	mesh.mesh = sphere
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED

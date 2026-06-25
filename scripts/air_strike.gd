@@ -273,6 +273,7 @@ func _build_rocket_visual() -> Node3D:
 	body_mesh.top_radius = 0.22
 	body_mesh.bottom_radius = 0.28
 	body_mesh.height = 3.2
+	body_mesh.radial_segments = 8
 	body.mesh = body_mesh
 	_body_mat = StandardMaterial3D.new()
 	_body_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -288,6 +289,7 @@ func _build_rocket_visual() -> Node3D:
 	nose_mesh.top_radius = 0.07
 	nose_mesh.bottom_radius = 0.22
 	nose_mesh.height = 0.8
+	nose_mesh.radial_segments = 8
 	nose.mesh = nose_mesh
 	nose.position = Vector3(0.0, 2.0, 0.0)
 	var nose_mat := StandardMaterial3D.new()
@@ -305,6 +307,7 @@ func _build_rocket_visual() -> Node3D:
 	engine_mesh.top_radius = 0.34
 	engine_mesh.bottom_radius = 0.16
 	engine_mesh.height = 0.75
+	engine_mesh.radial_segments = 8
 	engine.mesh = engine_mesh
 	engine.position = Vector3(0.0, -1.95, 0.0)
 	_engine_mat = StandardMaterial3D.new()
@@ -323,6 +326,7 @@ func _build_rocket_visual() -> Node3D:
 	plume_mesh.top_radius = 0.82
 	plume_mesh.bottom_radius = 0.18
 	plume_mesh.height = 6.8
+	plume_mesh.radial_segments = 8
 	plume.mesh = plume_mesh
 	plume.position = Vector3(0.0, -6.2, 0.0)
 	_plume_mat = StandardMaterial3D.new()
@@ -345,6 +349,7 @@ func _build_rocket_visual() -> Node3D:
 	core_plume_mesh.top_radius = 0.34
 	core_plume_mesh.bottom_radius = 0.06
 	core_plume_mesh.height = 4.8
+	core_plume_mesh.radial_segments = 8
 	core_plume.mesh = core_plume_mesh
 	core_plume.position = Vector3(0.0, -4.6, 0.0)
 	_core_plume_mat = StandardMaterial3D.new()
@@ -366,6 +371,7 @@ func _build_rocket_visual() -> Node3D:
 	halo_mesh.top_radius = 1.35
 	halo_mesh.bottom_radius = 0.28
 	halo_mesh.height = 9.0
+	halo_mesh.radial_segments = 8
 	halo_plume.mesh = halo_mesh
 	halo_plume.position = Vector3(0.0, -7.0, 0.0)
 	var halo_mat := StandardMaterial3D.new()
