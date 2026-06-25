@@ -299,6 +299,7 @@ var _bot_strafe_timer: float = 0.0
 var _bot_strafe_side: float = 0.0        # -1 left, 0 none, +1 right
 var _bot_approach: float = 1.0           # -1 retreat, 0 hold, +1 chase
 var _bot_jump_cooldown: float = 0.0
+var _bot_stuck_timer: float = 0.0
 var _bot_dash_cooldown: float = 0.0
 var _prev_local_actions: Dictionary = {}
 
@@ -684,7 +685,8 @@ func _process(delta: float) -> void:
 	# Re-assert camera state every frame until authority is established.
 	# Guards against a connection-state race where is_multiplayer_authority()
 	# is false during _ready (peer id == 0 before connected_to_server fires).
-	if is_multiplayer_authority() and not split_screen_local and not camera.current:
+	if is_multiplayer_authority() and not split_screen_local and not camera.current \
+			and not coop_downed and not _phoenix_ascending:
 		_refresh_authority_view()
 
 	if is_multiplayer_authority():
@@ -1064,7 +1066,7 @@ func _update_phoenix_ascent() -> void:
 				game.finish_phoenix_revive(player_id)
 			else:
 				game.finish_phoenix_revive.rpc_id(1, player_id)
-	else:
+	elif not is_multiplayer_authority():
 		_remote_target_pos = pos
 		_remote_target_yaw = rotation.y
 		_remote_has_target = true
@@ -3493,8 +3495,11 @@ func apply_enemy_archetype(archetype: String, wave: int = 1) -> void:
 	_update_gun_visuals()
 	_apply_identity_skin_materials()
 
-@rpc("authority", "call_local", "reliable")
+@rpc("any_peer", "call_local", "reliable")
 func enter_coop_downed(corpse_pos: Vector3) -> void:
+	var sender := multiplayer.get_remote_sender_id()
+	if sender != 1 and sender != 0:
+		return
 	coop_downed = true
 	_coop_down_pos = corpse_pos
 	health = 0
@@ -3512,6 +3517,22 @@ func enter_coop_downed(corpse_pos: Vector3) -> void:
 		var game := get_tree().current_scene
 		if game and game.has_method("set_phoenix_fade"):
 			game.set_phoenix_fade(player_id, 0.1)
+
+
+@rpc("any_peer", "call_local", "reliable")
+func clear_coop_downed_state() -> void:
+	var sender := multiplayer.get_remote_sender_id()
+	if sender != 1 and sender != 0:
+		return
+	coop_downed = false
+	_phoenix_ascending = false
+	_phoenix_finish_requested = false
+	frozen = false
+	_clear_coop_down_marker()
+	if health <= 0 and not ghost_mode:
+		health = MAX_HEALTH + weapon.max_hp_bonus
+	_apply_ghost_visuals()
+	_restore_weapon_visuals()
 
 
 @rpc("any_peer", "call_local", "reliable")
@@ -4096,8 +4117,16 @@ func _bot_physics(delta: float) -> void:
 				_start_dash(move_dir.normalized())
 				_bot_dash_cooldown = randf_range(2.0, 4.0)
 		else:
-			move_dir = Vector3.ZERO
-			_bot_strafe_timer = 0.0
+			if _bot_jump_cooldown <= 0.0 and is_on_floor():
+				velocity.y = JUMP_VELOCITY
+				jumps_left = 1 + weapon.extra_jumps
+				_bot_jump_cooldown = randf_range(0.8, 1.6)
+				gap_jump_started = true
+				if not ghost_mode:
+					SFX.jump(global_position)
+			else:
+				move_dir = Vector3.ZERO
+				_bot_strafe_timer = 0.0
 	elif not is_on_floor() and velocity.y < 1.0 and jumps_left > 0 and move_dir.length_squared() > 0.01:
 		if not _bot_has_floor_ahead(move_dir, edge_probe) and _bot_gap_landing_distance(move_dir) > 0.0:
 			velocity.y = DOUBLE_JUMP_VELOCITY
@@ -4145,6 +4174,21 @@ func _bot_physics(delta: float) -> void:
 	velocity.z = move_toward(velocity.z, target_vel.z, accel * delta)
 
 	move_and_slide()
+
+	var wants_move := target_vel.length_squared() > 0.25
+	var flat_speed := Vector2(velocity.x, velocity.z).length()
+	if wants_move and flat_speed < 1.1 and is_on_floor() and dash_timer <= 0.0:
+		_bot_stuck_timer += delta
+		if _bot_stuck_timer > 0.5 and _bot_jump_cooldown <= 0.0:
+			velocity.y = JUMP_VELOCITY
+			jumps_left = maxi(jumps_left, 1)
+			_bot_jump_cooldown = randf_range(0.8, 1.6)
+			_bot_stuck_timer = 0.0
+			if not ghost_mode:
+				SFX.jump(global_position)
+	else:
+		_bot_stuck_timer = 0.0
+
 	_maybe_broadcast_state()
 	_tick_footsteps(delta)
 
