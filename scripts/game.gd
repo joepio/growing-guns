@@ -990,8 +990,12 @@ func execute_phoenix_revive(player_id: int, fx_pos: Vector3) -> void:
 func finish_phoenix_revive(player_id: int) -> void:
 	if not multiplayer.is_server():
 		return
+	if state != State.PLAYING:
+		return
 	var p := players_root.get_node_or_null(str(player_id))
 	if p == null or not is_instance_valid(p):
+		return
+	if not bool(p.get("_phoenix_ascending")):
 		return
 	var sky_pos: Vector3
 	var spawn_yaw: float

@@ -724,7 +724,7 @@ func _refresh_authority_view() -> void:
 		# Bot is always third-person: full body visible, no camera takeover.
 		camera.clear_current()
 		body_model.visible = true
-		name_label.visible = true
+		name_label.visible = health > 0
 		return
 	if is_multiplayer_authority():
 		if split_screen_local:
@@ -851,7 +851,7 @@ func _apply_ghost_visuals() -> void:
 	if health <= 0 and not ghost_mode and not _lava_death_active:
 		show_body = false
 	body_model.visible = show_body
-	name_label.visible = not ghost_mode and (is_bot or (not split_screen_local and not is_multiplayer_authority()))
+	name_label.visible = health > 0 and not ghost_mode and (is_bot or (not split_screen_local and not is_multiplayer_authority()))
 	# Hide both first-person muzzle gun and third-person gun while ghosting —
 	# spectators shouldn't see their weapon, and other players shouldn't see
 	# a gun floating in a translucent ghost.
@@ -934,6 +934,8 @@ func _restore_weapon_visuals() -> void:
 		return
 	if is_multiplayer_authority() and not split_screen_local:
 		muzzle.visible = true
+		if _procedural_gun:
+			_procedural_gun.visible = true
 	elif _third_person_gun:
 		_third_person_gun.visible = true
 	_update_gun_visuals()
@@ -3354,17 +3356,29 @@ func server_respawn(pos: Vector3, yaw: float = 0.0) -> void:
 	if multiplayer.get_remote_sender_id() != 1 and multiplayer.get_remote_sender_id() != 0:
 		return
 	Violence.end_lava_death(self)
+	Violence.clear_ragdoll(self)
 	_lava_death_active = false
+	_phoenix_ascending = false
+	_phoenix_finish_requested = false
+	_phoenix_start_ms = 0
+	_clear_phoenix_fx()
+	launching = false
+	_stop_rocket_descent_audio()
 	_reset_weapon_combat_state()
-	if not is_multiplayer_authority():
-		return
 	global_position = pos
 	rotation.y = yaw
-	velocity = Vector3.ZERO
+	_visual_prev_pos = pos
+	_remote_target_pos = pos
+	_remote_target_yaw = yaw
+	_remote_has_target = true
 	ghost_mode = false
 	coop_downed = false
 	_clear_coop_down_marker()
 	frozen = false
+	if not is_multiplayer_authority():
+		_apply_ghost_visuals()
+		return
+	velocity = Vector3.ZERO
 	health = MAX_HEALTH + weapon.max_hp_bonus
 	_phoenix_charges_left = weapon.phoenix_revives
 	_poison_damage_left = 0.0
@@ -3527,6 +3541,10 @@ func clear_coop_downed_state() -> void:
 	coop_downed = false
 	_phoenix_ascending = false
 	_phoenix_finish_requested = false
+	_phoenix_start_ms = 0
+	_clear_phoenix_fx()
+	launching = false
+	_stop_rocket_descent_audio()
 	frozen = false
 	_clear_coop_down_marker()
 	if health <= 0 and not ghost_mode:
