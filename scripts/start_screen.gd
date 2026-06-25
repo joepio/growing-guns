@@ -34,8 +34,6 @@ var state: int = 1  # State.PLAYING == 1 (required so bots can shoot in the back
 
 
 func _ready() -> void:
-	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-	
 	# Load settings first using the unified settings system
 	MenuHelpers.load_settings()
 	if MenuHelpers.player_name.is_empty():
@@ -86,6 +84,7 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	_orbit_t += delta * 0.055
 	_position_camera(_orbit_t)
+	_update_custom_cursor()
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -348,6 +347,7 @@ func _close_settings_menu() -> void:
 
 func _apply_settings() -> void:
 	RetroFilter.apply(_retro_layer, _retro_material, MenuHelpers.retro_enabled)
+	Input.mouse_mode = Input.MOUSE_MODE_HIDDEN if MenuHelpers.retro_enabled else Input.MOUSE_MODE_VISIBLE
 	var muted: bool = MenuHelpers.music_db <= MenuHelpers.MUSIC_DB_MIN + 0.5
 	ProceduralMusic.enabled = not muted
 	ProceduralMusic.music_db = MenuHelpers.music_db
@@ -367,3 +367,16 @@ func _build_retro_filter() -> void:
 	var built := RetroFilter.build(self)
 	_retro_layer = built["layer"] as CanvasLayer
 	_retro_material = built["material"] as ShaderMaterial
+
+
+func _update_custom_cursor() -> void:
+	if _retro_material == null or not MenuHelpers.retro_enabled:
+		if _retro_material:
+			_retro_material.set_shader_parameter("cursor_visible", 0.0)
+		return
+	_retro_material.set_shader_parameter("cursor_visible", 1.0)
+	var vp := get_viewport()
+	var size: Vector2 = vp.get_visible_rect().size
+	if size.x > 0.0 and size.y > 0.0:
+		var mp := vp.get_mouse_position()
+		_retro_material.set_shader_parameter("mouse_uv", Vector2(mp.x / size.x, mp.y / size.y))
