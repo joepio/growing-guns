@@ -48,6 +48,8 @@ const COOP_PLAYER_HEALTH_MULT := 3.0
 const COOP_ENEMY_HEALTH_MULT := 0.5
 const COOP_ENEMY_SPAWN_INTERVAL := 1.35
 const COOP_ENEMY_FIRST_SPAWN_DELAY := 0.65
+const COOP_REVIVE_RADIUS := 1.4
+const COOP_REVIVE_SECONDS := 3.0
 const SPAWN_CAPSULE_RADIUS := 0.4
 const SPAWN_CAPSULE_HEIGHT := 1.8
 const SPAWN_CLEARANCE_RADIUS := 0.58
@@ -138,6 +140,8 @@ var _coop_enemy_spawn_queue: Array[String] = []
 var _coop_enemy_spawn_timer: float = -1.0
 var _coop_wave_enemy_total: int = 0
 var _coop_wave_kills: int = 0
+var downed_players: Dictionary = {}
+var _coop_revive_positions: Dictionary = {}
 var round_wins: Dictionary = {}
 var current_round: int = 1
 var pending_pick_cards: Array = []
@@ -672,6 +676,7 @@ func _process(delta: float) -> void:
 			_refresh_tab_overlay()
 	if multiplayer.is_server() and state == State.PLAYING:
 		_update_coop_enemy_spawner(delta)
+		_update_coop_revives(delta)
 		_update_lava_leak(delta)
 		_update_round_music_phase()
 		_update_pickup_spawner(delta)
@@ -971,6 +976,7 @@ func _current_player_positions() -> Array[Vector3]:
 func execute_phoenix_revive(player_id: int, fx_pos: Vector3) -> void:
 	if not multiplayer.is_server():
 		return
+	downed_players.erase(player_id)
 	var p := players_root.get_node_or_null(str(player_id))
 	if p == null or not is_instance_valid(p):
 		return
@@ -986,10 +992,173 @@ func finish_phoenix_revive(player_id: int) -> void:
 	var p := players_root.get_node_or_null(str(player_id))
 	if p == null or not is_instance_valid(p):
 		return
-	var pick := _pick_spawn(_current_player_positions())
-	var sky_pos: Vector3 = pick["pos"] + Vector3(0.0, 60.0, 0.0)
-	p._finish_phoenix_ascension.rpc(sky_pos, pick["yaw"])
+	var sky_pos: Vector3
+	var spawn_yaw: float
+	if _coop_revive_positions.has(player_id):
+		var corpse: Vector3 = _coop_revive_positions[player_id]
+		sky_pos = corpse + Vector3(0.0, 60.0, 0.0)
+		spawn_yaw = p.rotation.y
+		_coop_revive_positions.erase(player_id)
+	else:
+		var pick := _pick_spawn(_current_player_positions())
+		sky_pos = pick["pos"] + Vector3(0.0, 60.0, 0.0)
+		spawn_yaw = pick["yaw"]
+	p._finish_phoenix_ascension.rpc(sky_pos, spawn_yaw)
 	p.set_launching.rpc(true, 80.0)
+	downed_players.erase(player_id)
+
+
+func handle_coop_human_death(
+	victim_id: int,
+	corpse_pos: Vector3,
+	killer_id: int,
+	force_origin: Vector3,
+	hit_dir: Vector3,
+	gib_force: float,
+	blast_radius: float,
+	blast_severity: float,
+	is_head: bool,
+	suppress_death_sound: bool,
+	suppress_death_ragdoll: bool,
+) -> bool:
+	if not multiplayer.is_server() or not is_coop_mode() or not _is_human_player_id(victim_id):
+		return false
+	if downed_players.has(victim_id):
+		return true
+	if _standing_human_ids(victim_id).is_empty():
+		return false
+	downed_players[victim_id] = {
+		"pos": corpse_pos,
+		"progress": 0.0,
+		"reviver_id": 0,
+	}
+	_coop_revive_positions[victim_id] = corpse_pos
+	var victim_name := str(NetworkManager.players.get(victim_id, "Player"))
+	if not victim_name.is_empty():
+		_announce.rpc("%s is down" % victim_name, 2.0)
+	var p := players_root.get_node_or_null(str(victim_id))
+	if p:
+		p.enter_coop_downed.rpc(corpse_pos)
+	if _standing_human_ids().is_empty():
+		_end_coop_match()
+	return true
+
+
+@rpc("any_peer", "call_local", "reliable")
+func request_coop_human_death(
+	victim_id: int,
+	corpse_pos: Vector3,
+	killer_id: int,
+	force_origin: Vector3,
+	hit_dir: Vector3,
+	gib_force: float,
+	blast_radius: float,
+	blast_severity: float,
+	is_head: bool,
+	suppress_death_sound: bool,
+	suppress_death_ragdoll: bool,
+) -> void:
+	if not multiplayer.is_server():
+		return
+	if handle_coop_human_death(
+		victim_id,
+		corpse_pos,
+		killer_id,
+		force_origin,
+		hit_dir,
+		gib_force,
+		blast_radius,
+		blast_severity,
+		is_head,
+		suppress_death_sound,
+		suppress_death_ragdoll,
+	):
+		return
+	var p := players_root.get_node_or_null(str(victim_id))
+	if p:
+		p._execute_lethal_death_rpc.rpc(
+			killer_id,
+			force_origin,
+			hit_dir,
+			gib_force,
+			blast_radius,
+			blast_severity,
+			is_head,
+			suppress_death_sound,
+			suppress_death_ragdoll,
+		)
+
+
+func _standing_human_ids(exclude_id: int = 0) -> Array[int]:
+	var out: Array[int] = []
+	for raw_id in NetworkManager.players:
+		var pid := int(raw_id)
+		if pid == exclude_id or not _is_human_player_id(pid):
+			continue
+		if eliminated_players.has(pid):
+			continue
+		if downed_players.has(pid):
+			continue
+		if not players_root.has_node(str(pid)):
+			continue
+		var p := players_root.get_node(str(pid))
+		if bool(p.get("coop_downed")):
+			continue
+		if bool(p.get("ghost_mode")):
+			continue
+		if int(p.get("health")) <= 0 and not bool(p.get("_phoenix_ascending")):
+			continue
+		out.append(pid)
+	return out
+
+
+func _update_coop_revives(delta: float) -> void:
+	if not is_coop_mode() or downed_players.is_empty():
+		return
+	for raw_id in downed_players.keys():
+		var victim_id := int(raw_id)
+		var entry: Dictionary = downed_players[victim_id]
+		var corpse_pos: Vector3 = entry.get("pos", Vector3.ZERO)
+		var reviver_id := _coop_reviver_for(victim_id, corpse_pos)
+		if reviver_id == 0:
+			entry["progress"] = 0.0
+			entry["reviver_id"] = 0
+		else:
+			if int(entry.get("reviver_id", 0)) != reviver_id:
+				entry["progress"] = 0.0
+			entry["reviver_id"] = reviver_id
+			entry["progress"] = float(entry.get("progress", 0.0)) + delta
+			if float(entry["progress"]) >= COOP_REVIVE_SECONDS:
+				_complete_coop_revive(victim_id, reviver_id)
+				continue
+		downed_players[victim_id] = entry
+
+
+func _coop_reviver_for(victim_id: int, corpse_pos: Vector3) -> int:
+	var best_id := 0
+	var best_dist := COOP_REVIVE_RADIUS
+	for pid in _standing_human_ids(victim_id):
+		var p := players_root.get_node_or_null(str(pid))
+		if p == null:
+			continue
+		var flat := Vector2(
+			p.global_position.x - corpse_pos.x,
+			p.global_position.z - corpse_pos.z,
+		)
+		var dist := flat.length()
+		if dist <= best_dist:
+			best_dist = dist
+			best_id = pid
+	return best_id
+
+
+func _complete_coop_revive(victim_id: int, _reviver_id: int) -> void:
+	if not downed_players.has(victim_id):
+		return
+	var corpse_pos: Vector3 = downed_players[victim_id].get("pos", Vector3.ZERO)
+	downed_players.erase(victim_id)
+	_coop_revive_positions[victim_id] = corpse_pos
+	execute_phoenix_revive(victim_id, corpse_pos)
 
 
 func _arena_spawnpoints() -> Array:
@@ -2338,6 +2507,8 @@ func _reset_round_tracking() -> void:
 	_coop_enemy_spawn_timer = -1.0
 	_coop_wave_enemy_total = 0
 	_coop_wave_kills = 0
+	downed_players.clear()
+	_coop_revive_positions.clear()
 	_reset_pickup_spawner()
 
 func _reset_pickup_spawner() -> void:
@@ -2668,7 +2839,7 @@ func report_kill(killer_id: int, victim_id: int) -> void:
 		if _is_bot_id(victim_id):
 			_coop_wave_kills = mini(_coop_wave_enemy_total, _coop_wave_kills + 1)
 			_set_coop_wave_progress.rpc(_coop_wave_kills, _coop_wave_enemy_total)
-		if _alive_human_ids().is_empty():
+		if _standing_human_ids().is_empty():
 			_end_coop_match()
 		elif _alive_enemy_ids().is_empty() and _coop_enemy_spawn_queue.is_empty():
 			_end_coop_wave()

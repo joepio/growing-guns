@@ -163,7 +163,14 @@ const PHOENIX_ALPHA_END := 0.0
 const PHOENIX_LIGHT_ENERGY := 22.0
 const PHOENIX_COLUMN_HEIGHT := 360.0
 const PHOENIX_COLUMN_RADIUS := 0.5
+const COOP_DOWN_CROSS_BOB_HEIGHT := 0.16
 var ghost_mode: bool = false
+var coop_downed: bool = false
+var _coop_down_pos: Vector3 = Vector3.ZERO
+var _coop_down_marker_root: Node3D = null
+var _coop_down_marker_cross: Node3D = null
+var _coop_down_marker_light: OmniLight3D = null
+var _coop_down_marker_phase: float = 0.0
 var is_zooming: bool = false
 var _poison_damage_left: float = 0.0
 var _poison_dps: float = 0.0
@@ -649,6 +656,12 @@ func _process(delta: float) -> void:
 		camera.global_transform = _ragdoll_head.global_transform
 		return
 
+	if coop_downed and is_multiplayer_authority() and not is_bot:
+		_apply_controller_look(delta)
+		_apply_camera_aim_rotation()
+
+	_tick_coop_down_marker(delta)
+
 	if _phoenix_ascending:
 		_update_phoenix_ascent()
 
@@ -829,6 +842,9 @@ func _apply_ghost_visuals() -> void:
 	if _phoenix_ascending:
 		_apply_phoenix_visuals()
 		return
+	if coop_downed:
+		_apply_coop_downed_visuals()
+		return
 	var show_body := is_bot or split_screen_local or not is_multiplayer_authority()
 	if health <= 0 and not ghost_mode and not _lava_death_active:
 		show_body = false
@@ -888,6 +904,102 @@ static func _make_phoenix_column_material() -> StandardMaterial3D:
 	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	return mat
+
+
+static func _make_coop_down_cross_material() -> StandardMaterial3D:
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.82, 0.94, 1.0)
+	mat.emission_enabled = true
+	mat.emission = Color(0.45, 0.78, 1.0)
+	mat.emission_energy_multiplier = 3.2
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	return mat
+
+
+func _apply_coop_downed_visuals() -> void:
+	if body_model:
+		body_model.visible = false
+	name_label.visible = false
+	muzzle.visible = false
+	if _procedural_gun:
+		_procedural_gun.visible = false
+	if _third_person_gun:
+		_third_person_gun.visible = false
+
+
+func _restore_weapon_visuals() -> void:
+	if is_bot or ghost_mode or coop_downed or _phoenix_ascending or health <= 0:
+		return
+	if is_multiplayer_authority() and not split_screen_local:
+		muzzle.visible = true
+	elif _third_person_gun:
+		_third_person_gun.visible = true
+	_update_gun_visuals()
+
+
+func _clear_coop_down_marker() -> void:
+	if _coop_down_marker_root and is_instance_valid(_coop_down_marker_root):
+		_coop_down_marker_root.queue_free()
+	_coop_down_marker_root = null
+	_coop_down_marker_cross = null
+	_coop_down_marker_light = null
+	_coop_down_marker_phase = 0.0
+
+
+func _build_coop_down_cross() -> Node3D:
+	var cross := Node3D.new()
+	cross.name = "Cross"
+	var mat := _make_coop_down_cross_material()
+	var vertical := MeshInstance3D.new()
+	var v_mesh := BoxMesh.new()
+	v_mesh.size = Vector3(0.14, 1.15, 0.14)
+	vertical.mesh = v_mesh
+	vertical.material_override = mat
+	vertical.position = Vector3(0.0, 0.58, 0.0)
+	cross.add_child(vertical)
+	var horizontal := MeshInstance3D.new()
+	var h_mesh := BoxMesh.new()
+	h_mesh.size = Vector3(0.78, 0.14, 0.14)
+	horizontal.mesh = h_mesh
+	horizontal.material_override = mat
+	horizontal.position = Vector3(0.0, 0.78, 0.0)
+	cross.add_child(horizontal)
+	return cross
+
+
+func _spawn_coop_down_marker(at_world: Vector3) -> void:
+	_clear_coop_down_marker()
+	var scene := get_tree().current_scene
+	if scene == null:
+		return
+	var anchor := Node3D.new()
+	anchor.name = "CoopDownMarker"
+	_coop_down_marker_cross = _build_coop_down_cross()
+	anchor.add_child(_coop_down_marker_cross)
+	var light := OmniLight3D.new()
+	light.name = "ReviveLight"
+	light.light_color = Color(0.55, 0.82, 1.0)
+	light.light_energy = 6.0
+	light.omni_range = 11.0
+	light.omni_attenuation = 0.55
+	light.shadow_enabled = false
+	light.position = Vector3(0.0, 0.85, 0.0)
+	anchor.add_child(light)
+	_coop_down_marker_light = light
+	Violence._attach_world_3d(scene, anchor, at_world)
+	_coop_down_marker_root = anchor
+
+
+func _tick_coop_down_marker(delta: float) -> void:
+	if _coop_down_marker_root == null or not is_instance_valid(_coop_down_marker_root):
+		return
+	_coop_down_marker_phase += delta * 4.2
+	var bob := sin(_coop_down_marker_phase) * COOP_DOWN_CROSS_BOB_HEIGHT
+	if _coop_down_marker_cross and is_instance_valid(_coop_down_marker_cross):
+		_coop_down_marker_cross.position.y = bob
+	if _coop_down_marker_light and is_instance_valid(_coop_down_marker_light):
+		_coop_down_marker_light.light_energy = 5.0 + sin(_coop_down_marker_phase * 2.0) * 1.8
+		_coop_down_marker_light.position.y = 0.85 + bob
 
 
 # Pre-compile the phoenix body + column material PSOs so the first revive of
@@ -1163,7 +1275,14 @@ func _physics_process(delta: float) -> void:
 		return
 	_tick_status_effects(delta)
 
-	if health <= 0 and not _phoenix_ascending:
+	if health <= 0 and not _phoenix_ascending and not coop_downed:
+		velocity = Vector3.ZERO
+		return
+
+	if coop_downed:
+		if is_multiplayer_authority() and not is_bot:
+			_apply_controller_look(delta)
+			_apply_camera_aim_rotation()
 		velocity = Vector3.ZERO
 		return
 
@@ -2967,7 +3086,7 @@ func _apply_damage(
 	blast_severity: float = 0.0,
 	is_head: bool = false,
 ) -> void:
-	if ghost_mode or frozen or health <= 0 or god_mode or _phoenix_ascending:
+	if ghost_mode or coop_downed or frozen or health <= 0 or god_mode or _phoenix_ascending:
 		return
 	var game_scene := get_tree().current_scene
 	if from_id != player_id and game_scene and game_scene.has_method("should_block_player_damage") \
@@ -3021,63 +3140,167 @@ func _apply_damage(
 			else:
 				game.execute_phoenix_revive.rpc_id(1, player_id, fx_pos)
 		return
-	if health > 0:
-		_play_hurt_sound.rpc(global_position)
-	else:
+	if health <= 0 and not is_bot:
 		var suppress_death_sound := _suppress_next_death_sound
 		var suppress_death_ragdoll := _suppress_next_death_ragdoll
 		_suppress_next_death_sound = false
 		_suppress_next_death_ragdoll = false
-		if not suppress_death_sound:
-			_play_death_sound.rpc(global_position)
-		if is_bot:
-			_bot_target = null
-			_bot_shoot_cooldown = 999.0
-			velocity = Vector3.ZERO
-		var push: Vector3 = Vector3.UP
-		var kb_mag := gib_force
-		if kb_mag <= 0.0:
-			var kb_damage := float(amount)
-			if is_head:
-				kb_damage /= Weapon.BASE_HEADSHOT_MULT
-			kb_mag = Weapon.knockback_from_damage(kb_damage)
-		var launch := clampf(kb_mag / Weapon.REFERENCE_KNOCKBACK, 0.15, 8.0)
-		if hit_dir.length_squared() > 0.001:
-			push = hit_dir.normalized()
-			if push.y < 0.15:
-				push.y = 0.15
-		var killer := _sibling_player(from_id)
-		if killer and killer is Node3D and hit_dir.length_squared() <= 0.001:
-			push = (global_position - killer.global_position).normalized() + Vector3.UP * 0.6
-		var launch_max := 8.0
-		var upward_bias := 0.25
-		var upward_scale := 0.12
-		if blast_radius > 0.0:
-			launch_max = 4.0
-			upward_bias = 0.16
-			upward_scale = 0.06
-		launch = clampf(launch, 0.15, launch_max)
-		push = push.normalized() * launch + Vector3.UP * (upward_bias + upward_scale * launch)
-		if _pending_lava_death:
-			var fall_death: bool = _pending_lava_death_fall
-			_pending_lava_death = false
-			_pending_lava_death_fall = false
-			_lava_death.rpc(fall_death)
-		elif suppress_death_ragdoll:
-			_lava_death.rpc(true)
-		else:
-			_ragdoll.rpc(
-				push,
-				force_origin,
-				kb_mag,
-				blast_radius,
-				blast_severity,
-				is_head,
-				overkill_disintegrate,
-				overkill_severity,
-			)
-		died.emit(from_id)
-		_report_death.rpc_id(1, from_id)
+		if game_scene and game_scene.has_method("is_coop_mode") and game_scene.is_coop_mode():
+			if multiplayer.is_server():
+				if game_scene.handle_coop_human_death(
+					player_id,
+					global_position,
+					from_id,
+					force_origin,
+					hit_dir,
+					gib_force,
+					blast_radius,
+					blast_severity,
+					is_head,
+					suppress_death_sound,
+					suppress_death_ragdoll,
+				):
+					return
+			else:
+				game_scene.request_coop_human_death.rpc_id(
+					1,
+					player_id,
+					global_position,
+					from_id,
+					force_origin,
+					hit_dir,
+					gib_force,
+					blast_radius,
+					blast_severity,
+					is_head,
+					suppress_death_sound,
+					suppress_death_ragdoll,
+				)
+				return
+		_execute_lethal_death(
+			from_id,
+			force_origin,
+			hit_dir,
+			gib_force,
+			blast_radius,
+			blast_severity,
+			is_head,
+			suppress_death_sound,
+			suppress_death_ragdoll,
+			overkill_disintegrate,
+			overkill_severity,
+		)
+		return
+	if health > 0:
+		_play_hurt_sound.rpc(global_position)
+		return
+	var suppress_death_sound := _suppress_next_death_sound
+	var suppress_death_ragdoll := _suppress_next_death_ragdoll
+	_suppress_next_death_sound = false
+	_suppress_next_death_ragdoll = false
+	_execute_lethal_death(
+		from_id,
+		force_origin,
+		hit_dir,
+		gib_force,
+		blast_radius,
+		blast_severity,
+		is_head,
+		suppress_death_sound,
+		suppress_death_ragdoll,
+		overkill_disintegrate,
+		overkill_severity,
+	)
+
+
+func _execute_lethal_death(
+	killer_id: int,
+	force_origin: Vector3,
+	hit_dir: Vector3,
+	gib_force: float,
+	blast_radius: float,
+	blast_severity: float,
+	is_head: bool,
+	suppress_death_sound: bool,
+	suppress_death_ragdoll: bool,
+	overkill_disintegrate: bool,
+	overkill_severity: float,
+) -> void:
+	if not suppress_death_sound:
+		_play_death_sound.rpc(global_position)
+	if is_bot:
+		_bot_target = null
+		_bot_shoot_cooldown = 999.0
+		velocity = Vector3.ZERO
+	var push: Vector3 = Vector3.UP
+	var kb_mag := gib_force
+	if kb_mag <= 0.0:
+		var kb_damage := 25.0
+		kb_mag = Weapon.knockback_from_damage(kb_damage)
+	var launch := clampf(kb_mag / Weapon.REFERENCE_KNOCKBACK, 0.15, 8.0)
+	if hit_dir.length_squared() > 0.001:
+		push = hit_dir.normalized()
+		if push.y < 0.15:
+			push.y = 0.15
+	var killer := _sibling_player(killer_id)
+	if killer and killer is Node3D and hit_dir.length_squared() <= 0.001:
+		push = (global_position - killer.global_position).normalized() + Vector3.UP * 0.6
+	var launch_max := 8.0
+	var upward_bias := 0.25
+	var upward_scale := 0.12
+	if blast_radius > 0.0:
+		launch_max = 4.0
+		upward_bias = 0.16
+		upward_scale = 0.06
+	launch = clampf(launch, 0.15, launch_max)
+	push = push.normalized() * launch + Vector3.UP * (upward_bias + upward_scale * launch)
+	if _pending_lava_death:
+		var fall_death: bool = _pending_lava_death_fall
+		_pending_lava_death = false
+		_pending_lava_death_fall = false
+		_lava_death.rpc(fall_death)
+	elif suppress_death_ragdoll:
+		_lava_death.rpc(true)
+	else:
+		_ragdoll.rpc(
+			push,
+			force_origin,
+			kb_mag,
+			blast_radius,
+			blast_severity,
+			is_head,
+			overkill_disintegrate,
+			overkill_severity,
+		)
+	died.emit(killer_id)
+	_report_death.rpc_id(1, killer_id)
+
+
+@rpc("authority", "call_local", "reliable")
+func _execute_lethal_death_rpc(
+	killer_id: int,
+	force_origin: Vector3,
+	hit_dir: Vector3,
+	gib_force: float,
+	blast_radius: float,
+	blast_severity: float,
+	is_head: bool,
+	suppress_death_sound: bool,
+	suppress_death_ragdoll: bool,
+) -> void:
+	_execute_lethal_death(
+		killer_id,
+		force_origin,
+		hit_dir,
+		gib_force,
+		blast_radius,
+		blast_severity,
+		is_head,
+		suppress_death_sound,
+		suppress_death_ragdoll,
+		false,
+		0.0,
+	)
 
 @rpc("any_peer", "call_local", "unreliable")
 func _play_hurt_sound(pos: Vector3) -> void:
@@ -3137,6 +3360,9 @@ func server_respawn(pos: Vector3, yaw: float = 0.0) -> void:
 	rotation.y = yaw
 	velocity = Vector3.ZERO
 	ghost_mode = false
+	coop_downed = false
+	_clear_coop_down_marker()
+	frozen = false
 	health = MAX_HEALTH + weapon.max_hp_bonus
 	_phoenix_charges_left = weapon.phoenix_revives
 	_poison_damage_left = 0.0
@@ -3172,6 +3398,7 @@ func server_respawn(pos: Vector3, yaw: float = 0.0) -> void:
 		scene.show_death_effect(false)
 
 	_apply_ghost_visuals()
+	_restore_weapon_visuals()
 	# Push the teleport to every peer immediately so they don't see us at the
 	# old position for a frame while waiting for the next _physics_process.
 	_broadcast_state.rpc(global_position, rotation.y, look_pitch)
@@ -3266,6 +3493,27 @@ func apply_enemy_archetype(archetype: String, wave: int = 1) -> void:
 	_update_gun_visuals()
 	_apply_identity_skin_materials()
 
+@rpc("authority", "call_local", "reliable")
+func enter_coop_downed(corpse_pos: Vector3) -> void:
+	coop_downed = true
+	_coop_down_pos = corpse_pos
+	health = 0
+	frozen = true
+	velocity = Vector3.ZERO
+	Violence.clear_ragdoll(self)
+	_ragdoll_head = null
+	global_position = corpse_pos
+	_spawn_coop_down_marker(corpse_pos)
+	_apply_coop_downed_visuals()
+	if is_multiplayer_authority() and not is_bot:
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+		if camera:
+			camera.transform = Transform3D(Basis.IDENTITY, _camera_rest_pos)
+		var game := get_tree().current_scene
+		if game and game.has_method("set_phoenix_fade"):
+			game.set_phoenix_fade(player_id, 0.1)
+
+
 @rpc("any_peer", "call_local", "reliable")
 func begin_phoenix_ascension(revive_pos: Vector3, start_ms: int = 0) -> void:
 	var sender := multiplayer.get_remote_sender_id()
@@ -3273,6 +3521,9 @@ func begin_phoenix_ascension(revive_pos: Vector3, start_ms: int = 0) -> void:
 		return
 	Violence.clear_ragdoll(self)
 	_set_dead_visuals(false)
+	coop_downed = false
+	_clear_coop_down_marker()
+	frozen = false
 	_phoenix_ascending = true
 	_phoenix_finish_requested = false
 	_phoenix_start_pos = revive_pos
@@ -3334,6 +3585,7 @@ func _finish_phoenix_ascension(spawn_pos: Vector3, spawn_yaw: float = 0.0) -> vo
 			game.begin_phoenix_fade_out(player_id)
 	_refresh_authority_view()
 	_apply_ghost_visuals()
+	_restore_weapon_visuals()
 	if is_multiplayer_authority():
 		_last_sync_pos = global_position
 		_last_sync_yaw = rotation.y
@@ -3418,6 +3670,8 @@ func _sync_launching(active: bool) -> void:
 	if sender != 0 and sender != get_multiplayer_authority():
 		return
 	launching = active
+	if not active:
+		_restore_weapon_visuals()
 
 
 @rpc("any_peer", "call_local", "reliable")
