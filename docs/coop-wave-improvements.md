@@ -18,7 +18,7 @@ Living checklist for coop wave features and related fixes.
 | Gun visible after revive | Done |
 | Team blue / enemy per-archetype colors | Done |
 | Floor 3 blocks thick | Done |
-| Revive progress UI for reviver (optional) | Skipped |
+| Revive progress UI for reviver | Done |
 
 ---
 

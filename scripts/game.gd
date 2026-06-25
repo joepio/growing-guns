@@ -142,6 +142,7 @@ var _coop_wave_enemy_total: int = 0
 var _coop_wave_kills: int = 0
 var downed_players: Dictionary = {}
 var _coop_revive_positions: Dictionary = {}
+var coop_revive_channels: Dictionary = {}
 var round_wins: Dictionary = {}
 var current_round: int = 1
 var pending_pick_cards: Array = []
@@ -1113,7 +1114,12 @@ func _standing_human_ids(exclude_id: int = 0) -> Array[int]:
 
 
 func _update_coop_revives(delta: float) -> void:
-	if not is_coop_mode() or downed_players.is_empty():
+	if not is_coop_mode():
+		return
+	if downed_players.is_empty():
+		if not coop_revive_channels.is_empty():
+			coop_revive_channels = {}
+			_sync_coop_revive_channels.rpc({})
 		return
 	for raw_id in downed_players.keys():
 		var victim_id := int(raw_id)
@@ -1132,6 +1138,37 @@ func _update_coop_revives(delta: float) -> void:
 				_complete_coop_revive(victim_id, reviver_id)
 				continue
 		downed_players[victim_id] = entry
+	_publish_coop_revive_channels()
+
+
+func _publish_coop_revive_channels() -> void:
+	if not multiplayer.is_server():
+		return
+	var channels := {}
+	for raw_id in downed_players.keys():
+		var victim_id := int(raw_id)
+		var entry: Dictionary = downed_players[victim_id]
+		var reviver_id := int(entry.get("reviver_id", 0))
+		if reviver_id == 0:
+			continue
+		channels[reviver_id] = {
+			"victim_id": victim_id,
+			"progress": clampf(float(entry.get("progress", 0.0)) / COOP_REVIVE_SECONDS, 0.0, 1.0),
+			"victim_name": str(NetworkManager.players.get(victim_id, "ALLY")),
+		}
+	if channels == coop_revive_channels:
+		return
+	coop_revive_channels = channels
+	_sync_coop_revive_channels.rpc(channels)
+
+
+@rpc("authority", "call_local", "unreliable")
+func _sync_coop_revive_channels(channels: Dictionary) -> void:
+	coop_revive_channels = channels
+
+
+func get_coop_revive_channel(reviver_id: int) -> Dictionary:
+	return coop_revive_channels.get(reviver_id, {})
 
 
 func _coop_reviver_for(victim_id: int, corpse_pos: Vector3) -> int:
@@ -2483,12 +2520,28 @@ func _swap_arena(map_index: int, map_seed: int = 0, arena_size_min: float = -1.0
 	_fog_base_saved = false
 	_apply_round_modifier_environment()
 
+func _clear_coop_downed_players() -> void:
+	downed_players.clear()
+	_coop_revive_positions.clear()
+	coop_revive_channels = {}
+	if multiplayer.is_server():
+		_sync_coop_revive_channels.rpc({})
+	for raw_id in NetworkManager.players:
+		var pid := int(raw_id)
+		if not _is_human_player_id(pid):
+			continue
+		var p := players_root.get_node_or_null(str(pid))
+		if p and p.has_method("clear_coop_downed_state"):
+			p.clear_coop_downed_state.rpc()
+
+
 func _reset_round_tracking() -> void:
 	pending_picker_id = 0
 	pending_pick_cards.clear()
 	pending_pick_cards_by_player.clear()
 	pending_pick_deadlines.clear()
 	completed_picks.clear()
+	_clear_coop_downed_players()
 	eliminated_players.clear()
 	round_winner_id = 0
 	_round_elapsed = 0.0
@@ -2507,8 +2560,6 @@ func _reset_round_tracking() -> void:
 	_coop_enemy_spawn_timer = -1.0
 	_coop_wave_enemy_total = 0
 	_coop_wave_kills = 0
-	downed_players.clear()
-	_coop_revive_positions.clear()
 	_reset_pickup_spawner()
 
 func _reset_pickup_spawner() -> void:
@@ -2936,6 +2987,7 @@ func _end_round(winner_id: int) -> void:
 
 
 func _end_coop_wave() -> void:
+	_clear_coop_downed_players()
 	_round_damage_seen = false
 	_set_game_state.rpc(State.PICKING_CARD)
 	_announce.rpc("WAVE %d CLEARED" % coop_wave, 1.4)
@@ -2952,6 +3004,7 @@ func _end_coop_wave() -> void:
 
 
 func _end_coop_match() -> void:
+	_clear_coop_downed_players()
 	_coop_enemy_spawn_queue.clear()
 	_coop_enemy_spawn_timer = -1.0
 	_set_game_state.rpc(State.MATCH_OVER)

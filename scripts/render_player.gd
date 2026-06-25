@@ -368,6 +368,20 @@ func layout_for_size(view_size: Vector2) -> void:
 		panel.offset_top = y - fisheye_y_offset
 		panel.offset_bottom = y + panel_h - fisheye_y_offset
 
+	var revive_panel: Control = _hud.get("revive_panel") as Control
+	if revive_panel:
+		var revive_w := 240.0 * scale
+		var revive_h := 38.0 * scale
+		revive_panel.anchor_left = 0.5
+		revive_panel.anchor_right = 0.5
+		revive_panel.anchor_top = 0.0
+		revive_panel.anchor_bottom = 0.0
+		revive_panel.offset_left = -revive_w * 0.5
+		revive_panel.offset_right = revive_w * 0.5
+		revive_panel.offset_top = y - revive_h - 14.0 * scale - fisheye_y_offset
+		revive_panel.offset_bottom = revive_panel.offset_top + revive_h
+		revive_panel.set_meta("font_size", font_big)
+
 	# Cards get their own scale so the row fills the view width — the HUD
 	# scale above caps at 1.0, which leaves big gaps in splitscreen halves
 	# (and even more space wasted on a single full-screen view).
@@ -516,6 +530,10 @@ func _build() -> void:
 	round_win.add_theme_constant_override("outline_size", 7)
 	root.add_child(round_win)
 
+	var revive_panel := _build_revive_panel()
+	revive_panel.z_index = 15
+	root.add_child(revive_panel)
+
 	_hud = {
 		"hp_panel": hp_panel,
 		"ammo_panel": ammo_panel,
@@ -533,6 +551,7 @@ func _build() -> void:
 		"pickup_toast": pickup_toast,
 		"modifier_toast": modifier_toast,
 		"round_win": round_win,
+		"revive_panel": revive_panel,
 	}
 
 
@@ -629,6 +648,34 @@ func _build_value_panel(icon_type: int, text_color: Color) -> Control:
 	bar_fill.color = text_color
 	bar_fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	bar_fill.visible = false
+	panel.add_child(bar_fill)
+	return panel
+
+
+func _build_revive_panel() -> Control:
+	var panel := Control.new()
+	panel.name = "RevivePanel"
+	panel.visible = false
+	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var cross := CrossDraw.new()
+	cross.name = "Cross"
+	cross.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	panel.add_child(cross)
+	var label := _label(Color(0.72, 0.92, 1.0))
+	label.name = "Label"
+	label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	panel.add_child(label)
+	var bar_bg := ColorRect.new()
+	bar_bg.name = "BarBg"
+	bar_bg.color = Color(0, 0, 0, 0.62)
+	bar_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	panel.add_child(bar_bg)
+	var bar_fill := ColorRect.new()
+	bar_fill.name = "BarFill"
+	bar_fill.color = Color(0.45, 0.82, 1.0)
+	bar_fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	panel.add_child(bar_fill)
 	return panel
 
@@ -1104,6 +1151,8 @@ func _update_hud(player: Node) -> void:
 
 	_layout_dash_panel(player)
 
+	_layout_revive_panel(player)
+
 	_hud.crosshair.set("spread", player.call("get_effective_spread"))
 	_hud.ghost.color.a = 0.28 if is_ghost and not bool(_hud.card_overlay.visible) else 0.0
 
@@ -1162,6 +1211,47 @@ func _layout_value_panel(panel: Control, text: String, progress: float, is_ghost
 		label.size = Vector2(content_w, h)
 		label.add_theme_font_size_override("font_size", font_size)
 		label.text = text
+
+
+func _layout_revive_panel(_player: Node) -> void:
+	var panel: Control = _hud.get("revive_panel") as Control
+	if panel == null or game == null:
+		return
+	var channel := {}
+	if game.has_method("get_coop_revive_channel"):
+		channel = game.get_coop_revive_channel(player_id)
+	var show := not channel.is_empty() and game.has_method("is_coop_mode") and game.is_coop_mode()
+	panel.visible = show
+	if not show:
+		return
+	var w: float = panel.size.x
+	var h: float = panel.size.y
+	if h <= 0.0:
+		return
+	var progress := clampf(float(channel.get("progress", 0.0)), 0.0, 1.0)
+	var ally_name := str(channel.get("victim_name", "ALLY"))
+	var cross: CrossDraw = panel.get_node("Cross") as CrossDraw
+	var label: Label = panel.get_node("Label") as Label
+	var bar_bg: ColorRect = panel.get_node("BarBg") as ColorRect
+	var bar_fill: ColorRect = panel.get_node("BarFill") as ColorRect
+	var cross_size: float = h * 0.82
+	cross.position = Vector2(0.0, (h - cross_size) * 0.5)
+	cross.size = Vector2(cross_size, cross_size)
+	cross.set_cross_color(Color(0.45, 0.82, 1.0))
+	var content_x: float = cross_size + 8.0
+	var content_w: float = maxf(0.0, w - content_x)
+	var font_size: int = int(panel.get_meta("font_size", 22))
+	var bar_h: float = h * 0.34
+	var label_h: float = h - bar_h - 2.0
+	label.position = Vector2(content_x, 0.0)
+	label.size = Vector2(content_w, label_h)
+	label.add_theme_font_size_override("font_size", maxi(11, font_size - 4))
+	label.text = "REVIVING %s" % ally_name
+	var bar_y: float = label_h + 2.0
+	bar_bg.position = Vector2(content_x, bar_y)
+	bar_bg.size = Vector2(content_w, bar_h)
+	bar_fill.position = Vector2(content_x, bar_y)
+	bar_fill.size = Vector2(content_w * progress, bar_h)
 
 
 func _layout_dash_panel(player: Node) -> void:
