@@ -17,6 +17,7 @@ const SHAKE_RADIUS := 22.0
 const SHAKE_STRENGTH := 0.16     # max camera-shake amplitude (m) at the epicenter
 const VFX_TRANSIENT_LIGHTS := false
 const MINE_TRIGGER_RADIUS := 1.25
+const PLAYER_CONTACT_RADIUS := 0.62
 const MINE_LIFETIME := 10.0        # mines quietly expire if nobody wanders in
 const SPEED_OF_SOUND := 343.0      # m/s — same constant as audio + visuals use
 const CLUSTER_POP_RADIUS := 3.5
@@ -234,6 +235,8 @@ func _physics_process(delta: float) -> void:
 			_maybe_trigger_mine()
 	elif _age >= _fuse_time():
 		_explode()
+	if not is_mine and not is_dash_bomb and _age >= _arm_delay():
+		_maybe_explode_on_player_contact()
 
 func _on_body_entered(_body: Node) -> void:
 	# Only the authoritative server triggers explosions; clients are passive visuals.
@@ -246,6 +249,23 @@ func _on_body_entered(_body: Node) -> void:
 	if is_dash_bomb:
 		return
 	_explode()
+
+func _maybe_explode_on_player_contact() -> void:
+	if _exploded:
+		return
+	# Hitboxes are Area3D — RigidBody3D body_entered only sees world solids.
+	var trigger_r := PLAYER_CONTACT_RADIUS * maxf(scale.x, 0.55)
+	for p in get_tree().get_nodes_in_group("players"):
+		if not is_instance_valid(p) or not (p is Node3D):
+			continue
+		if bool(p.get("ghost_mode")):
+			continue
+		var health := int(p.get("health"))
+		if health <= 0 and not bool(p.get("coop_downed")):
+			continue
+		if (p as Node3D).global_position.distance_to(global_position) <= trigger_r:
+			_explode()
+			return
 
 func _maybe_trigger_mine() -> void:
 	if _age < MINE_ARM_DELAY:
