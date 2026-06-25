@@ -3600,6 +3600,9 @@ static func set_dead_visuals(player: Node, dead: bool) -> void:
 	var muzzle: Node = player.get("muzzle")
 	if muzzle:
 		muzzle.visible = not dead
+	var name_label: Node = player.get("name_label")
+	if name_label:
+		name_label.visible = not dead
 	var layer: int = 0 if dead else 2
 	var head_hitbox: Node = player.get("head_hitbox")
 	if head_hitbox:
