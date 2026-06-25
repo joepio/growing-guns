@@ -264,6 +264,7 @@ const HIT_FACE_DURATION := 0.22
 @export var player_name: String = "Player"
 @export var is_bot: bool = false
 @export var appearance_seed: int = 0
+var enemy_archetype: String = ""
 @export var local_input_device: int = -1
 @export var split_screen_local: bool = false
 
@@ -448,14 +449,44 @@ func _aim_pitch() -> float:
 		return look_pitch
 	return _remote_target_pitch
 
+func _coop_enemy_archetype_color(archetype: String) -> Color:
+	match archetype:
+		"sniper":
+			return Color(0.62, 0.32, 0.92)
+		"grenadier":
+			return Color(0.92, 0.52, 0.18)
+		"flat_fragger":
+			return Color(0.92, 0.38, 0.58)
+		"demolition":
+			return Color(0.88, 0.28, 0.22)
+		_:
+			return Color(0.88, 0.76, 0.22)
+
+
+func _coop_identity_color(seed: int) -> Color:
+	if is_bot:
+		if not enemy_archetype.is_empty():
+			return _coop_enemy_archetype_color(enemy_archetype)
+		return _coop_enemy_archetype_color("grunt")
+	var hue := (210.0 + float((seed >> 5) % 21)) / 360.0
+	var sat := 0.58 + float((seed >> 9) % 17) / 100.0
+	var val := 0.68 + float((seed >> 13) % 20) / 100.0
+	return Color.from_hsv(hue, sat, val, 1.0)
+
+
 func _apply_identity_skin_materials() -> StandardMaterial3D:
 	if head_blob == null:
 		return null
 	var seed := _identity_seed()
-	var hue := float(seed % 360) / 360.0
-	var sat := 0.44 + float((seed >> 3) % 24) / 100.0
-	var val := 0.72 + float((seed >> 7) % 18) / 100.0
-	var skin := Color.from_hsv(hue, sat, val, 1.0)
+	var skin: Color
+	var game := get_tree().current_scene
+	if game and game.has_method("is_coop_mode") and game.is_coop_mode():
+		skin = _coop_identity_color(seed)
+	else:
+		var hue := float(seed % 360) / 360.0
+		var sat := 0.44 + float((seed >> 3) % 24) / 100.0
+		var val := 0.72 + float((seed >> 7) % 18) / 100.0
+		skin = Color.from_hsv(hue, sat, val, 1.0)
 	var face := skin.lerp(Color(1.0, 0.96, 0.88), 0.64)
 	var skin_mat := _make_mat(skin, 0.95, 0.0)
 	var face_mat := _make_mat(face, 0.86, 0.0)
@@ -3163,6 +3194,7 @@ func set_spawn_health(amount: int) -> void:
 func apply_enemy_archetype(archetype: String, wave: int = 1) -> void:
 	if not is_bot:
 		return
+	enemy_archetype = archetype
 	weapon.reset()
 	match archetype:
 		"sniper":
@@ -3232,6 +3264,7 @@ func apply_enemy_archetype(archetype: String, wave: int = 1) -> void:
 	mag = weapon.get_mag_size()
 	_update_body_scale()
 	_update_gun_visuals()
+	_apply_identity_skin_materials()
 
 @rpc("any_peer", "call_local", "reliable")
 func begin_phoenix_ascension(revive_pos: Vector3, start_ms: int = 0) -> void:
