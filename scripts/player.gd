@@ -150,6 +150,7 @@ var tilt_enabled: bool = true
 # want gravity + move_and_slide to run while it's on.
 var launching: bool = false
 var _phoenix_ascending: bool = false
+var _coop_phoenix_held: bool = false
 var _phoenix_start_pos: Vector3 = Vector3.ZERO
 var _phoenix_start_ms: int = 0
 var _phoenix_finish_requested: bool = false
@@ -305,6 +306,17 @@ var _prev_local_actions: Dictionary = {}
 
 var health: int = MAX_HEALTH
 var god_mode: bool = false
+
+func get_max_health() -> int:
+	var base := MAX_HEALTH + weapon.max_hp_bonus
+	if is_bot:
+		return base
+	var game := get_tree().current_scene
+	if game and game.has_method("is_coop_mode") and game.is_coop_mode() \
+			and game.has_method("_is_human_player_id") and game._is_human_player_id(player_id) \
+			and game.has_method("coop_human_max_health"):
+		return game.coop_human_max_health(weapon)
+	return base
 
 signal died(killer_id: int)
 signal cooldowns_changed  # emitted on local player for HUD
@@ -667,7 +679,7 @@ func _process(delta: float) -> void:
 		_update_phoenix_ascent()
 
 	if not is_multiplayer_authority():
-		if not _phoenix_ascending:
+		if not _phoenix_ascending and not _coop_phoenix_held:
 			_interpolate_remote_state(delta)
 	_update_blob_motion(delta)
 	_update_flashlight_aim(delta)
@@ -844,6 +856,9 @@ func _apply_ghost_visuals() -> void:
 	if _phoenix_ascending:
 		_apply_phoenix_visuals()
 		return
+	if _coop_phoenix_held:
+		_apply_phoenix_visuals(PHOENIX_ALPHA_END)
+		return
 	if coop_downed:
 		_apply_coop_downed_visuals()
 		return
@@ -930,7 +945,7 @@ func _apply_coop_downed_visuals() -> void:
 
 
 func _restore_weapon_visuals() -> void:
-	if is_bot or ghost_mode or coop_downed or _phoenix_ascending or health <= 0:
+	if is_bot or ghost_mode or coop_downed or _coop_phoenix_held or _phoenix_ascending or health <= 0:
 		return
 	if is_multiplayer_authority() and not split_screen_local:
 		muzzle.visible = true
@@ -1063,7 +1078,9 @@ func _update_phoenix_ascent() -> void:
 		_last_sync_pitch = look_pitch
 	if progress >= 1.0 and not _phoenix_finish_requested:
 		_phoenix_finish_requested = true
-		if game and game.has_method("finish_phoenix_revive"):
+		if coop_downed:
+			_hold_coop_phoenix_at_apex()
+		elif game and game.has_method("finish_phoenix_revive"):
 			if multiplayer.is_server():
 				game.finish_phoenix_revive(player_id)
 			else:
@@ -1128,6 +1145,31 @@ func _tick_phoenix_column(progress: float) -> void:
 	if mat:
 		mat.emission_energy_multiplier = 12.0 * pulse * fade
 		mat.albedo_color.a = 0.22 * fade
+
+
+func _hold_coop_phoenix_at_apex() -> void:
+	_phoenix_ascending = false
+	_coop_phoenix_held = true
+	frozen = true
+	var apex := _phoenix_start_pos + Vector3(0.0, PHOENIX_ASCENT_HEIGHT, 0.0)
+	global_position = apex
+	_apply_phoenix_visuals(PHOENIX_ALPHA_END)
+	_clear_phoenix_fx()
+	var game := get_tree().current_scene
+	if is_multiplayer_authority():
+		velocity = Vector3.ZERO
+		if game and game.has_method("set_phoenix_fade"):
+			game.set_phoenix_fade(player_id, 1.0)
+		_last_sync_pos = global_position
+		_last_sync_yaw = rotation.y
+		_last_sync_pitch = look_pitch
+		_broadcast_state.rpc(global_position, rotation.y, look_pitch)
+	else:
+		_remote_target_pos = apex
+		_remote_target_yaw = rotation.y
+		_remote_has_target = true
+		_visual_prev_pos = apex
+
 
 func _apply_chill_visual() -> void:
 	if body_model == null or ghost_mode or _phoenix_ascending:
@@ -2020,7 +2062,7 @@ func _on_dealt_damage(damage: int) -> void:
 	if weapon.lifesteal > 0.0:
 		var heal_amt := int(float(damage) * weapon.lifesteal)
 		if heal_amt > 0:
-			health = mini(MAX_HEALTH + weapon.max_hp_bonus, health + heal_amt)
+			health = mini(get_max_health(), health + heal_amt)
 	cooldowns_changed.emit()
 
 @rpc("any_peer", "call_local", "reliable")
@@ -3359,8 +3401,10 @@ func server_respawn(pos: Vector3, yaw: float = 0.0) -> void:
 	Violence.clear_ragdoll(self)
 	_lava_death_active = false
 	_phoenix_ascending = false
+	_coop_phoenix_held = false
 	_phoenix_finish_requested = false
 	_phoenix_start_ms = 0
+	_phoenix_start_pos = Vector3.ZERO
 	_clear_phoenix_fx()
 	launching = false
 	_stop_rocket_descent_audio()
@@ -3515,22 +3559,22 @@ func enter_coop_downed(corpse_pos: Vector3) -> void:
 	if sender != 1 and sender != 0:
 		return
 	coop_downed = true
+	_coop_phoenix_held = false
 	_coop_down_pos = corpse_pos
 	health = 0
-	frozen = true
+	frozen = false
 	velocity = Vector3.ZERO
 	Violence.clear_ragdoll(self)
 	_ragdoll_head = null
-	global_position = corpse_pos
 	_spawn_coop_down_marker(corpse_pos)
-	_apply_coop_downed_visuals()
+	_start_phoenix_ascent(corpse_pos, Time.get_ticks_msec(), true)
 	if is_multiplayer_authority() and not is_bot:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 		if camera:
 			camera.transform = Transform3D(Basis.IDENTITY, _camera_rest_pos)
 		var game := get_tree().current_scene
 		if game and game.has_method("set_phoenix_fade"):
-			game.set_phoenix_fade(player_id, 0.1)
+			game.set_phoenix_fade(player_id, 0.0)
 
 
 @rpc("any_peer", "call_local", "reliable")
@@ -3539,9 +3583,11 @@ func clear_coop_downed_state() -> void:
 	if sender != 1 and sender != 0:
 		return
 	coop_downed = false
+	_coop_phoenix_held = false
 	_phoenix_ascending = false
 	_phoenix_finish_requested = false
 	_phoenix_start_ms = 0
+	_phoenix_start_pos = Vector3.ZERO
 	_clear_phoenix_fx()
 	launching = false
 	_stop_rocket_descent_audio()
@@ -3558,21 +3604,27 @@ func begin_phoenix_ascension(revive_pos: Vector3, start_ms: int = 0) -> void:
 	var sender := multiplayer.get_remote_sender_id()
 	if sender != 1 and sender != 0:
 		return
+	var scene := get_tree().current_scene
+	if scene and scene.has_method("show_death_effect_for"):
+		scene.show_death_effect_for(player_id, false)
+	_start_phoenix_ascent(revive_pos, start_ms, false)
+
+
+func _start_phoenix_ascent(revive_pos: Vector3, start_ms: int, keep_coop_downed: bool) -> void:
 	Violence.clear_ragdoll(self)
 	_set_dead_visuals(false)
-	coop_downed = false
-	_clear_coop_down_marker()
-	frozen = false
+	if not keep_coop_downed:
+		coop_downed = false
+		_clear_coop_down_marker()
+		frozen = false
+		health = maxi(1, int(float(MAX_HEALTH + weapon.max_hp_bonus) * 0.35))
+	_coop_phoenix_held = false
 	_phoenix_ascending = true
 	_phoenix_finish_requested = false
 	_phoenix_start_pos = revive_pos
 	_phoenix_start_ms = start_ms if start_ms > 0 else Time.get_ticks_msec()
-	health = maxi(1, int(float(MAX_HEALTH + weapon.max_hp_bonus) * 0.35))
 	_spawn_phoenix_column(revive_pos)
 	_apply_phoenix_visuals(PHOENIX_ALPHA_START)
-	var scene := get_tree().current_scene
-	if scene and scene.has_method("show_death_effect_for"):
-		scene.show_death_effect_for(player_id, false)
 	global_position = revive_pos
 	velocity = Vector3.ZERO
 	if is_multiplayer_authority():
@@ -3601,15 +3653,20 @@ func begin_phoenix_ascension(revive_pos: Vector3, start_ms: int = 0) -> void:
 
 @rpc("any_peer", "call_local", "reliable")
 func _finish_phoenix_ascension(spawn_pos: Vector3, spawn_yaw: float = 0.0) -> void:
-	if not _phoenix_ascending:
+	if not _phoenix_ascending and not _coop_phoenix_held:
 		return
 	var sender := multiplayer.get_remote_sender_id()
 	if sender != 1 and sender != 0:
 		return
 	_phoenix_ascending = false
+	_coop_phoenix_held = false
 	_phoenix_finish_requested = false
 	_phoenix_start_ms = 0
+	_phoenix_start_pos = Vector3.ZERO
 	_clear_phoenix_fx()
+	coop_downed = false
+	_clear_coop_down_marker()
+	frozen = false
 	for mesh in _body_meshes():
 		mesh.material_override = _body_materials.get(mesh, mesh.material_override)
 	global_position = spawn_pos
@@ -3722,19 +3779,21 @@ func set_launching(v: bool, downward_vel: float = 0.0) -> void:
 	if sender != 1 and sender != 0:
 		return
 	launching = v
-	if v and is_multiplayer_authority():
-		velocity = Vector3(0.0, -downward_vel, 0.0)
-		# Bots have a camera node but server doesn't drive its view — these
-		# adjustments only matter for the local human controlling this body.
-		if not is_bot:
-			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
-			# ~25° down — enough to see where you're rocketing into without
-			# losing the horizon.
-			look_pitch = -0.44
-			# Sustained rumble during the descent. The launching path skips
-			# the normal shake-decay step, so this stays high until landing.
-			shake_amt = 0.06
-			_rocket_descent_player = SFX.rocket_descent()
+	if is_multiplayer_authority():
+		if v:
+			velocity = Vector3(0.0, -downward_vel, 0.0)
+			if not is_bot:
+				Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+				# ~25° down — enough to see where you're rocketing into without
+				# losing the horizon.
+				look_pitch = -0.44
+				# Sustained rumble during the descent. The launching path skips
+				# the normal shake-decay step, so this stays high until landing.
+				shake_amt = 0.06
+				_rocket_descent_player = SFX.rocket_descent()
+		else:
+			velocity = Vector3.ZERO
+			_stop_rocket_descent_audio()
 
 
 func _stop_rocket_descent_audio() -> void:
@@ -3748,7 +3807,7 @@ func heal(amount: int) -> void:
 		return
 	if not is_multiplayer_authority():
 		return
-	health = min(MAX_HEALTH + weapon.max_hp_bonus, health + amount)
+	health = min(get_max_health(), health + amount)
 
 @rpc("any_peer", "call_local", "reliable")
 func apply_round_pickup(kind: String) -> void:

@@ -995,20 +995,20 @@ func finish_phoenix_revive(player_id: int) -> void:
 	var p := players_root.get_node_or_null(str(player_id))
 	if p == null or not is_instance_valid(p):
 		return
-	if not bool(p.get("_phoenix_ascending")):
+	if not bool(p.get("_phoenix_ascending")) and not (bool(p.get("coop_downed")) and bool(p.get("_coop_phoenix_held"))):
 		return
-	var sky_pos: Vector3
+	var preferred_ground: Vector3
 	var spawn_yaw: float
 	if _coop_revive_positions.has(player_id):
-		var corpse: Vector3 = _coop_revive_positions[player_id]
-		sky_pos = corpse + Vector3(0.0, 60.0, 0.0)
-		spawn_yaw = p.rotation.y
+		preferred_ground = _coop_revive_positions[player_id]
 		_coop_revive_positions.erase(player_id)
 	else:
-		var pick := _pick_spawn(_current_player_positions())
-		sky_pos = pick["pos"] + Vector3(0.0, 60.0, 0.0)
-		spawn_yaw = pick["yaw"]
+		preferred_ground = p.global_position
+	var drop := _sky_drop_spawn(preferred_ground, player_id, _current_player_positions())
+	var sky_pos: Vector3 = drop["pos"]
+	spawn_yaw = drop["yaw"]
 	p._finish_phoenix_ascension.rpc(sky_pos, spawn_yaw)
+	_apply_coop_spawn_health(p)
 	p.set_launching.rpc(true, 80.0)
 	downed_players.erase(player_id)
 
@@ -1166,13 +1166,48 @@ func _publish_coop_revive_channels() -> void:
 	_sync_coop_revive_channels.rpc(channels)
 
 
-@rpc("authority", "call_local", "unreliable")
+@rpc("authority", "call_local", "reliable")
 func _sync_coop_revive_channels(channels: Dictionary) -> void:
 	coop_revive_channels = channels
 
 
+func is_coop_reviving(reviver_id: int) -> bool:
+	if not is_coop_mode() or state != State.PLAYING:
+		return false
+	if coop_revive_channels.has(reviver_id):
+		return true
+	var reviver := players_root.get_node_or_null(str(reviver_id))
+	if reviver == null:
+		return false
+	for child in players_root.get_children():
+		if not bool(child.get("coop_downed")):
+			continue
+		if int(child.get("player_id")) == reviver_id:
+			continue
+		var flat := Vector2(
+			reviver.global_position.x - child.global_position.x,
+			reviver.global_position.z - child.global_position.z,
+		)
+		if flat.length() <= COOP_REVIVE_RADIUS:
+			return true
+	return false
+
+
 func get_coop_revive_channel(reviver_id: int) -> Dictionary:
 	return coop_revive_channels.get(reviver_id, {})
+
+
+func _sky_drop_spawn(preferred_ground: Vector3, player_id: int, avoid: Array[Vector3] = []) -> Dictionary:
+	var yaw := 0.0
+	var p := players_root.get_node_or_null(str(player_id))
+	if p:
+		yaw = p.rotation.y
+	var ground := preferred_ground
+	if not _spawn_is_valid(ground):
+		var pick := _pick_spawn(avoid if not avoid.is_empty() else _current_player_positions())
+		ground = pick["pos"]
+		yaw = pick["yaw"]
+	return {"pos": ground + Vector3(0.0, 60.0, 0.0), "yaw": yaw, "ground": ground}
 
 
 func _coop_reviver_for(victim_id: int, corpse_pos: Vector3) -> int:
@@ -1199,7 +1234,7 @@ func _complete_coop_revive(victim_id: int, _reviver_id: int) -> void:
 	var corpse_pos: Vector3 = downed_players[victim_id].get("pos", Vector3.ZERO)
 	downed_players.erase(victim_id)
 	_coop_revive_positions[victim_id] = corpse_pos
-	execute_phoenix_revive(victim_id, corpse_pos)
+	finish_phoenix_revive(victim_id)
 
 
 func _arena_spawnpoints() -> Array:
@@ -2015,6 +2050,10 @@ func _start_round_now() -> void:
 	for p in round_players:
 		if ROUND_MODIFIERS_SCRIPT.applies_weapon(current_round_modifier):
 			p.apply_round_modifier_weapon.rpc(current_round_modifier)
+	# Stop any leftover revive sky-drops before picking fresh round spawns.
+	for p in round_players:
+		p.set_launching.rpc(false)
+	for p in round_players:
 		var pick := _pick_spawn(used)
 		used.append(pick["pos"])
 		p.set_ghost_mode.rpc(false)
@@ -2022,8 +2061,8 @@ func _start_round_now() -> void:
 		# moving at terminal speed (80 m/s constant — no gravity ramp). 0.75s
 		# from spawn to impact. Each player auto-ends their launch on first
 		# floor contact, so there's no central timer gating the round start.
-		var sky_pos: Vector3 = pick["pos"] + Vector3(0.0, 60.0, 0.0)
-		p.server_respawn.rpc(sky_pos, pick["yaw"])
+		var drop := _sky_drop_spawn(pick["pos"], int(p.get("player_id")), used)
+		p.server_respawn.rpc(drop["pos"], drop["yaw"])
 		_apply_coop_spawn_health(p)
 		# Clear any leftover freeze (e.g. losers were frozen during card-pick
 		# at the end of the previous round) before kicking off the launch —
@@ -2061,16 +2100,25 @@ func _start_round_now() -> void:
 	Trace.mark("round %d PLAYING — players launched" % current_round)
 
 
+func coop_human_max_health(weapon: Weapon) -> int:
+	var base_health := 100
+	if weapon != null:
+		base_health += int(weapon.max_hp_bonus)
+	return maxi(1, int(ceil(float(base_health) * COOP_PLAYER_HEALTH_MULT)))
+
+
 func _apply_coop_spawn_health(p: Node) -> void:
 	if not is_coop_mode() or p == null or not p.has_method("set_spawn_health"):
 		return
 	var pid := int(p.get("player_id"))
 	var weapon: Weapon = p.get("weapon") as Weapon
-	var base_health := 100
-	if weapon != null:
-		base_health += int(weapon.max_hp_bonus)
-	var mult := COOP_ENEMY_HEALTH_MULT if _is_bot_id(pid) else COOP_PLAYER_HEALTH_MULT
-	p.set_spawn_health.rpc(maxi(1, int(ceil(float(base_health) * mult))))
+	if _is_bot_id(pid):
+		var base_health := 100
+		if weapon != null:
+			base_health += int(weapon.max_hp_bonus)
+		p.set_spawn_health.rpc(maxi(1, int(ceil(float(base_health) * COOP_ENEMY_HEALTH_MULT))))
+	else:
+		p.set_spawn_health.rpc(coop_human_max_health(weapon))
 
 func _update_air_strikes(delta: float) -> void:
 	if not _air_strikes_armed or not ROUND_MODIFIERS_SCRIPT.needs_air_strikes(current_round_modifier):
