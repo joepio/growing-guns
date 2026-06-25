@@ -438,10 +438,6 @@ func _handle_collision(result: Dictionary) -> void:
 			if shooter_node:
 				shooter_node._hit_confirm.rpc_id(shooter_node.get_multiplayer_authority(), is_head, maxi(dmg, poison_total_damage), hit_pos)
 
-			if weapon_stats.lifesteal > 0.0:
-				var heal_amt: int = int(float(maxi(direct_damage, poison_total_damage)) * weapon_stats.lifesteal)
-				if heal_amt > 0:
-					shooter_node.heal.rpc_id(shooter_node.get_multiplayer_authority(), heal_amt)
 			if poison_total_damage > 0 and hit_player.has_method("apply_damage_over_time"):
 				hit_player.apply_damage_over_time.rpc_id(
 					hit_player.get_multiplayer_authority(),

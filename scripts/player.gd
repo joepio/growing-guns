@@ -273,12 +273,12 @@ const BOT_FOLLOW_DIST := 7.0
 const BOT_ROT_SPEED := 6.0
 const BOT_SPREAD := 0.09                 # ~5.2° — miss-prone but threatening
 const BOT_MISS_CHANCE := 0.45            # fraction of shots that get huge extra spread
-const BOT_JUMP_CHANCE := 0.025           # per physics tick, when on floor
+const BOT_JUMP_CHANCE := 0.008           # per physics tick, when on floor
 const BOT_DASH_CHANCE := 0.018           # per physics tick, when charge available
 const BOT_EDGE_PROBE_DIST := 1.8
 const BOT_LAVA_EDGE_PROBE_DIST := 3.0
 const BOT_LAVA_MISTAKE_CHANCE := 0.07
-const BOT_LAVA_JUMP_CHANCE := 0.004
+const BOT_LAVA_JUMP_CHANCE := 0.0015
 const BOT_AIR_STRIKE_FLEE_RADIUS := 40.0
 const BOT_AIR_STRIKE_PANIC_RADIUS := 22.0
 const BOT_GAP_JUMP_MIN_LANDING := 4.5
@@ -1863,6 +1863,10 @@ func _on_dealt_damage(damage: int) -> void:
 			_stop_reload_audio()
 	if weapon.special_cooldown_refund_on_hit > 0.0:
 		grenade_cooldown = maxf(0.0, grenade_cooldown - weapon.special_cooldown_refund_on_hit)
+	if weapon.lifesteal > 0.0:
+		var heal_amt := int(float(damage) * weapon.lifesteal)
+		if heal_amt > 0:
+			health = mini(MAX_HEALTH + weapon.max_hp_bonus, health + heal_amt)
 	cooldowns_changed.emit()
 
 @rpc("any_peer", "call_local", "reliable")
@@ -3172,8 +3176,35 @@ func apply_enemy_archetype(archetype: String, wave: int = 1) -> void:
 			weapon.bullet_drop = 0.0
 			weapon.headshot_mult = 1.35
 			weapon.body_scale = 0.92
-			weapon.bullet_color = Color(0.55, 0.9, 1.0)
+			weapon.body_scale_axes *= Vector3(0.75, 2.4, 0.75)
+			weapon.bullet_color = Color(0.72, 0.38, 1.0)
 			weapon.special = Weapon.SPECIAL_ZOOM
+		"grenadier":
+			weapon.damage_mult = 0.62 + float(wave) * 0.03
+			weapon.fire_rate_mult = 0.32
+			weapon.reload_mult = 0.72
+			weapon.move_speed_mult = 0.72
+			weapon.mag_size_bonus = -1
+			weapon.spread = 0.014
+			weapon.recoil_per_shot = 0.018
+			weapon.bullet_speed_mult = 0.68
+			weapon.body_scale = 1.28
+			weapon.max_hp_bonus += 60
+			weapon.explosive_radius = 3.4 + minf(float(wave) * 0.12, 1.6)
+			weapon.explosive_damage = 28.0 + float(wave) * 3.0
+			weapon.bullet_color = Color(1.0, 0.48, 0.14)
+		"flat_fragger":
+			weapon.damage_mult = 0.72 + float(wave) * 0.028
+			weapon.fire_rate_mult = 0.28
+			weapon.reload_mult = 0.62
+			weapon.mag_size_bonus = -2
+			weapon.extra_projectiles += 2
+			weapon.spread = deg_to_rad(4.0)
+			weapon.recoil_per_shot = 0.022
+			weapon.bullet_speed_mult = 0.7
+			weapon.body_scale = 0.86
+			weapon.body_scale_axes *= Vector3(0.65, 1.0, 1.45)
+			weapon.bullet_color = Color(1.0, 0.42, 0.62)
 		"demolition":
 			weapon.damage_mult = 0.72 + float(wave) * 0.025
 			weapon.fire_rate_mult = 0.52
@@ -3792,7 +3823,7 @@ func _bot_physics(delta: float) -> void:
 	var hop_chance := BOT_LAVA_JUMP_CHANCE if _bot_on_lava_map() else BOT_JUMP_CHANCE
 	if not gap_jump_started and is_on_floor() and _bot_jump_cooldown <= 0.0 and randf() < hop_chance:
 		velocity.y = JUMP_VELOCITY
-		_bot_jump_cooldown = randf_range(1.2, 3.0)
+		_bot_jump_cooldown = randf_range(2.0, 4.5)
 		if not ghost_mode: SFX.jump(global_position)
 
 	# Occasional dash — usually in the current move direction, sometimes sideways.
@@ -3810,7 +3841,7 @@ func _bot_physics(delta: float) -> void:
 		_bot_dash_cooldown = randf_range(2.5, 5.5)
 
 	# --- Movement ---
-	var target_vel := move_dir * BOT_MOVE_SPEED * _slow_mult
+	var target_vel := move_dir * BOT_MOVE_SPEED * weapon.move_speed_mult * _slow_mult
 	var accel := GROUND_ACCEL if is_on_floor() else AIR_ACCEL
 
 	if dash_timer > 0.0:

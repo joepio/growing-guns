@@ -165,12 +165,13 @@ func _collect(player: Node) -> void:
 	if _collected:
 		return
 	_collected = true
+	var player_id := int(player.get("player_id"))
 	if player.has_method("apply_round_pickup"):
 		player.apply_round_pickup.rpc(kind)
 	var game := get_tree().current_scene
-	if game and game.has_method("_despawn_pickup") and _pickup_id >= 0:
-		game._despawn_pickup.rpc(_pickup_id)
-	else:
+	if game and game.has_method("_pickup_collected_by_player") and _pickup_id >= 0:
+		game._pickup_collected_by_player(_pickup_id, player_id, kind)
+	elif is_instance_valid(self):
 		queue_free()
 
 
