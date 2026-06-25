@@ -880,9 +880,16 @@ func _on_peer_connected(_id: int) -> void:
 func _on_peer_disconnected(id: int) -> void:
 	if not multiplayer.is_server():
 		return
+	var pname := str(NetworkManager.players.get(id, ""))
+	if pname.is_empty():
+		var existing := players_root.get_node_or_null(str(id))
+		if existing:
+			pname = str(existing.get("player_name"))
 	var node := players_root.get_node_or_null(str(id))
 	if node:
 		_despawn.rpc(id)
+	if not pname.is_empty() and not _is_bot_id(id):
+		_announce.rpc("%s left" % pname, 2.0)
 	round_wins.erase(id)
 	_broadcast_scores.rpc(round_wins)
 	if state == State.PICKING_CARD and id == pending_picker_id:
@@ -943,6 +950,8 @@ func _request_spawn(pname: String) -> void:
 	if state != State.WAITING:
 		_set_game_state.rpc_id(sender, state)
 	_maybe_start_match()
+	if not _is_bot_id(sender):
+		_announce.rpc("%s joined" % pname, 2.0)
 
 func _spawn_player(id: int, pname: String) -> void:
 	if players_root.has_node(str(id)):
@@ -1467,12 +1476,17 @@ func _begin_coop_enemy_wave() -> void:
 	for arch in _coop_enemy_spawn_queue:
 		counts[arch] = counts.get(arch, 0) + 1
 	var parts: Array[String] = []
-	for arch in ["grunt", "sniper", "demolition"]:
+	for arch in ["grunt", "grenadier", "flat_fragger", "sniper", "demolition"]:
 		if counts.has(arch):
-			var display_name = "bomber" if arch == "demolition" else arch
+			var display_name: String = arch
+			match arch:
+				"demolition":
+					display_name = "bomber"
+				"flat_fragger":
+					display_name = "fragger"
 			parts.append("%dx %s" % [counts[arch], display_name])
 	for arch in counts:
-		if not arch in ["grunt", "sniper", "demolition"]:
+		if not arch in ["grunt", "grenadier", "flat_fragger", "sniper", "demolition"]:
 			parts.append("%dx %s" % [counts[arch], arch])
 	
 	var list_str := ", ".join(parts)
@@ -1526,23 +1540,36 @@ func _coop_enemy_archetype_queue(wave: int) -> Array[String]:
 func _pick_coop_enemy_archetype(wave: int, index: int) -> String:
 	if wave >= 8 and index == 0:
 		return "demolition"
+	if wave >= 6 and index % 6 == 0:
+		return "grenadier"
 	if wave >= 5 and index % 5 == 0:
 		return "sniper"
+	if wave >= 4 and index % 4 == 0:
+		return "flat_fragger"
 	if wave >= 7 and randf() < 0.22:
 		return "demolition"
+	if wave >= 5 and randf() < 0.18:
+		return "grenadier"
 	if wave >= 4 and randf() < 0.24:
 		return "sniper"
+	if wave >= 3 and randf() < 0.2:
+		return "flat_fragger"
 	return "grunt"
 
 
 func _coop_enemy_name(archetype: String, pid: int) -> String:
+	var slot := pid - BOT_ID_BASE + 1
 	match archetype:
 		"sniper":
-			return "SNIPER %02d" % (pid - BOT_ID_BASE + 1)
+			return "SNIPER %02d" % slot
 		"demolition":
-			return "BOMBER %02d" % (pid - BOT_ID_BASE + 1)
+			return "BOMBER %02d" % slot
+		"grenadier":
+			return "GRENADIER %02d" % slot
+		"flat_fragger":
+			return "FRAGGER %02d" % slot
 		_:
-			return "GRUNT %02d" % (pid - BOT_ID_BASE + 1)
+			return "GRUNT %02d" % slot
 
 
 func _update_ping_monitor(delta: float) -> void:
@@ -1801,7 +1828,7 @@ func _start_round_now() -> void:
 	_clear_ion_cannon_markers.rpc()
 	if multiplayer.is_server() and ROUND_MODIFIERS_SCRIPT.spawn_starting_pickup(current_round_modifier):
 		var kind: String = PICKUP_ITEM_SCRIPT.KINDS[randi() % PICKUP_ITEM_SCRIPT.KINDS.size()]
-		_spawn_pickup_item_with_fx.rpc(kind, _random_pickup_spawn_pos())
+		_spawn_pickup_on_server(kind, _random_pickup_spawn_pos())
 	_show_round_modifier_on_screens.rpc()
 	if multiplayer.is_server() and ROUND_MODIFIERS_SCRIPT.lava_immediate(current_round_modifier):
 		_trigger_lava_leak(LAVA_LEAK_SPREAD_SECONDS)
@@ -2326,14 +2353,14 @@ func _update_pickup_spawner(delta: float) -> void:
 		return
 	_pickup_spawn_timer = (PICKUP_SPAWN_MEAN + randf_range(-PICKUP_SPAWN_JITTER, PICKUP_SPAWN_JITTER)) / maxf(get_pickup_spawn_mult(), 0.1)
 	var kind: String = PICKUP_ITEM_SCRIPT.KINDS[randi() % PICKUP_ITEM_SCRIPT.KINDS.size()]
-	_spawn_pickup_item_with_fx.rpc(kind, _random_pickup_spawn_pos())
+	_spawn_pickup_on_server(kind, _random_pickup_spawn_pos())
 
 func dev_spawn_pickup(kind: String = "") -> void:
 	if not multiplayer.is_server():
 		return
 	if kind.is_empty() or kind not in PICKUP_ITEM_SCRIPT.KINDS:
 		kind = PICKUP_ITEM_SCRIPT.KINDS[randi() % PICKUP_ITEM_SCRIPT.KINDS.size()]
-	_spawn_pickup_item_with_fx.rpc(kind, _dev_pickup_spawn_pos())
+	_spawn_pickup_on_server(kind, _dev_pickup_spawn_pos())
 
 func flash_air_strike_impact(world_pos: Vector3, intensity: float = 1.0) -> void:
 	if _splitscreen and _splitscreen.is_enabled() and _splitscreen.has_method("flash_impact_all"):
@@ -2421,17 +2448,30 @@ func _player_look_aim_point(player: Node) -> Vector3:
 func _random_pickup_spawn_pos() -> Vector3:
 	return _random_arena_xz() + Vector3.UP * PICKUP_SPAWN_HEIGHT
 
-@rpc("authority", "call_local", "reliable")
-func _spawn_pickup_item_with_fx(kind: String, world_pos: Vector3) -> void:
-	if _pickups_root == null:
+func _spawn_pickup_on_server(kind: String, world_pos: Vector3) -> void:
+	if not multiplayer.is_server():
 		return
 	_pickup_spawn_serial += 1
-	var pickup_id := _pickup_spawn_serial
+	_spawn_pickup_item_with_fx.rpc(kind, world_pos, _pickup_spawn_serial)
+
+
+@rpc("authority", "call_local", "reliable")
+func _spawn_pickup_item_with_fx(kind: String, world_pos: Vector3, pickup_id: int) -> void:
+	if _pickups_root == null:
+		return
 	SFX.pickup_drop(world_pos)
 	var pickup: Node3D = PICKUP_ITEM_SCRIPT.new()
 	pickup.name = "Pickup_%d" % pickup_id
 	_pickups_root.add_child(pickup)
 	pickup.setup(kind, world_pos, pickup_id)
+
+
+func _pickup_collected_by_player(pickup_id: int, player_id: int, kind: String) -> void:
+	if not multiplayer.is_server():
+		return
+	_despawn_pickup.rpc(pickup_id)
+	show_pickup_collected_for(player_id, kind)
+
 
 @rpc("authority", "call_local", "reliable")
 func _despawn_pickup(pickup_id: int) -> void:
@@ -2443,7 +2483,7 @@ func _despawn_pickup(pickup_id: int) -> void:
 
 @rpc("authority", "call_local", "reliable")
 func _spawn_pickup_item(kind: String, world_pos: Vector3) -> void:
-	_spawn_pickup_item_with_fx(kind, world_pos)
+	_spawn_pickup_on_server(kind, world_pos)
 
 @rpc("authority", "call_local", "reliable")
 func _clear_pickups() -> void:
@@ -2605,6 +2645,10 @@ func report_kill(killer_id: int, victim_id: int) -> void:
 	if eliminated_players.has(victim_id):
 		return
 	eliminated_players[victim_id] = true
+	if not _is_bot_id(victim_id):
+		var victim_name := str(NetworkManager.players.get(victim_id, "Player"))
+		if not victim_name.is_empty():
+			_announce.rpc("%s died" % victim_name, 2.0)
 	if killer_id != 0 and killer_id != victim_id:
 		if _human_count() >= 3:
 			var killer_name := str(NetworkManager.players.get(killer_id, "Player"))
