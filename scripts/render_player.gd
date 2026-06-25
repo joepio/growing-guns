@@ -370,17 +370,7 @@ func layout_for_size(view_size: Vector2) -> void:
 
 	var revive_label: Label = _hud.get("revive_panel") as Label
 	if revive_label:
-		var revive_w := 200.0 * scale
-		var revive_h := 28.0 * scale
-		revive_label.anchor_left = 0.5
-		revive_label.anchor_right = 0.5
-		revive_label.anchor_top = 0.0
-		revive_label.anchor_bottom = 0.0
-		revive_label.offset_left = -revive_w * 0.5
-		revive_label.offset_right = revive_w * 0.5
-		revive_label.offset_top = y - revive_h - 10.0 * scale - fisheye_y_offset
-		revive_label.offset_bottom = revive_label.offset_top + revive_h
-		revive_label.set_meta("font_size", font_big)
+		revive_label.add_theme_font_size_override("font_size", font_big)
 
 	# Cards get their own scale so the row fills the view width — the HUD
 	# scale above caps at 1.0, which leaves big gaps in splitscreen halves
@@ -656,9 +646,16 @@ func _build_revive_panel() -> Label:
 	var label := _label(Color(0.72, 0.92, 1.0))
 	label.name = "ReviveLabel"
 	label.visible = false
+	label.z_index = 18
 	label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	label.set_anchors_and_offsets_preset(Control.PRESET_CENTER_BOTTOM)
+	label.offset_left = -180.0
+	label.offset_right = 180.0
+	label.offset_top = -118.0
+	label.offset_bottom = -78.0
+	label.add_theme_font_size_override("font_size", 24)
 	label.text = "REVIVING..."
 	return label
 
@@ -1200,15 +1197,12 @@ func _layout_revive_panel(_player: Node) -> void:
 	var label: Label = _hud.get("revive_panel") as Label
 	if label == null or game == null:
 		return
-	var channel := {}
-	if game.has_method("get_coop_revive_channel"):
-		channel = game.get_coop_revive_channel(player_id)
-	var show: bool = not channel.is_empty() and game.has_method("is_coop_mode") and game.is_coop_mode()
+	var show: bool = game.has_method("is_coop_reviving") and game.is_coop_reviving(player_id)
 	label.visible = show
 	if not show:
 		return
-	var font_size: int = int(label.get_meta("font_size", 22))
-	label.add_theme_font_size_override("font_size", font_size)
+	var font_size: int = int(label.get_meta("font_size", 24))
+	label.add_theme_font_size_override("font_size", maxi(16, font_size))
 	label.text = "REVIVING..."
 
 
