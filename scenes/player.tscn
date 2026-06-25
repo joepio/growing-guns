@@ -26,6 +26,8 @@ roughness = 0.3
 [sub_resource type="SphereMesh" id="SphereMesh_Blob"]
 radius = 0.42
 height = 0.84
+radial_segments = 8
+rings = 4
 
 [sub_resource type="StandardMaterial3D" id="Material_Blob"]
 albedo_color = Color(0.2, 0.84, 0.68, 1)
@@ -35,6 +37,8 @@ metallic = 0.0
 [sub_resource type="SphereMesh" id="SphereMesh_Eye"]
 radius = 0.055
 height = 0.11
+radial_segments = 6
+rings = 3
 
 [sub_resource type="StandardMaterial3D" id="Material_Eye"]
 albedo_color = Color(0.96, 0.98, 1, 1)
@@ -43,6 +47,8 @@ roughness = 0.7
 [sub_resource type="SphereMesh" id="SphereMesh_Pupil"]
 radius = 0.028
 height = 0.056
+radial_segments = 6
+rings = 3
 
 [sub_resource type="StandardMaterial3D" id="Material_Pupil"]
 albedo_color = Color(0.05, 0.06, 0.08, 1)
@@ -51,6 +57,8 @@ roughness = 0.25
 [sub_resource type="SphereMesh" id="SphereMesh_Face"]
 radius = 0.16
 height = 0.18
+radial_segments = 7
+rings = 3
 
 [sub_resource type="StandardMaterial3D" id="Material_Face"]
 albedo_color = Color(0.9, 0.97, 0.92, 1)

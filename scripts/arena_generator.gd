@@ -23,6 +23,8 @@ const TERRAIN_TILE_SIZE := 5.0
 
 signal regenerated(stats: Dictionary)
 
+var _surface_texture_cache: Dictionary = {}
+
 @export var seed: int = 0:
 	set(v): seed = v; if auto_regenerate: _queue_regen()
 @export var auto_regenerate: bool = true
@@ -186,6 +188,7 @@ static func make_lava_shader_material() -> ShaderMaterial:
 	mat.shader = LAVA_FLOW_SHADER
 	mat.set_shader_parameter("noise_texture", get_lava_noise_texture())
 	mat.set_shader_parameter("world_scale", 0.8)
+	mat.set_shader_parameter("pixel_world_size", 0.35)
 	return mat
 
 
@@ -194,6 +197,7 @@ var _mat_wall: StandardMaterial3D
 var _mat_building: StandardMaterial3D
 var _mat_dark: StandardMaterial3D
 var _mat_spawn: StandardMaterial3D
+var _mat_cloud: StandardMaterial3D
 
 # Each entry: [Vector2 center_xz, float radius]. Used for collision-free
 # placement (kept flat instead of full AABB — bounding circles are good
@@ -280,6 +284,7 @@ func regenerate() -> void:
 		_build_lava_pool()
 		_build_lava_floor_surface()
 		var lava_stats: Dictionary = _build_lava_island_layout(rng, arena_size * 0.5 - 3.0)
+		_build_sky_visuals(rng)
 		_emit_spawnpoints()
 		var lava_palette: Dictionary = current_palette()
 		last_stats = {
@@ -557,6 +562,7 @@ func regenerate() -> void:
 	_spawn_positions.append(Vector3(corner, 3.0, -corner))
 
 	_emit_spawnpoints()
+	_build_sky_visuals(rng)
 
 	var palette: Dictionary = current_palette()
 	last_stats = {
@@ -619,6 +625,7 @@ func _ensure_materials() -> void:
 	_mat_building = _make_mat(palette["building"], 0.68)
 	_mat_dark = _make_mat(palette["dark"], 0.78)
 	_mat_spawn = _make_emissive(COLOR_SPAWN, 1.5)
+	_mat_cloud = _make_cloud_mat(palette)
 
 
 func current_palette() -> Dictionary:
@@ -691,12 +698,64 @@ func _prune_lava_spawn_positions() -> void:
 
 func _make_mat(color: Color, roughness: float) -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
-	m.albedo_color = color.lightened(0.08)
+	m.albedo_color = Color.WHITE
+	m.albedo_texture = _make_low_poly_surface_texture(color)
+	m.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
 	m.roughness = 1.0
 	m.metallic = 0.0
 	m.diffuse_mode = BaseMaterial3D.DIFFUSE_TOON
 	m.specular_mode = BaseMaterial3D.SPECULAR_DISABLED
 	return m
+
+
+func _make_low_poly_surface_texture(base: Color) -> ImageTexture:
+	var key := "%d:%d:%d:%d" % [
+		roundi(base.r * 255.0),
+		roundi(base.g * 255.0),
+		roundi(base.b * 255.0),
+		absi(seed) % 4096,
+	]
+	if _surface_texture_cache.has(key):
+		return _surface_texture_cache[key]
+
+	var size := 64
+	var brick_w := 16
+	var brick_h := 8
+	var mortar := 1
+	var img := Image.create(size, size, false, Image.FORMAT_RGBA8)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = absi(hash(key))
+	var mortar_color := Color(
+		clampf(base.r - 0.18, 0.0, 1.0),
+		clampf(base.g - 0.18, 0.0, 1.0),
+		clampf(base.b - 0.18, 0.0, 1.0),
+		1.0
+	)
+	for y in range(size):
+		var row := y / brick_h
+		var offset := (brick_w / 2) if (row % 2 == 1) else 0
+		for x in range(size):
+			var bx := posmod(x + offset, brick_w)
+			var by := posmod(y, brick_h)
+			if bx < mortar or by < mortar:
+				img.set_pixel(x, y, mortar_color)
+				continue
+			var brick_id := int(row * 17 + ((x + offset) / brick_w))
+			var brick_rng := RandomNumberGenerator.new()
+			brick_rng.seed = absi(hash("%s:%d" % [key, brick_id]))
+			var brick_shade := brick_rng.randf_range(-0.10, 0.12)
+			var pixel_noise := rng.randf_range(-0.035, 0.035)
+			var edge_wear := -0.035 if bx <= mortar + 1 or by <= mortar + 1 else 0.0
+			var shade := brick_shade + pixel_noise + edge_wear
+			img.set_pixel(x, y, Color(
+				clampf(base.r + shade, 0.0, 1.0),
+				clampf(base.g + shade, 0.0, 1.0),
+				clampf(base.b + shade, 0.0, 1.0),
+				1.0
+			))
+	var tex := ImageTexture.create_from_image(img)
+	_surface_texture_cache[key] = tex
+	return tex
 
 
 func _make_emissive(color: Color, energy: float) -> StandardMaterial3D:
@@ -709,6 +768,19 @@ func _make_emissive(color: Color, energy: float) -> StandardMaterial3D:
 	m.emission_enabled = true
 	m.emission = color
 	m.emission_energy_multiplier = energy * 0.75
+	return m
+
+
+func _make_cloud_mat(palette: Dictionary) -> StandardMaterial3D:
+	var horizon: Color = palette["sky_horizon"]
+	var top: Color = palette["sky_top"]
+	var tint := horizon.lerp(top, 0.25).lightened(0.48)
+	var m := StandardMaterial3D.new()
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	m.albedo_color = Color(tint.r, tint.g, tint.b, 0.82)
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	m.diffuse_mode = BaseMaterial3D.DIFFUSE_TOON
+	m.specular_mode = BaseMaterial3D.SPECULAR_DISABLED
 	return m
 
 
@@ -1274,6 +1346,58 @@ func _build_floating_platform(pos: Vector3) -> void:
 		body.owner = spawn_root
 		for child in body.get_children():
 			child.owner = spawn_root
+
+
+func _build_sky_visuals(rng: RandomNumberGenerator) -> void:
+	var root := Node3D.new()
+	root.name = "BoxClouds"
+	add_child(root)
+	var owner_root := _editor_owner()
+	if owner_root:
+		root.owner = owner_root
+
+	var cloud_count := 9
+	var cloud_ring_min := arena_size * 0.34
+	var cloud_ring_max := arena_size * 0.86
+	for i in cloud_count:
+		var angle := (TAU * float(i) / float(cloud_count)) + rng.randf_range(-0.22, 0.22)
+		var dist := rng.randf_range(cloud_ring_min, cloud_ring_max)
+		var center := Vector3(cos(angle) * dist, rng.randf_range(24.0, 39.0), sin(angle) * dist)
+		_build_box_cloud(root, center, rng, owner_root)
+
+
+func _build_box_cloud(root: Node3D, center: Vector3, rng: RandomNumberGenerator, owner_root: Node = null) -> void:
+	var cloud := Node3D.new()
+	cloud.name = "BoxCloud"
+	cloud.position = center
+	cloud.rotation.y = rng.randf_range(-PI, PI)
+	root.add_child(cloud)
+	if owner_root:
+		cloud.owner = owner_root
+
+	var block_count := rng.randi_range(5, 9)
+	for i in block_count:
+		var mi := MeshInstance3D.new()
+		mi.name = "CloudBlock"
+		var mesh := BoxMesh.new()
+		mesh.size = Vector3(
+			rng.randf_range(4.0, 9.0),
+			rng.randf_range(1.4, 3.4),
+			rng.randf_range(2.8, 7.0)
+		)
+		mi.mesh = mesh
+		mi.material_override = _mat_cloud
+		mi.extra_cull_margin = 96.0
+		mi.ignore_occlusion_culling = true
+		mi.position = Vector3(
+			rng.randf_range(-8.0, 8.0),
+			rng.randf_range(-1.2, 1.2),
+			rng.randf_range(-4.0, 4.0)
+		)
+		mi.rotation.y = rng.randf_range(-0.18, 0.18)
+		cloud.add_child(mi)
+		if owner_root:
+			mi.owner = owner_root
 
 
 func _emit_spawnpoints() -> void:

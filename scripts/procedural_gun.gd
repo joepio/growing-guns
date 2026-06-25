@@ -303,7 +303,7 @@ func eject_casing() -> void:
 	cm.top_radius = c_radius * 0.85
 	cm.bottom_radius = c_radius
 	cm.height = c_length
-	cm.radial_segments = 10
+	cm.radial_segments = 6
 	mi.mesh = cm
 	var mat := StandardMaterial3D.new()
 	mat.albedo_color = casing_color
@@ -671,7 +671,7 @@ func _rebuild() -> void:
 		dm.top_radius = drum_radius
 		dm.bottom_radius = drum_radius
 		dm.height = drum_thickness
-		dm.radial_segments = 24
+		dm.radial_segments = 8
 		drum.mesh = dm
 		drum.material_override = darker_metal
 		# Cylinder default axis = Y; rotate 90° around X so the axis lies along Z
@@ -925,7 +925,7 @@ func _add_cylinder(part_name: String, top_r: float, bottom_r: float, height: flo
 	cm.top_radius = top_r
 	cm.bottom_radius = bottom_r
 	cm.height = height
-	cm.radial_segments = 16
+	cm.radial_segments = 8
 	mi.mesh = cm
 	mi.material_override = mat
 	mi.position = pos
@@ -942,8 +942,8 @@ func _add_torus(part_name: String, outer_r: float, ring_r: float, pos: Vector3, 
 	var tm := TorusMesh.new()
 	tm.outer_radius = outer_r
 	tm.inner_radius = maxf(0.001, outer_r - ring_r)
-	tm.rings = 16
-	tm.ring_segments = 8
+	tm.rings = 8
+	tm.ring_segments = 6
 	mi.mesh = tm
 	mi.material_override = mat
 	mi.position = pos

@@ -8,6 +8,8 @@ radius = 0.2
 [sub_resource type="SphereMesh" id="SphereMesh_g"]
 radius = 0.2
 height = 0.4
+radial_segments = 8
+rings = 4
 
 [sub_resource type="StandardMaterial3D" id="Mat_g"]
 albedo_color = Color(0.2, 0.6, 0.2, 1)

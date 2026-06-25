@@ -46,7 +46,7 @@ const _HEAT_SHADER_CODE := "
 	shader_type spatial;
 	render_mode unshaded, cull_disabled, depth_draw_never;
 
-	uniform sampler2D screen_tex : hint_screen_texture, filter_linear_mipmap;
+	uniform sampler2D screen_tex : hint_screen_texture, filter_nearest;
 	uniform float distortion_strength = 0.05;
 	uniform float zoom_strength = 0.018;
 	uniform float opacity = 0.2;
@@ -57,7 +57,9 @@ const _HEAT_SHADER_CODE := "
 		vec2 offset = n.xy * distortion_strength * fresnel;
 		vec2 zoom = (SCREEN_UV - vec2(0.5)) * zoom_strength * fresnel;
 		vec2 uv = SCREEN_UV - zoom + offset;
+		uv = (floor(uv * vec2(180.0, 101.0)) + vec2(0.5)) / vec2(180.0, 101.0);
 		vec3 col = texture(screen_tex, uv).rgb;
+		col = floor(col * 18.0 + 0.5) / 18.0;
 		ALBEDO = col;
 		ALPHA = opacity * fresnel;
 	}
@@ -67,7 +69,7 @@ const _SHOCK_SHADER_CODE := "
 	shader_type spatial;
 	render_mode unshaded, cull_disabled, depth_draw_never, blend_mix;
 
-	uniform sampler2D screen_tex : hint_screen_texture, filter_linear_mipmap;
+	uniform sampler2D screen_tex : hint_screen_texture, filter_nearest;
 	uniform float distortion_strength = 0.04;
 	uniform float ring_thickness = 7.0;
 	uniform float opacity = 0.85;
@@ -76,7 +78,10 @@ const _SHOCK_SHADER_CODE := "
 		float fresnel = pow(1.0 - abs(dot(normalize(VIEW), NORMAL)), ring_thickness);
 		vec3 n = normalize((VIEW_MATRIX * vec4(NORMAL, 0.0)).xyz);
 		vec2 offset = n.xy * distortion_strength * fresnel;
-		vec3 col = texture(screen_tex, SCREEN_UV + offset).rgb;
+		vec2 uv = SCREEN_UV + offset;
+		uv = (floor(uv * vec2(180.0, 101.0)) + vec2(0.5)) / vec2(180.0, 101.0);
+		vec3 col = texture(screen_tex, uv).rgb;
+		col = floor(col * 18.0 + 0.5) / 18.0;
 		ALBEDO = col;
 		ALPHA = fresnel * opacity;
 	}
@@ -110,6 +115,8 @@ static func warmup_shaders(scene: Node) -> void:
 		var sphere := SphereMesh.new()
 		sphere.radius = 0.001
 		sphere.height = 0.002
+		sphere.radial_segments = 6
+		sphere.rings = 3
 		mi.mesh = sphere
 		mi.material_override = mat
 		# Park at scene origin so it's actually rendered (compiles the PSO),
@@ -353,6 +360,8 @@ func _do_cluster_pop_vfx(pos: Vector3, radius: float) -> void:
 	var core_mesh := SphereMesh.new()
 	core_mesh.radius = 0.45
 	core_mesh.height = 0.9
+	core_mesh.radial_segments = 8
+	core_mesh.rings = 4
 	core.mesh = core_mesh
 	var core_mat := StandardMaterial3D.new()
 	core_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -416,8 +425,8 @@ func _spawn_heat_distortion(scene: Node, pos: Vector3, radius: float, duration: 
 	var mesh := SphereMesh.new()
 	mesh.radius = 0.3
 	mesh.height = 0.6
-	mesh.radial_segments = 24
-	mesh.rings = 12
+	mesh.radial_segments = 8
+	mesh.rings = 4
 	shell.mesh = mesh
 	var mat := ShaderMaterial.new()
 	mat.shader = _get_heat_shader()
@@ -462,8 +471,8 @@ func _spawn_shockwave_ring(scene: Node, pos: Vector3, radius: float) -> void:
 	var mesh := SphereMesh.new()
 	mesh.radius = 0.25
 	mesh.height = 0.5
-	mesh.radial_segments = 32
-	mesh.rings = 16
+	mesh.radial_segments = 8
+	mesh.rings = 4
 	shell.mesh = mesh
 	var mat := ShaderMaterial.new()
 	mat.shader = _get_shock_shader()

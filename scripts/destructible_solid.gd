@@ -178,6 +178,7 @@ func apply_pending_carves() -> bool:
 	var burst_center := Vector3.ZERO
 	var burst_size := Vector3.ZERO
 	var exposure_center := Vector3.ZERO
+	var scene := _fx_scene()
 	for col: CollisionShape3D in to_remove_cols:
 		_hide_intact_instance(col)
 		var mesh_obj: Object = _chunk_meshes.get(col.get_instance_id()) as Object
@@ -186,11 +187,13 @@ func apply_pending_carves() -> bool:
 		burst_center += col.global_position
 		burst_size += col.get_meta("chunk_size") as Vector3
 		exposure_center += col.get_meta("chunk_center_local") as Vector3
+		if scene:
+			var cleanup_radius: float = float(col.get_meta("chunk_half_diag", 1.0)) + 0.35
+			Violence.clear_blood_splats_near(scene, col.global_position, cleanup_radius)
 		col.set_meta("destroyed", true)
 		col.disabled = true
 	var n := float(to_remove_cols.size())
 	DestructibleManager.note_chunk_removals(to_remove_cols.size())
-	var scene := _fx_scene()
 	var base_color := _mat.albedo_color if _mat != null else Color(0.45, 0.7, 0.72)
 	Violence.spawn_destruction_debris(
 		scene, burst_center / n, global_basis, burst_size / n, base_color,
