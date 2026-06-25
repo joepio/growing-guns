@@ -866,13 +866,19 @@ func _add_static_box(
 	return body
 
 
+func _add_floor_slab(center: Vector3, size: Vector3) -> void:
+	# Two 1m layers — top surface stays at y=0, bottom sits on lava at y=-2.
+	_add_destructible_region(center + Vector3(0, 0.5, 0), Vector3(size.x, 1.0, size.z), _mat_floor)
+	_add_destructible_region(center + Vector3(0, -0.5, 0), Vector3(size.x, 1.0, size.z), _mat_floor)
+
+
 func _build_floor(has_hole: bool = false, hole_pos: Vector2 = Vector2.ZERO, hole_size: float = 0.0) -> void:
 	if not has_hole or hole_size <= 0.0:
-		_add_destructible_region(Vector3(0, -0.5, 0), Vector3(arena_size, 1, arena_size), _mat_floor)
+		_add_floor_slab(Vector3(0, -1.0, 0), Vector3(arena_size, 2.0, arena_size))
 		return
 	# Floor with a square cutout — built as 4 strips (N / S / W / E) around
-	# the hole. Lava under the floor (y = -2) shows through the hole, and
-	# the kill area instakills any player who falls in.
+	# the hole. Lava under the floor (y = -2) shows through once both layers
+	# are gone, and the kill area instakills any player who falls in.
 	var half: float = arena_size * 0.5
 	var hx: float = hole_pos.x
 	var hz: float = hole_pos.y
@@ -881,22 +887,22 @@ func _build_floor(has_hole: bool = false, hole_pos: Vector2 = Vector2.ZERO, hole
 	var n_d: float = (hz - hh) - (-half)
 	if n_d > 0.1:
 		var n_z: float = (-half + (hz - hh)) * 0.5
-		_add_destructible_region(Vector3(0, -0.5, n_z), Vector3(arena_size, 1, n_d), _mat_floor)
+		_add_floor_slab(Vector3(0, -1.0, n_z), Vector3(arena_size, 2.0, n_d))
 	# South strip — from hole's far edge to +half.
 	var s_d: float = half - (hz + hh)
 	if s_d > 0.1:
 		var s_z: float = ((hz + hh) + half) * 0.5
-		_add_destructible_region(Vector3(0, -0.5, s_z), Vector3(arena_size, 1, s_d), _mat_floor)
+		_add_floor_slab(Vector3(0, -1.0, s_z), Vector3(arena_size, 2.0, s_d))
 	# West strip — only spans the hole's Z range, fills X up to the hole.
 	var w_w: float = (hx - hh) - (-half)
 	if w_w > 0.1:
 		var w_x: float = (-half + (hx - hh)) * 0.5
-		_add_destructible_region(Vector3(w_x, -0.5, hz), Vector3(w_w, 1, hole_size), _mat_floor)
+		_add_floor_slab(Vector3(w_x, -1.0, hz), Vector3(w_w, 2.0, hole_size))
 	# East strip — from hole's far edge to +half.
 	var e_w: float = half - (hx + hh)
 	if e_w > 0.1:
 		var e_x: float = ((hx + hh) + half) * 0.5
-		_add_destructible_region(Vector3(e_x, -0.5, hz), Vector3(e_w, 1, hole_size), _mat_floor)
+		_add_floor_slab(Vector3(e_x, -1.0, hz), Vector3(e_w, 2.0, hole_size))
 
 
 func _build_lava_pool() -> void:
