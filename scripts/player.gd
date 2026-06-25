@@ -1059,6 +1059,14 @@ func _phoenix_rise_amount() -> float:
 	return PHOENIX_ASCENT_HEIGHT * _phoenix_progress()
 
 
+func _phoenix_fade_alpha(progress: float) -> float:
+	# Coop down: flash peaks early, screen is clear by apex so the player can
+	# spectate. Card phoenix keeps rising white until the sky-drop fade-out.
+	if coop_downed:
+		return clampf(1.0 - progress, 0.0, 1.0)
+	return progress
+
+
 func _update_phoenix_ascent() -> void:
 	var progress := _phoenix_progress()
 	var rise := _phoenix_rise_amount()
@@ -1070,7 +1078,7 @@ func _update_phoenix_ascent() -> void:
 	var game := get_tree().current_scene
 	if is_multiplayer_authority():
 		if game and game.has_method("set_phoenix_fade"):
-			game.set_phoenix_fade(player_id, progress)
+			game.set_phoenix_fade(player_id, _phoenix_fade_alpha(progress))
 		velocity = Vector3.ZERO
 		_last_sync_pos = global_position
 		_last_sync_yaw = rotation.y
@@ -1159,7 +1167,7 @@ func _hold_coop_phoenix_at_apex() -> void:
 	if is_multiplayer_authority():
 		velocity = Vector3.ZERO
 		if game and game.has_method("set_phoenix_fade"):
-			game.set_phoenix_fade(player_id, 1.0)
+			game.set_phoenix_fade(player_id, 0.0)
 		_last_sync_pos = global_position
 		_last_sync_yaw = rotation.y
 		_last_sync_pitch = look_pitch

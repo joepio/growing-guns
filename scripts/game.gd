@@ -3648,9 +3648,20 @@ func _build_custom_cursor() -> void:
 func _update_custom_cursor() -> void:
 	if _custom_cursor != null:
 		_custom_cursor.visible = false
-	if _retro_material == null:
+	if _retro_material == null or not _is_retro_enabled():
+		if _retro_material:
+			_retro_material.set_shader_parameter("cursor_visible", 0.0)
 		return
-	_retro_material.set_shader_parameter("cursor_visible", 0.0)
+	# In-shader cursor: drawn with fisheye so it aligns with warped UI. Godot
+	# still tracks mouse in undistorted space for clicks; only the visual moves.
+	var show: bool = Input.mouse_mode != Input.MOUSE_MODE_CAPTURED
+	_retro_material.set_shader_parameter("cursor_visible", 1.0 if show else 0.0)
+	if show:
+		var vp := get_viewport()
+		var size: Vector2 = vp.get_visible_rect().size
+		if size.x > 0.0 and size.y > 0.0:
+			var mp := vp.get_mouse_position()
+			_retro_material.set_shader_parameter("mouse_uv", Vector2(mp.x / size.x, mp.y / size.y))
 
 func _build_retro_filter() -> void:
 	var built := RetroFilter.build(self)
@@ -4322,7 +4333,8 @@ func _sync_mouse_mode() -> void:
 	var modal_open := _is_cursor_modal_open()
 	var desired := Input.MOUSE_MODE_CAPTURED
 	if modal_open:
-		desired = Input.MOUSE_MODE_VISIBLE
+		# Hide the OS cursor when retro draws its own warped pointer in-shader.
+		desired = Input.MOUSE_MODE_HIDDEN if _is_retro_enabled() else Input.MOUSE_MODE_VISIBLE
 	if Input.mouse_mode != desired:
 		Input.mouse_mode = desired
 
