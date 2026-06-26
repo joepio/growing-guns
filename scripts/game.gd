@@ -673,7 +673,14 @@ func _on_join_timeout() -> void:
 	NetworkManager.leave_game()
 	get_tree().change_scene_to_file("res://scenes/game.tscn")
 
+
+func _trace_game_process(t0: int) -> void:
+	if Trace.enabled and t0 > 0:
+		Trace.prof("game", Time.get_ticks_usec() - t0)
+
+
 func _process(delta: float) -> void:
+	var _pt := Time.get_ticks_usec() if Trace.enabled else 0
 	_update_explosion_sidechain(delta)
 	_update_phoenix_fade(delta)
 	_sync_mouse_mode()
@@ -708,8 +715,10 @@ func _process(delta: float) -> void:
 			_sync_mouse_mode()
 		else:
 			_toggle_pause_menu()
+		_trace_game_process(_pt)
 		return
 	_update_render_player_layouts()
+	_trace_game_process(_pt)
 
 	# Tab is handled in _input — Godot's GUI focus navigation eats the Tab key
 	# before _process polling can see it, so we intercept it earlier.

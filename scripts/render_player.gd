@@ -50,6 +50,7 @@ func setup(game_node: Node, id: int, device: int = -1) -> void:
 
 
 func _process(_delta: float) -> void:
+	var _pt := Time.get_ticks_usec() if Trace.enabled else 0
 	var player := _player()
 	if player == null:
 		return
@@ -61,6 +62,8 @@ func _process(_delta: float) -> void:
 	if _flare_overlay and viewport:
 		_flare_overlay.camera = camera
 	_update_hud(player)
+	if Trace.enabled:
+		Trace.prof("render_pl", Time.get_ticks_usec() - _pt)
 
 
 func handle_input(event: InputEvent) -> bool:

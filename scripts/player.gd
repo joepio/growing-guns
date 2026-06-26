@@ -2561,6 +2561,7 @@ func _spawn_third_person_casing(w: Weapon) -> void:
 	_third_person_casing_count += 1
 	BenchFlags.inc("casings_spawned")
 	var rb := RigidBody3D.new()
+	rb.add_to_group("brass_casings")
 	rb.mass = 0.018
 	rb.collision_layer = 0
 	rb.collision_mask = 1
@@ -4369,18 +4370,22 @@ func _update_body_scale() -> void:
 # -------------------- BOT AI --------------------
 
 func _bot_physics(delta: float) -> void:
+	var _pt := Time.get_ticks_usec() if Trace.enabled else 0
 	if health <= 0 or ghost_mode:
 		velocity = Vector3.ZERO
 		_bot_target = null
 		_bot_shoot_cooldown = 999.0
+		_trace_bot_phys(_pt)
 		return
 	if launching:
 		move_and_slide()
 		if is_on_floor() and launching:
 			_sync_launching.rpc(false)
+		_trace_bot_phys(_pt)
 		return
 	if frozen:
 		velocity = Vector3.ZERO
+		_trace_bot_phys(_pt)
 		return
 
 	# Passive AI mode: do absolutely nothing.
@@ -4393,6 +4398,7 @@ func _bot_physics(delta: float) -> void:
 		velocity.x = move_toward(velocity.x, 0.0, BOT_MOVE_SPEED * 3.0 * delta)
 		velocity.z = move_toward(velocity.z, 0.0, BOT_MOVE_SPEED * 3.0 * delta)
 		move_and_slide()
+		_trace_bot_phys(_pt)
 		return
 
 	_bot_shoot_cooldown = maxf(0.0, _bot_shoot_cooldown - delta)
@@ -4572,6 +4578,14 @@ func _bot_physics(delta: float) -> void:
 				# Bots auto-fire at the weapon's natural cadence, but now obey
 				# the same magazine and reload gates as humans.
 				_bot_shoot_cooldown = weapon.get_fire_interval()
+
+	_trace_bot_phys(_pt)
+
+
+func _trace_bot_phys(t0: int) -> void:
+	if Trace.enabled and t0 > 0:
+		Trace.prof("bot_ai", Time.get_ticks_usec() - t0)
+
 
 func _bot_get_arena() -> Node:
 	var game := get_tree().current_scene

@@ -242,6 +242,7 @@ func _exit_tree() -> void:
 	_live_casings.clear()
 
 func _process(delta: float) -> void:
+	var _pt := Time.get_ticks_usec() if Trace.enabled else 0
 	# Minigun barrel rotation
 	if _barrel_group and is_minigun:
 		_barrel_group.rotate_z(_barrel_spin * delta)
@@ -263,6 +264,8 @@ func _process(delta: float) -> void:
 		var z: float = _bolt_rest_z + _bolt_back
 		for b in _bolts:
 			b.position = Vector3(b.position.x, b.position.y, z)
+	if Trace.enabled:
+		Trace.prof("gun", Time.get_ticks_usec() - _pt)
 
 # Spawn a brass casing as a free-falling RigidBody3D in world space. Pops
 # out the top-right of the receiver with a randomised impulse and tumble.
@@ -283,6 +286,7 @@ func eject_casing() -> void:
 	var c_length: float = receiver_size.z * casing_length_frac
 
 	var rb := RigidBody3D.new()
+	rb.add_to_group("brass_casings")
 	rb.mass = 0.02
 	# Layer 0 so casings don't block anything; mask 1 so they collide with
 	# world geometry only (not players, not other casings, not bullets).
@@ -377,7 +381,8 @@ func eject_casing() -> void:
 	# over max_casings, retire the oldest still-alive one. A handful of casings
 	# lingers; a sustained firefight can't pile up past the cap.
 	_live_casings.append(rb)
-	while _live_casings.size() > maxi(1, max_casings):
+	var casing_cap := maxi(1, int(round(float(max_casings) * PerfGovernor.quality_scale))) if PerfGovernor else max_casings
+	while _live_casings.size() > casing_cap:
 		var oldest: RigidBody3D = _live_casings.pop_front()
 		if is_instance_valid(oldest):
 			oldest.queue_free()

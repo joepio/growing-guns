@@ -149,6 +149,7 @@ func _ready() -> void:
 	set_process(true)
 
 func _process(delta: float) -> void:
+	var _pt := Time.get_ticks_usec() if Trace.enabled else 0
 	# Slide the HDR window back down toward the ambient floor at a fixed
 	# release rate. New plays push the max back up via _hdr_blocks().
 	if _hdr_max_spl > HDR_FLOOR_DB:
@@ -167,6 +168,8 @@ func _process(delta: float) -> void:
 		# keeping the peak at big_tail_max_db unchanged.
 		var curve: float = sqrt(_big_tail_intensity)
 		AudioServer.set_bus_volume_db(idx, lerpf(big_tail_min_db, big_tail_max_db, curve))
+	if Trace.enabled:
+		Trace.prof("sfx", Time.get_ticks_usec() - _pt)
 
 # HDR gate: returns true if the sound should be CULLED entirely because it
 # falls below the sliding window. Otherwise lifts max_spl and lets it play.
