@@ -34,7 +34,7 @@ var _spawn_candidate_count: int = 0
 
 var _telegraph_warmup: float = 0.9
 var _telegraph_hold: float = 0.5
-var _telegraph_cooldown: float = 0.55
+var _telegraph_cooldown: float = PLAYER_SCRIPT.HELL_EMERGE_GLOW
 var _emerge_depth: float = PLAYER_SCRIPT.HELL_EMERGE_DEPTH
 var _emerge_duration: float = PLAYER_SCRIPT.HELL_EMERGE_DURATION
 var _star_radius: float = 1.05
@@ -459,7 +459,7 @@ func _build_ui() -> void:
 		func(v: float) -> void: _telegraph_warmup = v)
 	_add_slider(vb, "Hold until spawn (s)", 0.5, 4.0, _telegraph_hold, 0.05,
 		func(v: float) -> void: _telegraph_hold = v)
-	_add_slider(vb, "Cooldown (s)", 0.15, 2.0, _telegraph_cooldown, 0.05,
+	_add_slider(vb, "Glow fade (s)", 0.15, 2.0, _telegraph_cooldown, 0.05,
 		func(v: float) -> void: _telegraph_cooldown = v)
 	_add_slider(vb, "Star radius (m)", 0.5, 2.0, _star_radius, 0.05,
 		func(v: float) -> void: _star_radius = v)
