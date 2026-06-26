@@ -40,6 +40,7 @@ var _sample_cache: Dictionary = {}
 # the per-physics-tick cost of explosions in the perf bench (~1 ms per blast,
 # 10+ blasts/sec).
 var _wav_cache: Dictionary = {}
+var _warmup_specials_started: bool = false
 var _hurt_sounds: Array[AudioStreamWAV] = []
 var _death_sounds: Array[AudioStreamWAV] = []
 var _gun_sounds: Array[AudioStreamWAV] = []
@@ -552,6 +553,13 @@ func warmup_async(weapons: Array, radii: Array) -> void:
 # buffer). One synth per frame, like warmup_async, so boot doesn't spike. The
 # keys/buckets mirror the live call sites — keep them in sync if those change.
 func warmup_specials() -> void:
+	if _warmup_specials_started:
+		return
+	_warmup_specials_started = true
+	_warmup_specials_async()
+
+
+func _warmup_specials_async() -> void:
 	# Ion cannon. Charge bucket from IonCannon.CHARGE_SECONDS (3.8); detonation
 	# from BLAST_RADIUS (38) — its burst zap plus the bucket-24 explosion boom
 	# it layers on top (radius 38 clamps to the bang/rumble bucket 24, which the
@@ -566,6 +574,18 @@ func warmup_specials() -> void:
 		await get_tree().process_frame
 		_cached_wav("explosion_rumble:24:%d" % v, Callable(self, "_synth_explosion_rumble").bind(24.0, v))
 		await get_tree().process_frame
+	# Standard grenade blast radius (6 m) — first RMB throw otherwise synths here.
+	for v in EXPLOSION_VARIANTS:
+		_cached_wav("explosion_bang:6:%d" % v, Callable(self, "_synth_explosion").bind(6.0, v))
+		await get_tree().process_frame
+		_cached_wav("explosion_rumble:6:%d" % v, Callable(self, "_synth_explosion_rumble").bind(6.0, v))
+		await get_tree().process_frame
+	# Grenade launcher foomp + round-start rocket descent whistle.
+	for v in 5:
+		_cached_samples("grenade_launch:%d" % v, Callable(self, "_synth_grenade_launch").bind(v))
+		await get_tree().process_frame
+	_cached_samples("rocket_descent", Callable(self, "_synth_rocket_descent"))
+	await get_tree().process_frame
 	# Air strike inbound whistle. Bucket from AirStrike.ROCKET_TRAVEL_SECONDS
 	# (2.3 → 2.25); warm both the near and distant timbre.
 	for distant in [0, 1]:

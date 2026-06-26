@@ -12,6 +12,7 @@ const ROUND_MODIFIERS_SCRIPT := preload("res://scripts/round_modifiers.gd")
 const AIR_STRIKE_SCRIPT := preload("res://scripts/air_strike.gd")
 const ION_CANNON_SCRIPT := preload("res://scripts/ion_cannon.gd")
 const PLAYER_SCRIPT := preload("res://scripts/player.gd")
+const GRENADE_SCRIPT := preload("res://scripts/grenade.gd")
 
 const PICKUP_SPAWN_MEAN := 20.0
 const PICKUP_SPAWN_JITTER := 7.0
@@ -413,9 +414,12 @@ func _ready() -> void:
 	NetworkManager.local_player_name = MenuHelpers.player_name
 
 	# Voronoi gib bakes are expensive — do them once at boot, not on first kill.
+	# Also start synthesizing one-off effect sounds while the menu is still up
+	# if the player came from start_screen (idempotent — safe to call again).
 	Trace.span_begin("prewarm_disintegration_cache")
 	Violence.prewarm_disintegration_cache()
 	Trace.span_end("prewarm_disintegration_cache")
+	_boot_warmup_assets()
 
 	# Pre-synthesize the heavy one-off effect sounds (ion cannon charge/burst,
 	# air strike, lava, casings, mine) once at boot so the first cast doesn't
@@ -3886,14 +3890,24 @@ func _warmup_effect_shaders_and_hide_overlay() -> void:
 	if not _effect_shaders_warmed and has_node("Arena"):
 		_effect_shaders_warmed = true
 		var arena := $Arena
-		preload("res://scripts/grenade.gd").warmup_shaders(arena)
+		GRENADE_SCRIPT.warmup_shaders(arena)
+		GRENADE_SCRIPT.warmup_scene(arena)
 		Violence.warmup_blast_materials(arena)
 		ION_CANNON_SCRIPT.warmup_shaders(arena)
-		preload("res://scripts/player.gd").warmup_phoenix_shaders(arena)
+		PLAYER_SCRIPT.warmup_phoenix_shaders(arena)
 		Violence.warmup_gib_render(arena)
+		_update_render_player_layouts()
 		await get_tree().process_frame
 		RenderingServer.force_draw()
 	_hide_loading_overlay()
+
+
+func _boot_warmup_assets() -> void:
+	# Touch grenade scene + shader bytecode early. GPU PSO compile still runs
+	# in _warmup_effect_shaders_and_hide_overlay once the arena is in-tree.
+	if has_node("Arena"):
+		GRENADE_SCRIPT.warmup_shaders($Arena)
+		GRENADE_SCRIPT.warmup_scene(self)
 
 
 func set_phoenix_fade(player_id: int, alpha: float) -> void:

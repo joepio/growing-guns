@@ -2,6 +2,7 @@ extends RigidBody3D
 
 const Blast = preload("res://scripts/blast.gd")
 const DestructibleManager = preload("res://scripts/destructible_manager.gd")
+const GRENADE_SCENE := preload("res://scenes/grenade.tscn")
 
 const FUSE := 4.0                # fallback if the grenade somehow never touches anything
 const ARM_DELAY := 0.04          # ignore contacts for this long after spawn (just enough to clear the muzzle)
@@ -42,6 +43,7 @@ const DASH_BOMB_MIN_DAMAGE := 10.0
 # pre-warmed via warmup_shaders().
 static var _heat_shader_cached: Shader = null
 static var _shock_shader_cached: Shader = null
+static var _scene_warmed: bool = false
 
 const _HEAT_SHADER_CODE := "
 	shader_type spatial;
@@ -131,6 +133,29 @@ static func warmup_shaders(scene: Node) -> void:
 		mi.add_child(t)
 		t.start()
 		t.timeout.connect(mi.queue_free)
+
+
+# Instantiate once during boot so the first thrown grenade doesn't pay scene
+# parse + RigidBody3D setup on the launch frame.
+static func warmup_scene(scene: Node) -> void:
+	if _scene_warmed or scene == null:
+		return
+	_scene_warmed = true
+	var g := GRENADE_SCENE.instantiate()
+	g.name = "GrenadeWarmup"
+	scene.add_child(g)
+	g.global_position = Vector3(0.0, -512.0, 0.0)
+	g.visible = false
+	g.process_mode = Node.PROCESS_MODE_DISABLED
+	if g is RigidBody3D:
+		(g as RigidBody3D).freeze = true
+	var t := Timer.new()
+	t.wait_time = 0.35
+	t.one_shot = true
+	t.process_mode = Node.PROCESS_MODE_ALWAYS
+	g.add_child(t)
+	t.start()
+	t.timeout.connect(g.queue_free)
 
 
 @export var shooter_id: int = 1

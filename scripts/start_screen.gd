@@ -6,6 +6,7 @@ const GAME_SCENE := "res://scenes/game.tscn"
 const GAME_MODE_VERSUS := "versus"
 const GAME_MODE_COOP := "coop"
 const PLAYER_SCENE := preload("res://scenes/player.tscn")
+const GRENADE_SCRIPT := preload("res://scripts/grenade.gd")
 
 @onready var _camera: Camera3D = $Camera3D
 @onready var _arena: Node3D = $Arena
@@ -79,6 +80,17 @@ func _ready() -> void:
 	_show_network_notice()
 	_versus_button.grab_focus()
 	_position_camera(0.0)
+	call_deferred("_warmup_menu_assets")
+
+
+func _warmup_menu_assets() -> void:
+	# Spread first-match hitches across menu idle time instead of the first
+	# grenade throw / rocket spawn / gib disintegration.
+	Violence.prewarm_disintegration_cache()
+	SFX.warmup_specials()
+	if _arena and is_instance_valid(_arena):
+		GRENADE_SCRIPT.warmup_shaders(_arena)
+		GRENADE_SCRIPT.warmup_scene(_arena)
 
 
 func _process(delta: float) -> void:

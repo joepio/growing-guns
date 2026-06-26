@@ -2,6 +2,7 @@ extends CharacterBody3D
 
 const Violence = preload("res://scripts/violence.gd")
 const Blast = preload("res://scripts/blast.gd")
+const GRENADE_SCENE := preload("res://scenes/grenade.tscn")
 
 # All ragdoll, death, impact, and gore logic lives in scripts/violence.gd.
 # The @rpc methods + a few thin wrappers stay here because they need to live
@@ -1587,7 +1588,7 @@ func _spawn_dash_bomb(pos: Vector3, shooter: int) -> void:
 	var parent := get_tree().current_scene
 	if parent == null or parent.get_node_or_null(uname):
 		return
-	var scene: PackedScene = load("res://scenes/grenade.tscn")
+	var scene: PackedScene = GRENADE_SCENE
 	var g := scene.instantiate()
 	g.name = uname
 	g.shooter_id = shooter
@@ -3163,7 +3164,7 @@ func _spawn_predicted_grenade(origin: Vector3, dir: Vector3, shooter: int, uname
 	_spawn_grenade_visual(origin, dir, shooter, uname, true, cluster)
 
 func _spawn_grenade_visual(origin: Vector3, dir: Vector3, shooter: int, uname: String, predicted: bool, cluster: bool = false) -> void:
-	var scene: PackedScene = load("res://scenes/grenade.tscn")
+	var scene: PackedScene = GRENADE_SCENE
 	var g := scene.instantiate()
 	g.name = uname
 	g.shooter_id = shooter
@@ -3211,7 +3212,7 @@ func _spawn_mine(pos: Vector3, shooter: int, uname: String) -> void:
 	var sender := multiplayer.get_remote_sender_id()
 	if sender != 0 and sender != 1:
 		return
-	var scene: PackedScene = load("res://scenes/grenade.tscn")
+	var scene: PackedScene = GRENADE_SCENE
 	var g := scene.instantiate()
 	g.name = uname
 	g.shooter_id = shooter
