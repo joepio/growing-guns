@@ -72,7 +72,11 @@ static var _debris_chip_fifo: Array[MeshInstance3D] = []
 static func _enroll_debris_chip(chip: MeshInstance3D) -> void:
 	_debris_chip_fifo.append(chip)
 	chip.tree_exiting.connect(func() -> void: _debris_chip_fifo.erase(chip))
-	while _debris_chip_fifo.size() > MAX_ACTIVE_DEBRIS_CHIPS:
+	var cap := maxi(32, int(round(
+		float(MAX_ACTIVE_DEBRIS_CHIPS) * vfx_quality_scale() * vfx_quality_scale()
+		* lerpf(0.65, 1.0, 1.0 - _debris_load_t())
+	)))
+	while _debris_chip_fifo.size() > cap:
 		var old: MeshInstance3D = _debris_chip_fifo.pop_front()
 		if is_instance_valid(old):
 			old.queue_free()
@@ -773,6 +777,7 @@ static func _spawn_env_blood_stain(
 	blob.material_override = mat
 	blob.add_to_group("blood_splats")
 	scene.add_child(blob)
+	_enroll_blood_splat(blob)
 	blob.global_position = pos + up * 0.015 + tangent * randf_range(-0.08, 0.08) * size_mult \
 		+ up.cross(tangent).normalized() * randf_range(-0.08, 0.08) * size_mult
 	blob.look_at(blob.global_position + up, tangent)
@@ -797,6 +802,23 @@ static func clear_blood_splats_near(scene_root: Node, pos: Vector3, radius: floa
 
 
 const PLAYER_BLOOD_WOUND_MAX := 32
+const MAX_BLOOD_SPLATS := 140
+static var _blood_splat_fifo: Array[Node] = []
+
+
+static func _max_blood_splats() -> int:
+	return clampi(int(round(float(MAX_BLOOD_SPLATS) * vfx_quality_scale())), 36, MAX_BLOOD_SPLATS)
+
+
+static func _enroll_blood_splat(blob: Node) -> void:
+	if blob == null:
+		return
+	_blood_splat_fifo.append(blob)
+	blob.tree_exiting.connect(func() -> void: _blood_splat_fifo.erase(blob))
+	while _blood_splat_fifo.size() > _max_blood_splats():
+		var old: Node = _blood_splat_fifo.pop_front()
+		if is_instance_valid(old):
+			old.queue_free()
 
 
 static func _spawn_player_blood_blob(
@@ -1362,7 +1384,7 @@ static func _claim_cheap_blast(pos: Vector3) -> bool:
 	_begin_blast_frame()
 	if _blast_cluster_blocked(pos):
 		return false
-	if _cheap_blasts_this_frame >= MAX_CHEAP_BLASTS_PER_FRAME:
+	if _cheap_blasts_this_frame >= maxi(2, int(round(MAX_CHEAP_BLASTS_PER_FRAME * vfx_quality_scale()))):
 		return false
 	_cheap_blasts_this_frame += 1
 	_blast_cluster_positions.append(pos)
@@ -1381,7 +1403,7 @@ static func blast_vfx_will_spawn(pos: Vector3) -> bool:
 		window_count = 0
 	if _full_blasts_this_frame < max_full and window_count < MAX_FULL_BLASTS_PER_WINDOW:
 		return true
-	return _cheap_blasts_this_frame < MAX_CHEAP_BLASTS_PER_FRAME
+	return _cheap_blasts_this_frame < maxi(2, int(round(MAX_CHEAP_BLASTS_PER_FRAME * vfx_quality_scale())))
 
 
 static func _claim_explosion_sfx() -> bool:
@@ -2886,6 +2908,7 @@ const MAX_DESTRUCT_DEBRIS_PER_FRAME_CHEAP := 140
 const MAX_DEBRIS_FLUSH_USEC := 2500
 const MAX_PREMIUM_DEBRIS_BURSTS_PER_FRAME := 10
 const MAX_DEBRIS_QUEUE_PREMIUM := 14
+const DEBRIS_JOB_MERGE_DIST_SQ := 16.0  # 4m — coalesce rapid carves on one surface
 static var _debris_frame_id: int = -1
 static var _debris_this_frame: int = 0
 static var _debris_burst_frame_id: int = -1
@@ -2893,6 +2916,7 @@ static var _premium_bursts_this_frame: int = 0
 static var _debris_premium_total: int = 0
 static var _debris_cheap_total: int = 0
 static var _debris_queue: Array[Dictionary] = []
+static var _debris_mat_template: StandardMaterial3D = null
 
 static func _build_impact_chip_mesh(variant: int) -> Mesh:
 	var rng := RandomNumberGenerator.new()
@@ -2952,6 +2976,27 @@ static func _get_impact_chip_mesh() -> Mesh:
 		for i in 5:
 			_impact_chip_meshes.append(_build_impact_chip_mesh(i))
 	return _impact_chip_meshes[randi() % _impact_chip_meshes.size()]
+
+
+static func _debris_chip_material(color: Color, alpha: float, roughness: float = 0.9) -> StandardMaterial3D:
+	if _debris_mat_template == null:
+		_debris_mat_template = StandardMaterial3D.new()
+		_debris_mat_template.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		_debris_mat_template.roughness = roughness
+	var mat: StandardMaterial3D = _debris_mat_template.duplicate() as StandardMaterial3D
+	mat.albedo_color = Color(color.r, color.g, color.b, alpha)
+	mat.roughness = roughness
+	return mat
+
+
+static func _debris_load_t() -> float:
+	return clampf(float(_debris_chip_fifo.size()) / float(MAX_ACTIVE_DEBRIS_CHIPS), 0.0, 1.0)
+
+
+static func _debris_spawn_scale() -> float:
+	var qs: float = vfx_quality_scale()
+	var load_t: float = _debris_load_t()
+	return clampf(qs * lerpf(1.0, 0.42, load_t), 0.35, 1.0)
 
 
 static func _surface_color_from_collider(collider: Node, fallback: Color) -> Color:
@@ -3215,6 +3260,17 @@ static func spawn_destruction_debris(
 		if tier == "cheap"
 		else _debris_chip_count_for_blast(blast_radius, chunks_removed)
 	)
+	chip_count = maxi(2, int(round(float(chip_count) * _debris_spawn_scale())))
+	if not _debris_queue.is_empty():
+		var last: Dictionary = _debris_queue[-1]
+		if str(last.get("tier", "")) == tier and last.get("scene") == scene:
+			var last_pos: Vector3 = last.get("global_pos") as Vector3
+			if last_pos.distance_squared_to(global_pos) <= DEBRIS_JOB_MERGE_DIST_SQ:
+				var cap := 8 if tier == "cheap" else 28
+				last["chip_count"] = mini(cap, int(last.get("chip_count", 0)) + chip_count)
+				last["chunks_removed"] = int(last.get("chunks_removed", 1)) + maxi(1, chunks_removed)
+				last["blast_radius"] = maxf(float(last.get("blast_radius", 0.0)), blast_radius)
+				return
 	if tier == "premium":
 		_sync_debris_frame_ids()
 		_premium_bursts_this_frame += 1
@@ -3280,15 +3336,21 @@ static func _pick_debris_tier(blast_radius: float, chunks_removed: int) -> Strin
 	if BenchFlags.active and BenchFlags.debris_premium_only:
 		return "premium"
 	_sync_debris_frame_ids()
-	if _debris_queue.size() >= MAX_DEBRIS_QUEUE_PREMIUM:
+	var load_t: float = _debris_load_t()
+	var qs: float = vfx_quality_scale()
+	if load_t >= 0.55 or qs <= 0.55:
 		return "cheap"
-	if _premium_bursts_this_frame >= MAX_PREMIUM_DEBRIS_BURSTS_PER_FRAME:
+	var queue_cap: int = maxi(3, int(round(float(MAX_DEBRIS_QUEUE_PREMIUM) * qs)))
+	if _debris_queue.size() >= queue_cap:
+		return "cheap"
+	var burst_cap: int = maxi(2, int(round(float(MAX_PREMIUM_DEBRIS_BURSTS_PER_FRAME) * qs)))
+	if _premium_bursts_this_frame >= burst_cap:
 		return "cheap"
 	# Tiny chip-off pops still get the full treatment when the pipe is quiet.
 	var sev: float = _debris_blast_severity(blast_radius, chunks_removed)
 	if sev < 0.22 and chunks_removed <= 2:
 		return "premium"
-	if sev >= 0.55 and _debris_queue.size() >= 6:
+	if sev >= 0.55 and _debris_queue.size() >= maxi(3, int(round(6.0 * qs))):
 		return "cheap"
 	return "premium"
 
@@ -3346,7 +3408,10 @@ static func _debris_launch_horizontal(away: Vector3, blast_heavy: float) -> Vect
 
 
 static func _spawn_debris_job(job: Dictionary, max_chips: int) -> int:
-	if str(job.get("tier", "premium")) == "cheap":
+	var tier: String = str(job.get("tier", "premium"))
+	if tier == "premium" and _debris_load_t() >= 0.45:
+		tier = "cheap"
+	if tier == "cheap":
 		return _spawn_debris_job_cheap(job, max_chips)
 	return _spawn_debris_job_premium(job, max_chips)
 
@@ -3399,17 +3464,17 @@ static func _spawn_debris_job_premium(job: Dictionary, max_chips: int) -> int:
 		chip.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		_enroll_debris_chip(chip)
 		chip.mesh = _get_impact_chip_mesh()
-		var mat := StandardMaterial3D.new()
-		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		var tint := randf_range(0.82, 1.22)
 		var start_alpha := 1.0
-		mat.albedo_color = Color(
-			clampf(color.r * tint, 0.0, 1.0),
-			clampf(color.g * tint, 0.0, 1.0),
-			clampf(color.b * tint, 0.0, 1.0),
+		var mat := _debris_chip_material(
+			Color(
+				clampf(color.r * tint, 0.0, 1.0),
+				clampf(color.g * tint, 0.0, 1.0),
+				clampf(color.b * tint, 0.0, 1.0),
+				start_alpha,
+			),
 			start_alpha,
 		)
-		mat.roughness = 0.9
 		chip.material_override = mat
 		var target_longest_axis_m := _debris_fragment_longest_axis(blast_radius, block_size)
 		var proportions := Vector3(
@@ -3508,16 +3573,17 @@ static func _spawn_debris_job_cheap(job: Dictionary, max_chips: int) -> int:
 		chip.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		_enroll_debris_chip(chip)
 		chip.mesh = _get_impact_chip_mesh()
-		var mat := StandardMaterial3D.new()
-		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		var tint := randf_range(0.88, 1.12)
-		mat.albedo_color = Color(
-			clampf(color.r * tint, 0.0, 1.0),
-			clampf(color.g * tint, 0.0, 1.0),
-			clampf(color.b * tint, 0.0, 1.0),
+		var mat := _debris_chip_material(
+			Color(
+				clampf(color.r * tint, 0.0, 1.0),
+				clampf(color.g * tint, 0.0, 1.0),
+				clampf(color.b * tint, 0.0, 1.0),
+				1.0,
+			),
 			1.0,
+			0.92,
 		)
-		mat.roughness = 0.92
 		chip.material_override = mat
 		var target_longest_axis_m := lerpf(0.1, 0.38, blast_sev) * randf_range(0.85, 1.15)
 		var proportions := Vector3(
@@ -3856,6 +3922,9 @@ static func spawn_overkill_gore(scene: Node, pos: Vector3, dir: Vector3, severit
 static func spawn_overkill_blood_splats(scene: Node, pos: Vector3, dir: Vector3, severity: float) -> void:
 	if scene == null:
 		return
+	var qs := vfx_quality_scale()
+	if qs <= 0.0:
+		return
 	var space: PhysicsDirectSpaceState3D = scene.get_world_3d().direct_space_state
 	if space == null:
 		return
@@ -3869,6 +3938,7 @@ static func spawn_overkill_blood_splats(scene: Node, pos: Vector3, dir: Vector3,
 		Vector3.FORWARD, Vector3.BACK,
 	]
 	var cardinal_passes := 1 if sev < 1.2 else (2 if sev < 1.9 else 3)
+	cardinal_passes = maxi(1, int(round(float(cardinal_passes) * qs)))
 	for pass_i in cardinal_passes:
 		var pass_strength := strength * lerpf(0.82, 1.0, float(pass_i) / maxf(float(cardinal_passes - 1), 1.0))
 		for axis in CARDINAL:
@@ -3888,7 +3958,7 @@ static func spawn_overkill_blood_splats(scene: Node, pos: Vector3, dir: Vector3,
 			var hit_strength := pass_strength * (1.28 if axis == Vector3.DOWN else 1.0)
 			_gib_spawn_blood_splat(scene, hit.position, hit.normal, dir_n, hit_strength)
 	# Floor pool — big ground stain under the burst.
-	var floor_count := clampi(int(round(2.0 + sev * sev * 5.0)), 2, 14)
+	var floor_count := clampi(int(round((2.0 + sev * sev * 5.0) * qs)), 1, 14)
 	for i in floor_count:
 		var offset := Vector3(
 			randf_range(-0.55, 0.55) * sev,
@@ -3908,7 +3978,7 @@ static func spawn_overkill_blood_splats(scene: Node, pos: Vector3, dir: Vector3,
 			dir_n,
 			strength * randf_range(1.05, 1.35),
 		)
-	var spray_count := clampi(int(round(4.0 + sev * sev * 9.0)), 4, 28)
+	var spray_count := clampi(int(round((4.0 + sev * sev * 9.0) * qs)), 2, 28)
 	for i in spray_count:
 		var scatter := (-dir_n * lerpf(0.45, 0.85, sev / 2.5)) + Vector3(
 			randf_range(-1.0, 1.0),

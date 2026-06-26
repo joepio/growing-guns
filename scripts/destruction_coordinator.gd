@@ -6,6 +6,7 @@ const DestructibleManager = preload("res://scripts/destructible_manager.gd")
 
 
 func _physics_process(_delta: float) -> void:
+	DestructibleManager.update_exposure_lod()
 	var t0 := Time.get_ticks_usec()
 	DestructibleManager.flush()
 	var t1 := Time.get_ticks_usec()
