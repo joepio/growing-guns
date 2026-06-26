@@ -2453,11 +2453,16 @@ static func spawn_enemy_incoming_telegraph(
 	pos: Vector3,
 	warmup_duration: float = 0.65,
 	star_radius: float = 1.05,
+	beam_height: float = -1.0,
 ) -> Node3D:
 	if scene == null or not is_instance_valid(scene):
 		return null
 	warmup_duration = clampf(warmup_duration, 0.2, 3.0)
 	star_radius = maxf(0.4, star_radius)
+	if beam_height <= 0.0:
+		beam_height = PENTAGRAM_BEAM_HEIGHT
+	beam_height = clampf(beam_height, 8.0, 52.0)
+	var line_scale := star_radius / 1.05
 
 	var ground := _ground_surface_at(scene, pos)
 
@@ -2477,39 +2482,40 @@ static func spawn_enemy_incoming_telegraph(
 	var decal_y := 0.1
 	_add_pentagram_decal(
 		pentagram,
-		_build_pentagram_circle_mesh(star_radius, 0.13, decal_y),
+		_build_pentagram_circle_mesh(star_radius, 0.13 * line_scale, decal_y),
 		star_mat,
 	)
 	_add_pentagram_decal(
 		pentagram,
-		_build_pentagram_star_mesh(star_radius, 0.18, decal_y + 0.008),
+		_build_pentagram_star_mesh(star_radius, 0.18 * line_scale, decal_y + 0.008),
 		star_mat,
 	)
 	_add_pentagram_decal(
 		pentagram,
-		_build_pentagram_star_mesh(star_radius, 0.08, decal_y + 0.012),
+		_build_pentagram_star_mesh(star_radius, 0.08 * line_scale, decal_y + 0.012),
 		core_mat,
 	)
 
 	var beam_mat := _make_pentagram_beam_material(Violence.hell_emerge_hot_emission_color())
+	beam_mat.set_shader_parameter("beam_height", beam_height)
 	var beam := MeshInstance3D.new()
 	beam.name = "HeatBeam"
 	var beam_mesh := CylinderMesh.new()
 	beam_mesh.top_radius = star_radius
 	beam_mesh.bottom_radius = star_radius
-	beam_mesh.height = PENTAGRAM_BEAM_HEIGHT
+	beam_mesh.height = beam_height
 	beam_mesh.radial_segments = 32
 	beam_mesh.rings = 1
 	beam.mesh = beam_mesh
 	beam.material_override = beam_mat
-	beam.position.y = PENTAGRAM_BEAM_HEIGHT * 0.5
+	beam.position.y = beam_height * 0.5
 	beam.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	anchor.add_child(beam)
 
 	var ground_light := OmniLight3D.new()
 	ground_light.light_color = Violence.hell_emerge_cool_color()
 	ground_light.light_energy = 0.0
-	ground_light.omni_range = 8.5
+	ground_light.omni_range = 8.5 * line_scale
 	ground_light.position.y = 0.35
 	anchor.add_child(ground_light)
 
@@ -2584,7 +2590,7 @@ static func dismiss_enemy_incoming_telegraph_at(scene: Node, pos: Vector3, cool_
 		dismiss_enemy_incoming_telegraph(best, cool_duration)
 
 
-static func hell_emerge_stand_pos(scene: Node, world_pos: Vector3) -> Vector3:
+static func hell_emerge_stand_pos(scene: Node, world_pos: Vector3, half_height: float = 0.9) -> Vector3:
 	var world: World3D = scene.get_world_3d() if scene else null
 	var space: PhysicsDirectSpaceState3D = world.direct_space_state if world else null
 	if space == null:
@@ -2598,7 +2604,7 @@ static func hell_emerge_stand_pos(scene: Node, world_pos: Vector3) -> Vector3:
 	if hit.is_empty():
 		return world_pos
 	var floor_y: float = hit.get("position", world_pos).y
-	return Vector3(world_pos.x, floor_y + 0.9, world_pos.z)
+	return Vector3(world_pos.x, floor_y + maxf(0.2, half_height), world_pos.z)
 
 
 static func _ground_surface_at(scene: Node, world_pos: Vector3) -> Vector3:
@@ -3654,9 +3660,41 @@ static func clear_blood_splats(scene_root: Node) -> void:
 static func clear_smoke_puffs(scene_root: Node) -> void:
 	if scene_root == null:
 		return
-	for n in scene_root.get_tree().get_nodes_in_group("smoke_puffs"):
+	_free_group(scene_root, "smoke_puffs")
+	_free_group(scene_root, "blast_smoke_layers")
+	_active_blast_smoke_layers = 0
+	_blast_smoke_layer_pivots.clear()
+	_active_smoke_puffs = 0
+	_pending_smoke_puffs = 0
+
+
+static func _free_group(scene_root: Node, group_name: String) -> void:
+	if scene_root == null:
+		return
+	var tree := scene_root.get_tree()
+	if tree == null:
+		return
+	for n in tree.get_nodes_in_group(group_name):
 		if is_instance_valid(n):
 			n.queue_free()
+
+
+# Wipe leftover gore / explosion VFX and reset Violence FIFO counters so a new
+# round or arena swap doesn't inherit the previous map's debris, gibs, or smoke.
+static func clear_round_combat_vfx(scene_root: Node) -> void:
+	if scene_root == null:
+		return
+	clear_blood_splats(scene_root)
+	clear_smoke_puffs(scene_root)
+	_free_group(scene_root, "destruction_debris")
+	_free_group(scene_root, "gib_chunks")
+	_free_group(scene_root, "corpses")
+	_free_group(scene_root, "brass_casings")
+	_debris_queue.clear()
+	_debris_chip_fifo.clear()
+	_gib_chunk_fifo.clear()
+	_blood_splat_fifo.clear()
+	DestructibleManager.reset_exposed_chunk_count()
 
 static func spawn_blood(scene: Node, pos: Vector3, dir: Vector3, dmg_ratio: float, vfx_max_blood_drops: int = 8) -> void:
 	if scene == null:

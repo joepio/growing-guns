@@ -286,6 +286,10 @@ static func debug_exposed_chunk_count() -> int:
 	return _exposed_chunk_count
 
 
+static func reset_exposed_chunk_count() -> void:
+	_exposed_chunk_count = 0
+
+
 static func update_exposure_lod() -> void:
 	var should_shed := (PerfGovernor.quality_scale if PerfGovernor else 1.0) <= 0.55
 	if should_shed == _exposure_lod_shed:

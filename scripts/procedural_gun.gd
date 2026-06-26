@@ -270,6 +270,10 @@ func _process(delta: float) -> void:
 # Spawn a brass casing as a free-falling RigidBody3D in world space. Pops
 # out the top-right of the receiver with a randomised impulse and tumble.
 # Lives in current_scene so it persists when the gun moves with the player.
+func clear_live_casings() -> void:
+	_live_casings.clear()
+
+
 func eject_casing() -> void:
 	if Engine.is_editor_hint():
 		return
