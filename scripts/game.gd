@@ -1880,13 +1880,14 @@ func _spawn_coop_enemy(archetype: String, ground_pos: Vector3, spawn_yaw: float)
 	NetworkManager.players[pid] = enemy_name
 	round_wins[pid] = 0
 	_ping_ms_by_player[pid] = -1
-	var bury_pos: Vector3 = ground_pos - Vector3.UP * PLAYER_SCRIPT.HELL_EMERGE_DEPTH
+	var stand := Violence.hell_emerge_stand_pos(self, ground_pos)
+	var bury_pos: Vector3 = stand - Vector3.UP * PLAYER_SCRIPT.HELL_EMERGE_DEPTH
 	_do_spawn.rpc(pid, enemy_name, bury_pos, true, -1, false, spawn_yaw, appearance_seed)
 	var p := players_root.get_node_or_null(str(pid))
 	if p:
 		p.apply_enemy_archetype.rpc(archetype, coop_wave)
 		_apply_coop_spawn_health(p)
-		p.begin_hell_emerge.rpc(ground_pos, Time.get_ticks_msec())
+		p.begin_hell_emerge.rpc(stand, Time.get_ticks_msec())
 	NetworkManager.player_list_changed.emit()
 	_broadcast_scores.rpc(round_wins)
 	_refresh_bot_counter()
