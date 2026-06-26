@@ -6,7 +6,7 @@ const DestructibleSolid = preload("res://scripts/destructible_solid.gd")
 const DestructionCoordinator = preload("res://scripts/destruction_coordinator.gd")
 
 # Large floor/wall spans are tiled so each piece fractures like cover/buildings.
-const TERRAIN_TILE_SIZE := 5.0
+const TERRAIN_TILE_SIZE := 8.0
 
 # Procedural closed-arena map generator — the only map type in MAP_POOL.
 #

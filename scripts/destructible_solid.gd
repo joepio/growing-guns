@@ -14,9 +14,11 @@ const CHUNK_VOLUME_HEALTH := 4.0
 const TARGET_CELL := 2.4
 const MAX_CHUNKS_PER_AXIS := 6
 const EDGE_JITTER := 0.28
-const VISUAL_JAGGEDNESS := 0.16
 const MAX_JAGGEDIZE_PER_CARVE := 18
 const MAX_EXPOSURE_JOBS_PER_FRAME := 1
+# Below this VFX quality, exposed chunks stay in the intact MultiMesh (zero extra
+# draws). Existing exposed batches are collapsed back when quality sags.
+const EXPOSURE_SHED_QS := 0.55
 
 var box_size: Vector3 = Vector3.ONE
 var _pending_carves: Array[Dictionary] = []
@@ -25,6 +27,10 @@ var _body_seed: int = 0
 var _mat: StandardMaterial3D = null
 var _chunk_cols: Array[CollisionShape3D] = []
 var _chunk_meshes: Dictionary = {}
+var _exposed_mmi: MultiMeshInstance3D = null
+var _exposed_mm: MultiMesh = null
+var _exposed_free: Array[int] = []
+var _exposure_shed: bool = false
 var _chunk_grid: Array[CollisionShape3D] = []
 var _intact_mmi: MultiMeshInstance3D = null
 var _intact_mm: MultiMesh = null
@@ -84,11 +90,20 @@ func queue_blast_damage(
 ) -> void:
 	if radius <= 0.0 or damage <= 0.0:
 		return
+	var local_pos := to_local(world_pos)
+	if not _pending_carves.is_empty():
+		var last: Dictionary = _pending_carves[-1]
+		var last_pos: Vector3 = last["pos"] as Vector3
+		if last_pos.distance_squared_to(local_pos) <= 0.36:
+			last["damage"] = float(last["damage"]) + damage
+			last["radius"] = maxf(float(last["radius"]), radius)
+			DestructibleManager.mark_dirty(self)
+			return
 	var local_normal := Vector3.ZERO
 	if hit_normal.length_squared() > 0.0001:
 		local_normal = (global_basis.inverse() * hit_normal).normalized()
 	_pending_carves.append({
-		"pos": to_local(world_pos),
+		"pos": local_pos,
 		"radius": radius,
 		"damage": damage,
 		"normal": local_normal,
@@ -180,20 +195,22 @@ func apply_pending_carves() -> bool:
 	var burst_size := Vector3.ZERO
 	var exposure_center := Vector3.ZERO
 	var scene := _fx_scene()
+	var max_blood_cleanup_r := 0.0
 	for col: CollisionShape3D in to_remove_cols:
 		_hide_intact_instance(col)
-		var mesh_obj: Object = _chunk_meshes.get(col.get_instance_id()) as Object
-		if mesh_obj is MeshInstance3D:
-			(mesh_obj as MeshInstance3D).visible = false
+		_hide_exposed_chunk(col)
 		burst_center += col.global_position
 		burst_size += col.get_meta("chunk_size") as Vector3
 		exposure_center += col.get_meta("chunk_center_local") as Vector3
-		if scene:
-			var cleanup_radius: float = float(col.get_meta("chunk_half_diag", 1.0)) + 0.35
-			Violence.clear_blood_splats_near(scene, col.global_position, cleanup_radius)
+		max_blood_cleanup_r = maxf(
+			max_blood_cleanup_r,
+			float(col.get_meta("chunk_half_diag", 1.0)) + 0.35,
+		)
 		col.set_meta("destroyed", true)
 		col.disabled = true
 	var n := float(to_remove_cols.size())
+	if scene and max_blood_cleanup_r > 0.0:
+		Violence.clear_blood_splats_near(scene, burst_center / n, max_blood_cleanup_r)
 	DestructibleManager.note_chunk_removals(to_remove_cols.size())
 	var base_color := _mat.albedo_color if _mat != null else Color(0.45, 0.7, 0.72)
 	Violence.spawn_destruction_debris(
@@ -343,66 +360,94 @@ func _hide_intact_instance(col: CollisionShape3D) -> void:
 	_intact_mm.set_instance_transform(idx, Transform3D(Basis.IDENTITY.scaled(Vector3.ZERO), center))
 
 
-func _ensure_chunk_mesh(col: CollisionShape3D) -> MeshInstance3D:
+func _restore_intact_instance(col: CollisionShape3D) -> void:
+	if _intact_mm == null:
+		return
+	var idx: int = int(col.get_meta("multimesh_index", -1))
+	if idx < 0 or idx >= _intact_mm.instance_count:
+		return
+	var center: Vector3 = col.get_meta("chunk_center_local") as Vector3
+	var chunk_size: Vector3 = col.get_meta("chunk_size") as Vector3
+	_intact_mm.set_instance_transform(idx, Transform3D(Basis.IDENTITY.scaled(chunk_size), center))
+
+
+func _ensure_exposed_multimesh() -> MultiMesh:
+	if _exposed_mm != null:
+		return _exposed_mm
+	_exposed_mmi = MultiMeshInstance3D.new()
+	_exposed_mmi.name = "ExposedChunks"
+	_exposed_mmi.material_override = _mat
+	var unit_box := BoxMesh.new()
+	unit_box.size = Vector3.ONE
+	_exposed_mm = MultiMesh.new()
+	_exposed_mm.transform_format = MultiMesh.TRANSFORM_3D
+	_exposed_mm.mesh = unit_box
+	_exposed_mm.instance_count = 0
+	_exposed_mmi.multimesh = _exposed_mm
+	_exposed_mmi.custom_aabb = AABB(-box_size * 0.5, box_size)
+	_exposed_mmi.add_to_group("destructible_exposed_mm")
+	add_child(_exposed_mmi)
+	return _exposed_mm
+
+
+func _update_exposure_lod() -> void:
+	var qs: float = Violence.vfx_quality_scale()
+	var should_shed := qs <= EXPOSURE_SHED_QS
+	if should_shed and not _exposure_shed:
+		_pending_exposure_carves.clear()
+		_shed_all_exposed_visuals()
+		_exposure_shed = true
+	elif not should_shed and _exposure_shed:
+		_exposure_shed = false
+
+
+func _shed_all_exposed_visuals() -> void:
+	var shed := 0
+	for col: CollisionShape3D in _chunk_cols:
+		if not is_instance_valid(col) or bool(col.get_meta("destroyed", false)):
+			continue
+		if not bool(col.get_meta("jagged_visual", false)):
+			continue
+		_restore_intact_instance(col)
+		col.set_meta("jagged_visual", false)
+		shed += 1
+	if shed > 0:
+		DestructibleManager.note_exposed_chunk(-shed)
+	_chunk_meshes.clear()
+	_exposed_free.clear()
+	if _exposed_mm != null:
+		_exposed_mm.instance_count = 0
+
+
+func _show_exposed_chunk(col: CollisionShape3D, chunk_size: Vector3, center: Vector3) -> void:
+	if Violence.vfx_quality_scale() <= EXPOSURE_SHED_QS:
+		return
+	_hide_intact_instance(col)
+	var mm := _ensure_exposed_multimesh()
+	var idx: int
+	if not _exposed_free.is_empty():
+		idx = int(_exposed_free.pop_back())
+	else:
+		idx = mm.instance_count
+		mm.instance_count = idx + 1
+	mm.set_instance_transform(idx, Transform3D(Basis.IDENTITY.scaled(chunk_size), center))
+	_chunk_meshes[col.get_instance_id()] = idx
+	col.set_meta("jagged_visual", true)
+	DestructibleManager.note_exposed_chunk(1)
+
+
+func _hide_exposed_chunk(col: CollisionShape3D) -> void:
 	var id: int = col.get_instance_id()
-	var existing: Object = _chunk_meshes.get(id) as Object
-	if existing is MeshInstance3D:
-		return existing as MeshInstance3D
-	var mi := MeshInstance3D.new()
-	mi.name = str(col.name).replace("_Col", "_Mesh")
-	mi.material_override = _mat
-	mi.position = col.get_meta("chunk_center_local") as Vector3
-	add_child(mi)
-	_chunk_meshes[id] = mi
-	return mi
-
-
-func _make_jagged_box_mesh(size: Vector3, seed_value: int) -> ArrayMesh:
-	var half := size * 0.5
-	var jitter_limit := minf(size.x, minf(size.y, size.z)) * VISUAL_JAGGEDNESS
-	var rng := RandomNumberGenerator.new()
-	rng.seed = seed_value
-	var corners: Array[Vector3] = [
-		Vector3(-half.x, -half.y, -half.z),
-		Vector3(half.x, -half.y, -half.z),
-		Vector3(half.x, half.y, -half.z),
-		Vector3(-half.x, half.y, -half.z),
-		Vector3(-half.x, -half.y, half.z),
-		Vector3(half.x, -half.y, half.z),
-		Vector3(half.x, half.y, half.z),
-		Vector3(-half.x, half.y, half.z),
-	]
-	for i in corners.size():
-		corners[i] += Vector3(
-			rng.randf_range(-jitter_limit, jitter_limit),
-			rng.randf_range(-jitter_limit, jitter_limit),
-			rng.randf_range(-jitter_limit, jitter_limit)
-		)
-	var faces: Array[Array] = [
-		[0, 1, 2, 3],
-		[5, 4, 7, 6],
-		[4, 0, 3, 7],
-		[1, 5, 6, 2],
-		[3, 2, 6, 7],
-		[4, 5, 1, 0],
-	]
-	var verts := PackedVector3Array()
-	var norms := PackedVector3Array()
-	for face in faces:
-		var a: Vector3 = corners[int(face[0])]
-		var b: Vector3 = corners[int(face[1])]
-		var c: Vector3 = corners[int(face[2])]
-		var d: Vector3 = corners[int(face[3])]
-		var n := (b - a).cross(c - a).normalized()
-		verts.append_array([a, b, c, a, c, d])
-		norms.append_array([n, n, n, n, n, n])
-	var arrays := []
-	arrays.resize(Mesh.ARRAY_MAX)
-	arrays[Mesh.ARRAY_VERTEX] = verts
-	arrays[Mesh.ARRAY_NORMAL] = norms
-	var mesh := ArrayMesh.new()
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-	return mesh
+	if not _chunk_meshes.has(id):
+		return
+	var idx: int = int(_chunk_meshes[id])
+	_chunk_meshes.erase(id)
+	if _exposed_mm != null and idx >= 0 and idx < _exposed_mm.instance_count:
+		var center: Vector3 = col.get_meta("chunk_center_local") as Vector3
+		_exposed_mm.set_instance_transform(
+			idx, Transform3D(Basis.IDENTITY.scaled(Vector3.ZERO), center))
+		_exposed_free.append(idx)
+	DestructibleManager.note_exposed_chunk(-1)
 
 
 func _count_chunks() -> int:
@@ -469,9 +514,14 @@ func _fx_scene() -> Node:
 
 
 func _jaggedize_exposed_chunks(local_center: Vector3, radius: float) -> void:
+	if Violence.vfx_quality_scale() <= EXPOSURE_SHED_QS:
+		return
+	var jag_cap := MAX_JAGGEDIZE_PER_CARVE
+	if PerfGovernor and PerfGovernor.quality_scale < 0.75:
+		jag_cap = maxi(6, MAX_JAGGEDIZE_PER_CARVE / 3)
 	var jaggedized := 0
 	for col: CollisionShape3D in _candidate_cols(local_center, radius, TARGET_CELL * 0.75):
-		if jaggedized >= MAX_JAGGEDIZE_PER_CARVE:
+		if jaggedized >= jag_cap:
 			return
 		if (
 				not is_instance_valid(col)
@@ -483,13 +533,7 @@ func _jaggedize_exposed_chunks(local_center: Vector3, radius: float) -> void:
 		var half_diag: float = float(col.get_meta("chunk_half_diag"))
 		if center.distance_to(local_center) > radius + half_diag + TARGET_CELL * 0.75:
 			continue
-		var mesh_obj: Object = _chunk_meshes.get(col.get_instance_id()) as Object
 		var chunk_size: Vector3 = col.get_meta("chunk_size") as Vector3
 		_hide_intact_instance(col)
-		var mi: MeshInstance3D = mesh_obj as MeshInstance3D if mesh_obj is MeshInstance3D else _ensure_chunk_mesh(col)
-		mi.mesh = _make_jagged_box_mesh(
-			chunk_size,
-			hash([_body_seed, str(col.name), "exposed"])
-		)
-		col.set_meta("jagged_visual", true)
+		_show_exposed_chunk(col, chunk_size, center)
 		jaggedized += 1

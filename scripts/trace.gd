@@ -1,5 +1,7 @@
 extends Node
 
+const DestructibleManager = preload("res://scripts/destructible_manager.gd")
+
 # Lightweight timing/tracing for diagnosing startup hitches and runtime stutter
 # (autoload: Trace). Everything goes through print(), so it lands in the Godot
 # log file for offline analysis after a demo run:
@@ -103,7 +105,7 @@ func _process(delta: float) -> void:
 		var tree := get_tree()
 		# proc+phys = main-thread CPU; frame_ms minus that ≈ GPU/render wait. This
 		# is the CPU-bound vs GPU-bound discriminator.
-		print("[trace] SPIKE %6.1fms +%6dms proc=%4.1f phys=%4.1f fps=%3.0f draws=%5d rb=%d proj=%d dbr=%d blood=%d crat=%d smk=%d corpse=%d qs=%.2f%s" % [
+		print("[trace] SPIKE %6.1fms +%6dms proc=%4.1f phys=%4.1f fps=%3.0f draws=%5d rb=%d proj=%d dbr=%d blood=%d crat=%d smk=%d corpse=%d qs=%.2f dest=%d exp=%d expm=%d%s" % [
 			dt_ms, _now(),
 			Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0,
 			Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0,
@@ -117,6 +119,9 @@ func _process(delta: float) -> void:
 			tree.get_nodes_in_group("smoke_puffs").size() + tree.get_nodes_in_group("blast_smoke_layers").size(),
 			tree.get_nodes_in_group("corpses").size(),
 			PerfGovernor.quality_scale if PerfGovernor else 1.0,
+			tree.get_nodes_in_group("destructible").size(),
+			DestructibleManager.debug_exposed_chunk_count(),
+			tree.get_nodes_in_group("destructible_exposed_mm").size(),
 			_prof_str(),
 		])
 

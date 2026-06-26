@@ -387,8 +387,8 @@ func _handle_collision(result: Dictionary) -> void:
 		if is_head_hit:
 			Violence.spawn_headshot_spray(get_tree().current_scene, hit_pos, direction, blood_ratio)
 	else:
-		shooter_node.call("_spawn_impact", hit_pos, weapon_stats.bullet_color, weapon_stats.get_bullet_scale_for_shot(last_in_mag), impact_dmg_ratio, normal, weapon_stats.explosive_radius, collider)
 		if weapon_stats.explosive_radius <= 0.0:
+			shooter_node.call("_spawn_impact", hit_pos, weapon_stats.bullet_color, weapon_stats.get_bullet_scale_for_shot(last_in_mag), impact_dmg_ratio, normal, weapon_stats.explosive_radius, collider)
 			SFX.impact(hit_pos, dmg_ratio)
 		DestructibleManager.carve_from_hit(
 			hit_pos,

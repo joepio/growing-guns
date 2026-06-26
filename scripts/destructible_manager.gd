@@ -146,6 +146,9 @@ static func _apply_blast_neighbors_once_per_frame(
 		return
 	_blast_neighbor_scan_vol_id = primary_id
 	_blast_neighbor_scan_frame = frame
+	var primary_idx: int = int(_registered_index_by_id.get(primary_id, -1))
+	if primary_idx >= 0 and radius <= _registered_bounds[primary_idx] * 0.85:
+		return
 	var _t := Time.get_ticks_usec()
 	var i := 0
 	while i < _registered_ids.size():
@@ -269,6 +272,30 @@ static func debug_chunk_removals() -> int:
 
 static func reset_chunk_removals() -> void:
 	_chunk_removals_total = 0
+
+
+static var _exposed_chunk_count: int = 0
+
+
+static func note_exposed_chunk(delta: int) -> void:
+	_exposed_chunk_count = maxi(0, _exposed_chunk_count + delta)
+
+
+static func debug_exposed_chunk_count() -> int:
+	return _exposed_chunk_count
+
+
+static func update_exposure_lod() -> void:
+	var i := 0
+	while i < _registered_ids.size():
+		var id: int = _registered_ids[i]
+		var node: Object = instance_from_id(id)
+		if not is_instance_valid(node):
+			_unregister_id(id)
+			continue
+		if node.has_method("_update_exposure_lod"):
+			node.call("_update_exposure_lod")
+		i += 1
 
 
 static var _bench_destruct_usec: Dictionary = {}
