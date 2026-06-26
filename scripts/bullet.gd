@@ -149,6 +149,7 @@ func setup(origin: Vector3, dir: Vector3, shooter: int, w: Weapon, p_last_in_mag
 func _physics_process(delta: float) -> void:
 	if weapon_stats == null:
 		return
+	var _pt := Time.get_ticks_usec() if Trace.enabled else 0
 
 	# Bullet drop — steady downward acceleration on the velocity vector.
 	if weapon_stats.bullet_drop > 0.0:
@@ -206,6 +207,9 @@ func _physics_process(delta: float) -> void:
 
 	if distance_traveled > max_range:
 		queue_free()
+
+	if Trace.enabled:
+		Trace.prof("bullet", Time.get_ticks_usec() - _pt)
 
 func _do_hitscan() -> void:
 	if not is_inside_tree():

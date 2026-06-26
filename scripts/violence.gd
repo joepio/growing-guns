@@ -54,10 +54,14 @@ static var _gib_flesh_material_cached: StandardMaterial3D = null
 const MAX_ACTIVE_GIB_CHUNKS := 32
 static var _gib_chunk_fifo: Array[RigidBody3D] = []
 
+static func _max_active_gib_chunks() -> int:
+	return clampi(int(round(float(MAX_ACTIVE_GIB_CHUNKS) * vfx_quality_scale())), 8, MAX_ACTIVE_GIB_CHUNKS)
+
+
 static func _gib_enroll_chunk(rb: RigidBody3D) -> void:
 	_gib_chunk_fifo.append(rb)
 	rb.tree_exiting.connect(func() -> void: _gib_chunk_fifo.erase(rb))
-	while _gib_chunk_fifo.size() > MAX_ACTIVE_GIB_CHUNKS:
+	while _gib_chunk_fifo.size() > _max_active_gib_chunks():
 		var old: RigidBody3D = _gib_chunk_fifo.pop_front()
 		if is_instance_valid(old):
 			old.queue_free()
@@ -393,6 +397,7 @@ static func _gib_instantiate_chunk(
 	var warp: Vector3 = source_transform.basis.get_scale()
 
 	var rb: RigidBody3D = RigidBody3D.new()
+	rb.add_to_group("gib_chunks")
 	rb.collision_layer = 0
 	rb.collision_mask = 1
 	rb.gravity_scale = 1.0
@@ -542,6 +547,7 @@ static func spawn_blood_gib_blobs(
 	for i in blob_count:
 		var radius := randf_range(0.035, 0.13) * lerpf(0.85, 1.55, sev / 2.5)
 		var rb := RigidBody3D.new()
+		rb.add_to_group("gib_chunks")
 		rb.collision_layer = 0
 		rb.collision_mask = 1
 		rb.gravity_scale = 1.0
