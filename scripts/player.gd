@@ -164,7 +164,25 @@ const PHOENIX_ALPHA_END := 0.0
 const PHOENIX_LIGHT_ENERGY := 22.0
 const PHOENIX_COLUMN_HEIGHT := 360.0
 const PHOENIX_COLUMN_RADIUS := 0.5
+const HELL_CAPSULE_HEIGHT := 1.8
+const HELL_EMERGE_BURIAL_EXTRA := 0.5
+const HELL_EMERGE_DEPTH := HELL_CAPSULE_HEIGHT + HELL_EMERGE_BURIAL_EXTRA
+const HELL_EMERGE_DURATION := 2.5
+const HELL_EMERGE_SHAKE_STRENGTH := 0.4
+const HELL_EMERGE_GLOW_FADE_DURATION := 0.45
 const COOP_DOWN_CROSS_BOB_HEIGHT := 0.16
+var _hell_emerging: bool = false
+var _hell_emerge_finished: bool = false
+var _hell_emerge_start: Vector3 = Vector3.ZERO
+var _hell_emerge_target: Vector3 = Vector3.ZERO
+var _hell_emerge_start_ms: int = 0
+var _hell_emerge_light: OmniLight3D = null
+var _hell_emerge_depth: float = HELL_EMERGE_DEPTH
+var _hell_emerge_duration: float = HELL_EMERGE_DURATION
+var _hell_emerge_telegraph_cooldown: float = -1.0
+var _hell_emerge_shake_seed: float = 0.0
+var _hell_emerge_telegraph_dismissed: bool = false
+var _hell_emerge_elapsed: float = 0.0
 var ghost_mode: bool = false
 var coop_downed: bool = false
 var _coop_down_pos: Vector3 = Vector3.ZERO
@@ -494,19 +512,21 @@ func _coop_identity_color(seed: int) -> Color:
 	return Color.from_hsv(hue, sat, val, 1.0)
 
 
+func _identity_skin_color() -> Color:
+	var seed := _identity_seed()
+	var game := get_tree().current_scene
+	if game and game.has_method("is_coop_mode") and game.is_coop_mode():
+		return _coop_identity_color(seed)
+	var hue := float(seed % 360) / 360.0
+	var sat := 0.44 + float((seed >> 3) % 24) / 100.0
+	var val := 0.72 + float((seed >> 7) % 18) / 100.0
+	return Color.from_hsv(hue, sat, val, 1.0)
+
+
 func _apply_identity_skin_materials() -> StandardMaterial3D:
 	if head_blob == null:
 		return null
-	var seed := _identity_seed()
-	var skin: Color
-	var game := get_tree().current_scene
-	if game and game.has_method("is_coop_mode") and game.is_coop_mode():
-		skin = _coop_identity_color(seed)
-	else:
-		var hue := float(seed % 360) / 360.0
-		var sat := 0.44 + float((seed >> 3) % 24) / 100.0
-		var val := 0.72 + float((seed >> 7) % 18) / 100.0
-		skin = Color.from_hsv(hue, sat, val, 1.0)
+	var skin := _identity_skin_color()
 	var face := skin.lerp(Color(1.0, 0.96, 0.88), 0.64)
 	var skin_mat := _make_mat(skin, 0.95, 0.0)
 	var face_mat := _make_mat(face, 0.86, 0.0)
@@ -678,8 +698,11 @@ func _process(delta: float) -> void:
 	if _phoenix_ascending:
 		_update_phoenix_ascent()
 
+	if _hell_emerging:
+		_update_hell_emerge(delta)
+
 	if not is_multiplayer_authority():
-		if not _phoenix_ascending and not _coop_phoenix_held:
+		if not _phoenix_ascending and not _coop_phoenix_held and not _hell_emerging:
 			_interpolate_remote_state(delta)
 	_update_blob_motion(delta)
 	_update_flashlight_aim(delta)
@@ -776,6 +799,8 @@ func _body_meshes() -> Array[MeshInstance3D]:
 func _update_blob_motion(delta: float) -> void:
 	if body_model == null or blob_rig == null or blob_core == null:
 		return
+	if _hell_emerging:
+		return
 
 	var prev_pos := _visual_prev_pos
 	if prev_pos == Vector3.INF:
@@ -856,6 +881,9 @@ func _apply_ghost_visuals() -> void:
 	if _phoenix_ascending:
 		_apply_phoenix_visuals()
 		return
+	if _hell_emerging:
+		_apply_hell_emerge_visuals(_hell_emerge_heat())
+		return
 	if _coop_phoenix_held:
 		_apply_phoenix_visuals(PHOENIX_ALPHA_END)
 		return
@@ -933,6 +961,250 @@ static func _make_coop_down_cross_material() -> StandardMaterial3D:
 	return mat
 
 
+static func _make_hell_emerge_material(heat: float, skin_color: Color, skin_blend: float = 0.0) -> StandardMaterial3D:
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	var emerge_col := Violence.hell_emerge_hot_albedo_color().lerp(
+		Violence.hell_emerge_warm_body_color(),
+		1.0 - heat,
+	)
+	var blend := clampf(skin_blend, 0.0, 1.0)
+	mat.albedo_color = emerge_col.lerp(skin_color, blend)
+	mat.albedo_color.a = lerpf(0.92, 1.0, lerpf(1.0 - heat * 0.25, 1.0, blend))
+	var glow := clampf(heat, 0.0, 1.0) * (1.0 - blend)
+	mat.emission_enabled = glow > 0.001
+	mat.emission = Violence.hell_emerge_hot_emission_color()
+	mat.emission_energy_multiplier = lerpf(0.0, 18.0, glow)
+	mat.metallic = 0.0
+	mat.roughness = lerpf(0.42, 0.95, blend)
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	return mat
+
+
+func _apply_hell_emerge_visuals(heat: float, skin_blend: float = 0.0) -> void:
+	if body_model == null:
+		return
+	body_model.visible = true
+	name_label.visible = false
+	muzzle.visible = false
+	if _procedural_gun:
+		_procedural_gun.visible = false
+	if _third_person_gun:
+		_third_person_gun.visible = false
+	var skin := _identity_skin_color()
+	for mesh in _body_meshes():
+		mesh.material_override = _make_hell_emerge_material(heat, skin, skin_blend)
+	if _hell_emerge_light and is_instance_valid(_hell_emerge_light):
+		var eased := _hell_emerge_eased_progress()
+		var light_t := smoothstep(0.0, 0.38, eased) * (1.0 - smoothstep(0.82, 1.0, eased))
+		var glow := (1.0 - clampf(skin_blend, 0.0, 1.0)) * Violence.ease_out_cubic(light_t)
+		_hell_emerge_light.light_energy = lerpf(0.0, 9.0, glow)
+		var cool := Violence.hell_emerge_cool_color()
+		var hot := Violence.hell_emerge_peak_light_color()
+		var ash := Violence.hell_emerge_ash_color()
+		var col := cool.lerp(hot, smoothstep(0.0, 0.45, eased))
+		col = col.lerp(ash, smoothstep(0.78, 1.0, eased))
+		col = col.lerp(skin, skin_blend)
+		_hell_emerge_light.light_color = col
+
+
+func _hell_emerge_rise_progress() -> float:
+	if _hell_emerge_duration <= 0.0:
+		return 1.0
+	return clampf(_hell_emerge_elapsed / _hell_emerge_duration, 0.0, 1.0)
+
+
+func _hell_emerge_glow_fade_progress() -> float:
+	if _hell_emerge_elapsed <= _hell_emerge_duration:
+		return 0.0
+	var fade_duration := _hell_emerge_glow_fade_duration()
+	if fade_duration <= 0.0:
+		return 1.0
+	return clampf((_hell_emerge_elapsed - _hell_emerge_duration) / fade_duration, 0.0, 1.0)
+
+
+func _hell_emerge_total_duration() -> float:
+	return _hell_emerge_duration + _hell_emerge_glow_fade_duration()
+
+
+func _hell_emerge_eased_progress() -> float:
+	return Violence.ease_out_cubic(_hell_emerge_rise_progress())
+
+
+func _hell_emerge_heat() -> float:
+	return clampf(1.0 - _hell_emerge_eased_progress(), 0.0, 1.0)
+
+
+func _reset_blob_emerge_rest() -> void:
+	if blob_rig:
+		blob_rig.position = _blob_rig_rest_pos
+		blob_rig.rotation = Vector3.ZERO
+	if blob_core:
+		blob_core.scale = _blob_core_rest_scale
+	if head_blob:
+		head_blob.position = _head_blob_rest_pos
+		head_blob.rotation = Vector3.ZERO
+		head_blob.scale = _head_blob_rest_scale
+	if hand_anchor:
+		hand_anchor.position = _hand_anchor_rest_pos
+
+
+func _apply_hell_emerge_shake(linear: float) -> void:
+	if body_model == null:
+		return
+	var intensity := pow(1.0 - linear, 0.55) * HELL_EMERGE_SHAKE_STRENGTH
+	if intensity <= 0.0001:
+		body_model.position = Vector3.ZERO
+		body_model.rotation.x = 0.0
+		body_model.rotation.z = 0.0
+		return
+	var t := Time.get_ticks_msec() * 0.001
+	var s := _hell_emerge_shake_seed
+	body_model.position = Vector3(
+		sin(t * (41.0 + s) * 1.7) * 0.035,
+		sin(t * (53.0 + s) * 2.1) * 0.018,
+		sin(t * (37.0 + s) * 1.9) * 0.035,
+	) * intensity * 4.0
+	body_model.rotation.x = sin(t * (29.0 + s) * 2.3) * 0.07 * intensity
+	body_model.rotation.z = cos(t * (31.0 + s) * 2.0) * 0.05 * intensity
+
+
+func _clear_hell_emerge_shake() -> void:
+	if body_model == null:
+		return
+	body_model.position = Vector3.ZERO
+	body_model.rotation.x = 0.0
+	body_model.rotation.z = 0.0
+
+
+func _dismiss_hell_emerge_telegraph() -> void:
+	if _hell_emerge_telegraph_dismissed:
+		return
+	_hell_emerge_telegraph_dismissed = true
+	var scene := get_tree().current_scene
+	if scene == null:
+		return
+	var cool := _hell_emerge_telegraph_cooldown if _hell_emerge_telegraph_cooldown > 0.0 \
+		else Violence.ENEMY_INCOMING_TELEGRAPH_COOLDOWN
+	Violence.dismiss_enemy_incoming_telegraph_at(scene, _hell_emerge_target, cool)
+
+
+func _hell_emerge_glow_fade_duration() -> float:
+	if _hell_emerge_telegraph_cooldown > 0.0:
+		return _hell_emerge_telegraph_cooldown
+	return HELL_EMERGE_GLOW_FADE_DURATION
+
+
+func _update_hell_emerge(delta: float) -> void:
+	_hell_emerge_elapsed += delta
+	var rise_t := _hell_emerge_rise_progress()
+	var pos := _hell_emerge_start.lerp(_hell_emerge_target, rise_t)
+	global_position = pos
+	var glow_blend := Violence.ease_out_cubic(_hell_emerge_glow_fade_progress())
+	_apply_hell_emerge_visuals(_hell_emerge_heat(), glow_blend)
+	_apply_hell_emerge_shake(rise_t)
+	if is_multiplayer_authority():
+		velocity = Vector3.ZERO
+		_last_sync_pos = global_position
+		_last_sync_yaw = rotation.y
+		_broadcast_state.rpc(global_position, rotation.y, look_pitch)
+		_last_sync_pitch = look_pitch
+	if _hell_emerge_elapsed >= _hell_emerge_total_duration() and not _hell_emerge_finished:
+		_finish_hell_emerge()
+	elif not is_multiplayer_authority():
+		_remote_target_pos = pos
+		_remote_target_yaw = rotation.y
+		_remote_has_target = true
+		_visual_prev_pos = pos
+
+
+func _spawn_hell_emerge_light(at_world: Vector3) -> void:
+	_clear_hell_emerge_fx()
+	var scene := get_tree().current_scene
+	if scene == null:
+		return
+	var light := OmniLight3D.new()
+	light.name = "HellEmergeLight"
+	light.light_color = Violence.hell_emerge_cool_color()
+	light.light_energy = 0.0
+	light.omni_range = 7.5
+	light.shadow_enabled = false
+	Violence._attach_world_3d(scene, light, at_world + Vector3.UP * 0.35)
+	_hell_emerge_light = light
+
+
+func _clear_hell_emerge_fx() -> void:
+	if _hell_emerge_light and is_instance_valid(_hell_emerge_light):
+		_hell_emerge_light.queue_free()
+	_hell_emerge_light = null
+
+
+func _finish_hell_emerge() -> void:
+	_hell_emerge_finished = true
+	_hell_emerging = false
+	_hell_emerge_elapsed = 0.0
+	_hell_emerge_start_ms = 0
+	global_position = _hell_emerge_target
+	_clear_hell_emerge_shake()
+	_reset_blob_emerge_rest()
+	var scene := get_tree().current_scene
+	if scene and not _hell_emerge_telegraph_dismissed:
+		_dismiss_hell_emerge_telegraph()
+	_hell_emerge_telegraph_cooldown = -1.0
+	_clear_hell_emerge_fx()
+	for mesh in _body_meshes():
+		mesh.material_override = _body_materials.get(mesh, mesh.material_override)
+	_apply_identity_skin_materials()
+	_apply_ghost_visuals()
+	_restore_weapon_visuals()
+	if is_multiplayer_authority():
+		velocity = Vector3.ZERO
+		_last_sync_pos = global_position
+		_last_sync_yaw = rotation.y
+		_last_sync_pitch = look_pitch
+		_broadcast_state.rpc(global_position, rotation.y, look_pitch)
+
+
+@rpc("any_peer", "call_local", "reliable")
+func begin_hell_emerge(
+	surface_pos: Vector3,
+	start_ms: int = 0,
+	depth: float = -1.0,
+	duration: float = -1.0,
+	telegraph_cooldown: float = -1.0,
+) -> void:
+	var sender := multiplayer.get_remote_sender_id()
+	if sender != 1 and sender != 0:
+		return
+	_hell_emerge_telegraph_cooldown = telegraph_cooldown
+	_hell_emerge_shake_seed = randf() * 10.0
+	_hell_emerge_telegraph_dismissed = false
+	_hell_emerge_elapsed = 0.0
+	_hell_emerging = true
+	_hell_emerge_finished = false
+	_hell_emerge_depth = depth if depth > 0.0 else HELL_EMERGE_DEPTH
+	_hell_emerge_duration = duration if duration > 0.0 else HELL_EMERGE_DURATION
+	_hell_emerge_target = surface_pos
+	_hell_emerge_start = surface_pos - Vector3.UP * _hell_emerge_depth
+	_hell_emerge_start_ms = Time.get_ticks_msec()
+	global_position = _hell_emerge_start
+	velocity = Vector3.ZERO
+	_reset_blob_emerge_rest()
+	_spawn_hell_emerge_light(surface_pos)
+	_apply_hell_emerge_visuals(1.0)
+	if is_multiplayer_authority():
+		_last_sync_pos = global_position
+		_last_sync_yaw = rotation.y
+		_last_sync_pitch = look_pitch
+		_broadcast_state.rpc(global_position, rotation.y, look_pitch)
+	else:
+		_remote_target_pos = global_position
+		_remote_target_yaw = rotation.y
+		_remote_has_target = true
+		_visual_prev_pos = global_position
+
+
 func _apply_coop_downed_visuals() -> void:
 	if body_model:
 		body_model.visible = false
@@ -945,7 +1217,7 @@ func _apply_coop_downed_visuals() -> void:
 
 
 func _restore_weapon_visuals() -> void:
-	if is_bot or ghost_mode or coop_downed or _coop_phoenix_held or _phoenix_ascending or health <= 0:
+	if is_bot or ghost_mode or coop_downed or _coop_phoenix_held or _phoenix_ascending or _hell_emerging or health <= 0:
 		return
 	if is_multiplayer_authority() and not split_screen_local:
 		muzzle.visible = true
@@ -1344,6 +1616,9 @@ func _physics_process(delta: float) -> void:
 		if _phoenix_ascending:
 			_physics_phoenix(delta)
 			return
+		if _hell_emerging:
+			velocity = Vector3.ZERO
+			return
 		_bot_physics(delta)
 		return
 
@@ -1693,7 +1968,7 @@ func handle_environmental_death(_reason: String = "void") -> void:
 	# inventing a fake from_id.
 	if not is_multiplayer_authority():
 		return
-	if ghost_mode or god_mode or health <= 0 or frozen or launching or _phoenix_ascending:
+	if ghost_mode or god_mode or health <= 0 or frozen or launching or _phoenix_ascending or _hell_emerging:
 		return
 	var lethal_amount: int = max(health, MAX_HEALTH)
 	_apply_damage(lethal_amount, player_id)
@@ -1723,7 +1998,7 @@ func kill_environmental(_reason: String = "hazard") -> void:
 func apply_environmental_damage(amount: int, _reason: String = "hazard") -> void:
 	if not is_multiplayer_authority():
 		return
-	if ghost_mode or god_mode or health <= 0 or frozen or launching or _phoenix_ascending:
+	if ghost_mode or god_mode or health <= 0 or frozen or launching or _phoenix_ascending or _hell_emerging:
 		return
 	if _reason == "lava":
 		var now := Time.get_ticks_msec()
@@ -3140,7 +3415,7 @@ func _apply_damage(
 	blast_severity: float = 0.0,
 	is_head: bool = false,
 ) -> void:
-	if ghost_mode or coop_downed or frozen or health <= 0 or god_mode or _phoenix_ascending:
+	if ghost_mode or coop_downed or frozen or health <= 0 or god_mode or _phoenix_ascending or _hell_emerging:
 		return
 	var game_scene := get_tree().current_scene
 	if from_id != player_id and game_scene and game_scene.has_method("should_block_player_damage") \
@@ -3414,6 +3689,11 @@ func server_respawn(pos: Vector3, yaw: float = 0.0) -> void:
 	_phoenix_start_ms = 0
 	_phoenix_start_pos = Vector3.ZERO
 	_clear_phoenix_fx()
+	_hell_emerging = false
+	_hell_emerge_finished = false
+	_hell_emerge_elapsed = 0.0
+	_hell_emerge_start_ms = 0
+	_clear_hell_emerge_fx()
 	launching = false
 	_stop_rocket_descent_audio()
 	_reset_weapon_combat_state()

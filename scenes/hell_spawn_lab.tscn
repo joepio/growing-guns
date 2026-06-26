@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://cybt4rw1kp11m"]
+
+[ext_resource type="Script" path="res://scripts/hell_spawn_lab.gd" id="1_lab"]
+
+[node name="HellSpawnLab" type="Node3D"]
+script = ExtResource("1_lab")
