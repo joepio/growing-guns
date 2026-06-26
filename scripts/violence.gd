@@ -142,7 +142,12 @@ static func gib_warm_tree_sync(root: Node, chunk_count: int = GIB_CHUNK_COUNT) -
 
 # Bake every player-body gib variant up front so the first overkill /
 # disintegration never hitches on the main thread.
+static var _disintegration_prewarmed: bool = false
+
 static func prewarm_disintegration_cache() -> void:
+	if _disintegration_prewarmed:
+		return
+	_disintegration_prewarmed = true
 	_gib_get_flesh_material()
 	var player_scene: PackedScene = load("res://scenes/player.tscn") as PackedScene
 	if player_scene:
