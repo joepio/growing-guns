@@ -983,6 +983,9 @@ func pling(pitch_ratio: float = 1.0) -> void:
 func pickup_drop(at: Vector3 = NO_POS) -> void:
 	_play(_cached_samples("pickup_drop", Callable(self, "_synth_pickup_drop")), -11.0, at, "pickup_drop", -1.0, false, 75.0)
 
+func enemy_incoming(at: Vector3 = NO_POS) -> void:
+	_play(_cached_samples("enemy_incoming", Callable(self, "_synth_enemy_incoming")), -8.5, at, "enemy_incoming", -1.0, false, 95.0)
+
 func card_flip(_pitch_ratio: float = 1.0) -> void:
 	# pitch_ratio kept for callsite compatibility but no longer used —
 	# variation comes from the 3 deterministic synthesised variants instead.
@@ -1916,6 +1919,31 @@ func _synth_pickup_drop() -> PackedVector2Array:
 			var chime_env := exp(-ct * 18.0)
 			chime = sin(2.0 * PI * 1180.0 * ct) * chime_env * 0.42
 		var s := tanh((whoosh + chime) * 1.35) * 0.55
+		out[i] = Vector2(s, s)
+	return out
+
+func _synth_enemy_incoming() -> PackedVector2Array:
+	# Hostile ground-rift stutter: low rasp + clipped bursts, not a sky whoosh.
+	var dur := 0.42
+	var n := int(dur * MIX_RATE)
+	var out := PackedVector2Array()
+	out.resize(n)
+	var sample_dt := 1.0 / float(MIX_RATE)
+	var lp := 0.0
+	for i in range(n):
+		var t := float(i) / MIX_RATE
+		var u := t / dur
+		var env := exp(-t * 5.8) * smoothstep(0.0, 0.06, u)
+		var burst := 0.0
+		if fmod(t, 0.07) < 0.022:
+			burst = randf_range(-1.0, 1.0) * 0.55
+		var tone_freq := lerpf(210.0, 95.0, u)
+		var tone := sin(2.0 * PI * tone_freq * t) * 0.28
+		var noise := randf_range(-1.0, 1.0)
+		var rc := 1.0 / (TAU * lerpf(180.0, 70.0, u))
+		var alpha := sample_dt / (rc + sample_dt)
+		lp = lp + alpha * (noise - lp)
+		var s := tanh((burst + tone + lp * 0.35) * env * 1.45) * 0.62
 		out[i] = Vector2(s, s)
 	return out
 

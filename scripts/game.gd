@@ -11,6 +11,7 @@ const PICKUP_ITEM_SCRIPT := preload("res://scripts/pickup_item.gd")
 const ROUND_MODIFIERS_SCRIPT := preload("res://scripts/round_modifiers.gd")
 const AIR_STRIKE_SCRIPT := preload("res://scripts/air_strike.gd")
 const ION_CANNON_SCRIPT := preload("res://scripts/ion_cannon.gd")
+const PLAYER_SCRIPT := preload("res://scripts/player.gd")
 
 const PICKUP_SPAWN_MEAN := 20.0
 const PICKUP_SPAWN_JITTER := 7.0
@@ -48,6 +49,12 @@ const COOP_PLAYER_HEALTH_MULT := 3.0
 const COOP_ENEMY_HEALTH_MULT := 0.5
 const COOP_ENEMY_SPAWN_INTERVAL := 1.35
 const COOP_ENEMY_FIRST_SPAWN_DELAY := 0.65
+const COOP_ENEMY_TELEGRAPH_SECONDS := 0.5
+const COOP_ENEMY_TELEGRAPH_WARMUP := 0.9
+const COOP_ENEMY_SPAWN_MIN_FROM_PLAYER := 8.0
+const COOP_ENEMY_SPAWN_MIN_FROM_TARGET := 10.0
+const COOP_ENEMY_SPAWN_MAX_FROM_TARGET := 24.0
+const COOP_ENEMY_SPAWN_HARD_MIN := 5.5
 const COOP_REVIVE_RADIUS := 1.4
 const COOP_REVIVE_SECONDS := 3.0
 const SPAWN_CAPSULE_RADIUS := 0.4
@@ -138,6 +145,7 @@ var game_mode: String = GAME_MODE_VERSUS
 var coop_wave: int = 1
 var _coop_enemy_spawn_queue: Array[String] = []
 var _coop_enemy_spawn_timer: float = -1.0
+var _coop_enemy_incoming: Dictionary = {}
 var _coop_wave_enemy_total: int = 0
 var _coop_wave_kills: int = 0
 var downed_players: Dictionary = {}
@@ -1741,17 +1749,128 @@ func _begin_coop_enemy_wave() -> void:
 
 
 func _update_coop_enemy_spawner(delta: float) -> void:
-	if not is_coop_mode() or _coop_enemy_spawn_queue.is_empty():
+	if not is_coop_mode():
+		return
+	_tick_coop_enemy_incoming(delta)
+	if not _coop_enemy_incoming.is_empty():
+		return
+	if _coop_enemy_spawn_queue.is_empty():
 		return
 	_coop_enemy_spawn_timer -= delta
 	if _coop_enemy_spawn_timer > 0.0:
 		return
 	var archetype := str(_coop_enemy_spawn_queue.pop_front())
-	_spawn_coop_enemy(archetype)
+	_begin_coop_enemy_incoming(archetype)
 	_coop_enemy_spawn_timer = COOP_ENEMY_SPAWN_INTERVAL
 
 
-func _spawn_coop_enemy(archetype: String) -> void:
+func _tick_coop_enemy_incoming(delta: float) -> void:
+	if _coop_enemy_incoming.is_empty():
+		return
+	var timer: float = float(_coop_enemy_incoming.get("timer", 0.0)) - delta
+	if timer > 0.0:
+		_coop_enemy_incoming["timer"] = timer
+		return
+	var archetype := str(_coop_enemy_incoming.get("archetype", "grunt"))
+	var ground_pos: Vector3 = _coop_enemy_incoming.get("pos", Vector3.ZERO)
+	var spawn_yaw: float = float(_coop_enemy_incoming.get("yaw", 0.0))
+	_coop_enemy_incoming = {}
+	_spawn_coop_enemy(archetype, ground_pos, spawn_yaw)
+
+
+func _begin_coop_enemy_incoming(archetype: String) -> void:
+	if not multiplayer.is_server():
+		return
+	var pick := _pick_coop_enemy_spawn()
+	var ground_pos: Vector3 = pick["pos"]
+	var spawn_yaw: float = float(pick["yaw"])
+	_telegraph_coop_enemy_spawn.rpc(ground_pos)
+	_coop_enemy_incoming = {
+		"archetype": archetype,
+		"pos": ground_pos,
+		"yaw": spawn_yaw,
+		"timer": COOP_ENEMY_TELEGRAPH_SECONDS,
+	}
+
+
+@rpc("authority", "call_local", "reliable")
+func _telegraph_coop_enemy_spawn(ground_pos: Vector3) -> void:
+	SFX.enemy_incoming(ground_pos)
+	Violence.spawn_enemy_incoming_telegraph(
+		self,
+		ground_pos,
+		COOP_ENEMY_TELEGRAPH_WARMUP,
+	)
+
+
+func _standing_human_positions() -> Array[Vector3]:
+	var out: Array[Vector3] = []
+	for pid in _standing_human_ids():
+		var p := players_root.get_node_or_null(str(pid))
+		if p and is_instance_valid(p):
+			out.append((p as Node3D).global_position)
+	return out
+
+
+func _pick_coop_enemy_spawn() -> Dictionary:
+	var humans := _standing_human_positions()
+	var avoid := _current_player_positions()
+	if humans.is_empty():
+		return _pick_spawn(avoid)
+
+	var target := humans[randi() % humans.size()]
+	var spawns := _arena_spawnpoints()
+	var arena: Node = get_node_or_null("Arena")
+	var arena_origin: Vector3 = (arena as Node3D).global_position if arena and arena is Node3D else Vector3.ZERO
+
+	var best_pos := Vector3.ZERO
+	var best_yaw := 0.0
+	var best_score: float = -INF
+	var fallback_pos := Vector3.ZERO
+	var fallback_yaw := 0.0
+	var fallback_score: float = -INF
+	spawns.shuffle()
+
+	for spawn in spawns:
+		var pos: Vector3 = (spawn as Node3D).global_position
+		if not _spawn_is_valid(pos):
+			continue
+		var to_target: float = Vector2(pos.x - target.x, pos.z - target.z).length()
+		if to_target < COOP_ENEMY_SPAWN_MIN_FROM_TARGET or to_target > COOP_ENEMY_SPAWN_MAX_FROM_TARGET:
+			continue
+		var min_human: float = _min_distance(pos, humans)
+		if min_human < COOP_ENEMY_SPAWN_HARD_MIN or min_human < COOP_ENEMY_SPAWN_MIN_FROM_PLAYER:
+			continue
+		# Prefer spawns closer to the chosen player so enemies gang up.
+		var score: float = (COOP_ENEMY_SPAWN_MAX_FROM_TARGET - to_target) + randf_range(-1.5, 1.5)
+		if score > best_score:
+			best_score = score
+			best_pos = pos
+			best_yaw = _spawn_yaw_at(pos, arena_origin)
+
+	if best_score > -INF:
+		return {"pos": best_pos, "yaw": best_yaw}
+
+	for spawn in spawns:
+		var pos: Vector3 = (spawn as Node3D).global_position
+		if not _spawn_is_valid(pos):
+			continue
+		var to_target: float = Vector2(pos.x - target.x, pos.z - target.z).length()
+		var min_human: float = _min_distance(pos, humans)
+		if min_human < COOP_ENEMY_SPAWN_HARD_MIN:
+			continue
+		var score: float = (COOP_ENEMY_SPAWN_MAX_FROM_TARGET + 8.0 - to_target) + min_human * 0.05
+		if score > fallback_score:
+			fallback_score = score
+			fallback_pos = pos
+			fallback_yaw = _spawn_yaw_at(pos, arena_origin)
+
+	if fallback_score > -INF:
+		return {"pos": fallback_pos, "yaw": fallback_yaw}
+	return _pick_spawn(avoid)
+
+
+func _spawn_coop_enemy(archetype: String, ground_pos: Vector3, spawn_yaw: float) -> void:
 	var pid := _next_bot_id()
 	if pid == 0:
 		return
@@ -1761,14 +1880,13 @@ func _spawn_coop_enemy(archetype: String) -> void:
 	NetworkManager.players[pid] = enemy_name
 	round_wins[pid] = 0
 	_ping_ms_by_player[pid] = -1
-	var pick := _pick_spawn(_current_player_positions())
-	var sky_pos: Vector3 = pick["pos"] + Vector3(0.0, 60.0, 0.0)
-	_do_spawn.rpc(pid, enemy_name, sky_pos, true, -1, false, pick["yaw"], appearance_seed)
+	var bury_pos: Vector3 = ground_pos - Vector3.UP * PLAYER_SCRIPT.HELL_EMERGE_DEPTH
+	_do_spawn.rpc(pid, enemy_name, bury_pos, true, -1, false, spawn_yaw, appearance_seed)
 	var p := players_root.get_node_or_null(str(pid))
 	if p:
 		p.apply_enemy_archetype.rpc(archetype, coop_wave)
 		_apply_coop_spawn_health(p)
-		p.set_launching.rpc(true, 45.0)
+		p.begin_hell_emerge.rpc(ground_pos, Time.get_ticks_msec())
 	NetworkManager.player_list_changed.emit()
 	_broadcast_scores.rpc(round_wins)
 	_refresh_bot_counter()
@@ -2610,6 +2728,7 @@ func _reset_round_tracking() -> void:
 	_ion_cannon_pending = false
 	_coop_enemy_spawn_queue.clear()
 	_coop_enemy_spawn_timer = -1.0
+	_coop_enemy_incoming = {}
 	_coop_wave_enemy_total = 0
 	_coop_wave_kills = 0
 	_reset_pickup_spawner()
@@ -3059,6 +3178,7 @@ func _end_coop_match() -> void:
 	_clear_coop_downed_players()
 	_coop_enemy_spawn_queue.clear()
 	_coop_enemy_spawn_timer = -1.0
+	_coop_enemy_incoming = {}
 	_set_game_state.rpc(State.MATCH_OVER)
 	for raw_id in NetworkManager.players:
 		var p := players_root.get_node_or_null(str(raw_id))
