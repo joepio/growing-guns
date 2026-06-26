@@ -1089,8 +1089,6 @@ func _update_hell_emerge(delta: float) -> void:
 		skin_blend = Violence.ease_out_cubic(skin_blend)
 	_apply_hell_emerge_visuals(_hell_emerge_heat(), skin_blend)
 	_apply_hell_emerge_shake(rise_t)
-	if _hell_emerge_elapsed >= _hell_emerge_rise_seconds * 0.5:
-		_dismiss_hell_emerge_telegraph()
 	if is_multiplayer_authority():
 		velocity = Vector3.ZERO
 		_last_sync_pos = global_position
@@ -1177,15 +1175,23 @@ func begin_hell_emerge(
 	_hell_emerging = true
 	_hell_emerge_finished = false
 	_hell_emerge_depth = depth if depth > 0.0 else HELL_EMERGE_DEPTH
-	_hell_emerge_target = surface_pos
-	_hell_emerge_start = surface_pos - Vector3.UP * _hell_emerge_depth
+	var stand := surface_pos
+	var scene := get_tree().current_scene
+	if scene:
+		stand = Violence.hell_emerge_stand_pos(scene, surface_pos)
+	_hell_emerge_target = stand
+	_hell_emerge_start = stand - Vector3.UP * _hell_emerge_depth
 	_hell_emerge_start_ms = Time.get_ticks_msec()
 	$CollisionShape3D.disabled = true
 	global_position = _hell_emerge_start
 	velocity = Vector3.ZERO
 	_reset_blob_emerge_rest()
-	_spawn_hell_emerge_light(surface_pos)
+	_spawn_hell_emerge_light(stand)
 	_apply_hell_emerge_visuals(1.0)
+	get_tree().create_timer(_hell_emerge_rise_seconds * 0.5).timeout.connect(
+		func() -> void: call_deferred("_dismiss_hell_emerge_telegraph"),
+		CONNECT_ONE_SHOT,
+	)
 	if is_multiplayer_authority():
 		_last_sync_pos = global_position
 		_last_sync_yaw = rotation.y

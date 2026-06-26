@@ -1212,6 +1212,7 @@ static var _heat_shader: Shader = null
 static var _shock_mesh: SphereMesh = null
 static var _shock_shader: Shader = null
 static var _pentagram_glow_shader: Shader = null
+static var _pentagram_beam_shader: Shader = null
 static var _blast_budget_frame: int = -1
 static var _full_blasts_this_frame: int = 0
 static var _cheap_blasts_this_frame: int = 0
@@ -2311,6 +2312,7 @@ static func spawn_shockwave_ring(scene: Node, pos: Vector3, radius: float) -> vo
 # Coop enemy incoming: hot pentagram on the ground — hell's door before they rise.
 # Warms up, holds at peak until dismiss_enemy_incoming_telegraph* is called on spawn.
 const ENEMY_INCOMING_TELEGRAPH_COOLDOWN := 0.55
+const PENTAGRAM_BEAM_HEIGHT := 20.0
 
 # Shared orange-red hell-emerge palette (pentagram telegraph + rising character).
 static func hell_emerge_cool_color() -> Color:
@@ -2384,6 +2386,21 @@ static func spawn_enemy_incoming_telegraph(
 		core_mat,
 	)
 
+	var beam_mat := _make_pentagram_beam_material(Violence.hell_emerge_hot_emission_color())
+	var beam := MeshInstance3D.new()
+	beam.name = "HeatBeam"
+	var beam_mesh := CylinderMesh.new()
+	beam_mesh.top_radius = star_radius
+	beam_mesh.bottom_radius = star_radius
+	beam_mesh.height = PENTAGRAM_BEAM_HEIGHT
+	beam_mesh.radial_segments = 32
+	beam_mesh.rings = 1
+	beam.mesh = beam_mesh
+	beam.material_override = beam_mat
+	beam.position.y = PENTAGRAM_BEAM_HEIGHT * 0.5
+	beam.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	anchor.add_child(beam)
+
 	var ground_light := OmniLight3D.new()
 	ground_light.light_color = Violence.hell_emerge_cool_color()
 	ground_light.light_energy = 0.0
@@ -2394,17 +2411,18 @@ static func spawn_enemy_incoming_telegraph(
 	var vfx := {
 		"star_mat": star_mat,
 		"core_mat": core_mat,
+		"beam_mat": beam_mat,
 		"ground_light": ground_light,
 	}
 	anchor.set_meta("pentagram_vfx", vfx)
 	anchor.set_meta("pentagram_heat", 0.0)
 
-	_apply_pentagram_heat(star_mat, core_mat, ground_light, 0.0)
+	_apply_pentagram_heat(star_mat, core_mat, ground_light, 0.0, beam_mat)
 
 	var apply_heat := func(h: float) -> void:
 		if is_instance_valid(anchor):
 			anchor.set_meta("pentagram_heat", h)
-		_apply_pentagram_heat(star_mat, core_mat, ground_light, h)
+		_apply_pentagram_heat(star_mat, core_mat, ground_light, h, beam_mat)
 
 	var tw := anchor.create_tween()
 	anchor.set_meta("intro_tween", tw)
@@ -2430,13 +2448,14 @@ static func dismiss_enemy_incoming_telegraph(anchor: Node3D, cool_duration: floa
 		(intro as Tween).kill()
 	var star_mat: ShaderMaterial = vfx["star_mat"]
 	var core_mat: ShaderMaterial = vfx["core_mat"]
+	var beam_mat: ShaderMaterial = vfx.get("beam_mat")
 	var ground_light: OmniLight3D = vfx["ground_light"]
 	var start_heat := float(anchor.get_meta("pentagram_heat", 1.0))
 	cool_duration = clampf(cool_duration, 0.15, 2.0)
 	var apply_heat := func(h: float) -> void:
 		if is_instance_valid(anchor):
 			anchor.set_meta("pentagram_heat", h)
-		_apply_pentagram_heat(star_mat, core_mat, ground_light, h)
+		_apply_pentagram_heat(star_mat, core_mat, ground_light, h, beam_mat)
 	var tw := anchor.create_tween()
 	tw.tween_method(apply_heat, start_heat, 0.0, cool_duration)\
 		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
@@ -2460,6 +2479,23 @@ static func dismiss_enemy_incoming_telegraph_at(scene: Node, pos: Vector3, cool_
 		dismiss_enemy_incoming_telegraph(best, cool_duration)
 
 
+static func hell_emerge_stand_pos(scene: Node, world_pos: Vector3) -> Vector3:
+	var world: World3D = scene.get_world_3d() if scene else null
+	var space: PhysicsDirectSpaceState3D = world.direct_space_state if world else null
+	if space == null:
+		return world_pos
+	var from := world_pos + Vector3.UP * 3.0
+	var to := world_pos + Vector3.DOWN * 24.0
+	var query := PhysicsRayQueryParameters3D.create(from, to)
+	query.collision_mask = 1
+	query.collide_with_areas = false
+	var hit: Dictionary = space.intersect_ray(query)
+	if hit.is_empty():
+		return world_pos
+	var floor_y: float = hit.get("position", world_pos).y
+	return Vector3(world_pos.x, floor_y + 0.9, world_pos.z)
+
+
 static func _ground_surface_at(scene: Node, world_pos: Vector3) -> Vector3:
 	var world: World3D = scene.get_world_3d() if scene else null
 	var space: PhysicsDirectSpaceState3D = world.direct_space_state if world else null
@@ -2475,6 +2511,39 @@ static func _ground_surface_at(scene: Node, world_pos: Vector3) -> Vector3:
 		return world_pos + Vector3.UP * 0.08
 	var floor_y: float = hit.get("position", world_pos).y
 	return Vector3(world_pos.x, floor_y + 0.14, world_pos.z)
+
+
+static func _make_pentagram_beam_material(tint: Color) -> ShaderMaterial:
+	if _pentagram_beam_shader == null:
+		_pentagram_beam_shader = Shader.new()
+		_pentagram_beam_shader.code = """
+			shader_type spatial;
+			render_mode unshaded, cull_disabled, depth_draw_never, blend_add;
+
+			uniform vec3 tint_color = vec3(1.0, 0.35, 0.05);
+			uniform float glow = 1.0;
+			uniform float beam_height = 20.0;
+			uniform float intensity = 0.32;
+
+			varying float height_t;
+
+			void vertex() {
+				height_t = clamp((VERTEX.y + beam_height * 0.5) / beam_height, 0.0, 1.0);
+			}
+
+			void fragment() {
+				float fade = pow(1.0 - height_t, 1.35);
+				float strength = glow * intensity * fade;
+				ALBEDO = tint_color * strength;
+				ALPHA = strength;
+			}
+		"""
+	var mat := ShaderMaterial.new()
+	mat.shader = _pentagram_beam_shader
+	mat.set_shader_parameter("tint_color", Vector3(tint.r, tint.g, tint.b))
+	mat.set_shader_parameter("glow", 0.0)
+	mat.set_shader_parameter("beam_height", PENTAGRAM_BEAM_HEIGHT)
+	return mat
 
 
 static func _make_pentagram_glow_material(tint: Color) -> ShaderMaterial:
@@ -2575,6 +2644,7 @@ static func _apply_pentagram_heat(
 	core_mat: ShaderMaterial,
 	ground_light: OmniLight3D,
 	heat: float,
+	beam_mat: ShaderMaterial = null,
 ) -> void:
 	var h := clampf(heat, 0.0, 1.0)
 	var eased := ease_out_cubic(h)
@@ -2585,6 +2655,10 @@ static func _apply_pentagram_heat(
 	star_mat.set_shader_parameter("glow", glow)
 	core_mat.set_shader_parameter("tint_color", Vector3(core_col.r, core_col.g, core_col.b))
 	core_mat.set_shader_parameter("glow", glow * 1.2)
+	if beam_mat:
+		var beam_col := star_col.lerp(hell_emerge_peak_light_color(), 0.2)
+		beam_mat.set_shader_parameter("tint_color", Vector3(beam_col.r, beam_col.g, beam_col.b))
+		beam_mat.set_shader_parameter("glow", glow * 0.35)
 	if ground_light and is_instance_valid(ground_light):
 		ground_light.light_energy = lerpf(0.0, 11.0, eased)
 		ground_light.light_color = hell_emerge_cool_color().lerp(hell_emerge_peak_light_color(), eased)

@@ -184,23 +184,11 @@ func _choose_weighted_spawn(candidates: Array[Vector3]) -> Vector3:
 
 
 func _standing_at(world_x: float, world_z: float) -> Vector3:
-	var floor_y := _floor_y_at(world_x, world_z)
-	return Vector3(world_x, floor_y + CAPSULE_HALF, world_z)
+	return Violence.hell_emerge_stand_pos(self, Vector3(world_x, 0.0, world_z))
 
 
 func _floor_y_at(world_x: float, world_z: float) -> float:
-	var space := get_world_3d().direct_space_state
-	if space == null:
-		return 0.0
-	var from := Vector3(world_x, 40.0, world_z)
-	var to := Vector3(world_x, -20.0, world_z)
-	var query := PhysicsRayQueryParameters3D.create(from, to)
-	query.collision_mask = 1
-	query.collide_with_areas = false
-	var hit: Dictionary = space.intersect_ray(query)
-	if hit.is_empty():
-		return 0.0
-	return float(hit.get("position", from).y)
+	return Violence.hell_emerge_stand_pos(self, Vector3(world_x, 0.0, world_z)).y - CAPSULE_HALF
 
 
 func _spawn_has_ground(pos: Vector3) -> bool:
