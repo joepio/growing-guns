@@ -13,3 +13,6 @@ func _physics_process(_delta: float) -> void:
 	var t2 := Time.get_ticks_usec()
 	Trace.prof("destruct_flush", t1 - t0)
 	Trace.prof("debris_flush", t2 - t1)
+	if BenchFlags.active:
+		DestructibleManager.bench_destruct_prof("destruct_flush", t1 - t0)
+		DestructibleManager.bench_destruct_prof("debris_flush", t2 - t1)

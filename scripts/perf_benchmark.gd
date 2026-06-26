@@ -10,9 +10,13 @@ extends Node3D
 #
 # Pass `-- mode=NAME` to toggle A/B isolation flags (see _parse_cli_args).
 # Pass `-- build=card,card,...` to override the stress build.
+# Baseline includes level destruction (explosive rounds carve destructible
+# terrain via DestructionCoordinator). Use `mode=no_destruction` to A/B it.
 # In --headless mode, render-side perf monitors return 0 (draw_calls etc.);
 # physics_ms / frame_ms / event rates remain accurate, which is what we
 # actually want for tracking gameplay-side regressions.
+
+const DestructibleManager = preload("res://scripts/destructible_manager.gd")
 
 const ARENA_SCENE := preload("res://scenes/arena_procedural.tscn")
 const PLAYER_SCENE := preload("res://scenes/player.tscn")
@@ -67,7 +71,16 @@ var _node_count: Array[int] = []
 var _orphan_count: Array[int] = []
 var _resource_count: Array[int] = []
 var _projectile_count: Array[int] = []
+var _debris_nodes: Array[int] = []
+var _debris_queue_len: Array[int] = []
+var _destruct_dirty_queue: Array[int] = []
+var _arena_chunks: Array[int] = []
+var _chunks_at_measure_start: int = 0
 var _peak_static_mem: int = 0
+var _wall_spray_collider: Node = null
+var _wall_spray_pos: Vector3 = Vector3.ZERO
+var _wall_spray_accum: float = 0.0
+const WALL_SPRAY_RATE := 40.0  # ~minigun explosive hits/sec at one spot
 
 
 func _ready() -> void:
@@ -117,6 +130,11 @@ func _parse_cli_args() -> void:
 			BenchFlags.no_explosion_visuals = true
 		"no_bullets":
 			BenchFlags.no_bullets = true
+		"no_destruction":
+			BenchFlags.no_destruction = true
+		"wall_spray":
+			bench_mode = "wall_spray"
+			build = ["minigun", "explosive", "explosive"]
 
 
 func _build_arena() -> void:
@@ -210,14 +228,62 @@ func _process(_delta: float) -> void:
 	match _phase:
 		"warmup":
 			if t >= WARMUP_SEC:
+				Violence.reset_bench_blast_prof()
+				DestructibleManager.reset_bench_destruct_prof()
+				DestructibleManager.reset_chunk_removals()
+				Violence.reset_debris_bench_counters()
+				_chunks_at_measure_start = _count_arena_chunks()
+				_debris_nodes.clear()
+				_debris_queue_len.clear()
+				_destruct_dirty_queue.clear()
+				_arena_chunks.clear()
+				_setup_wall_spray()
 				_phase = "measure"
-				print("[bench] warmup done — sampling for %.1fs" % MEASURE_SEC)
+				print("[bench] warmup done — sampling for %.1fs (arena chunks=%d destruction=%s)"
+					% [MEASURE_SEC, _chunks_at_measure_start,
+						"off" if BenchFlags.no_destruction else "on"])
 		"measure":
 			_capture_sample()
 			if t >= WARMUP_SEC + MEASURE_SEC:
 				_phase = "done"
 				_dump_results()
 				get_tree().quit()
+
+
+func _physics_process(delta: float) -> void:
+	if bench_mode != "wall_spray" or _phase != "measure" or BenchFlags.no_destruction:
+		return
+	if _wall_spray_collider == null or not is_instance_valid(_wall_spray_collider):
+		return
+	_wall_spray_accum += delta * WALL_SPRAY_RATE
+	while _wall_spray_accum >= 1.0:
+		_wall_spray_accum -= 1.0
+		DestructibleManager.carve_from_hit(
+			_wall_spray_pos,
+			1.2,
+			6.5,
+			_wall_spray_collider,
+			Vector3.UP,
+			55.0,
+		)
+		if not BenchFlags.no_explosion_visuals:
+			Violence.spawn_bullet_blast(self, _wall_spray_pos, 6.5, Color(1.0, 0.5, 0.15), null, false)
+
+
+func _setup_wall_spray() -> void:
+	if bench_mode != "wall_spray":
+		return
+	_wall_spray_collider = null
+	for vol in get_tree().get_nodes_in_group("destructible"):
+		if not vol is Node3D:
+			continue
+		for child in vol.get_children():
+			if child is CollisionShape3D and not bool(child.get_meta("destroyed", false)):
+				_wall_spray_collider = child
+				_wall_spray_pos = (child as Node3D).global_position
+				print("[bench] wall_spray target=%s @ %s" % [vol.name, _wall_spray_pos])
+				return
+	print("[bench] WARNING: wall_spray mode but no destructible collider found")
 
 
 func _capture_sample() -> void:
@@ -232,6 +298,10 @@ func _capture_sample() -> void:
 	_orphan_count.append(int(Performance.get_monitor(Performance.OBJECT_ORPHAN_NODE_COUNT)))
 	_resource_count.append(int(Performance.get_monitor(Performance.OBJECT_RESOURCE_COUNT)))
 	_projectile_count.append(get_tree().get_nodes_in_group("projectiles").size())
+	_debris_nodes.append(get_tree().get_nodes_in_group("destruction_debris").size())
+	_debris_queue_len.append(Violence.debug_debris_queue_len())
+	_destruct_dirty_queue.append(DestructibleManager.debug_dirty_queue_len())
+	_arena_chunks.append(_count_arena_chunks())
 	var mem := int(Performance.get_monitor(Performance.MEMORY_STATIC))
 	if mem > _peak_static_mem:
 		_peak_static_mem = mem
@@ -260,6 +330,10 @@ func _dump_results() -> void:
 		"drawn_objects": _istats(_drawn_objects),
 		"active_rigid_bodies": _istats(_active_rb),
 		"projectiles_in_group": _istats(_projectile_count),
+		"destruction_debris_nodes": _istats(_debris_nodes),
+		"destruction_debris_queue": _istats(_debris_queue_len),
+		"destruction_dirty_queue": _istats(_destruct_dirty_queue),
+		"arena_chunks_remaining": _istats(_arena_chunks),
 		"node_count": _istats(_node_count),
 		"orphan_nodes": _istats(_orphan_count),
 		"resource_count": _istats(_resource_count),
@@ -283,10 +357,16 @@ func _dump_results() -> void:
 	_print_irow("drawn_objects",      _istats(_drawn_objects))
 	_print_irow("active_rigid_bodies",_istats(_active_rb))
 	_print_irow("projectiles",        _istats(_projectile_count))
+	_print_irow("debris_nodes",       _istats(_debris_nodes))
+	_print_irow("debris_queue",       _istats(_debris_queue_len))
+	_print_irow("destruct_dirty_q",   _istats(_destruct_dirty_queue))
+	_print_irow("arena_chunks",       _istats(_arena_chunks))
 	_print_irow("node_count",         _istats(_node_count))
 	_print_irow("orphan_nodes",       _istats(_orphan_count))
 	_print_irow("resource_count",     _istats(_resource_count))
 	print("Peak static mem (MB):   %.1f" % (float(_peak_static_mem) / (1024.0 * 1024.0)))
+	_print_destruct_summary(summary)
+	_print_blast_prof(summary)
 	print("===========================================\n")
 	# JSON dump — easy to diff across runs.
 	var path := "/tmp/godot_perf_bench.json"
@@ -305,6 +385,116 @@ func _print_row(label: String, s: Dictionary) -> void:
 func _print_irow(label: String, s: Dictionary) -> void:
 	print("%-22s mean=%7d  p50=%7d  p95=%7d  max=%7d" % [
 		label, s.mean, s.p50, s.p95, s.max])
+
+
+func _print_blast_prof(summary: Dictionary) -> void:
+	var prof: Dictionary = Violence.bench_blast_prof_summary()
+	var usec: Dictionary = prof.get("usec", {})
+	var n: Dictionary = prof.get("n", {})
+	if usec.is_empty():
+		return
+	var calls := int(n.get("blast_calls", 0))
+	var full := int(n.get("blast_full", 0))
+	var cheap := int(n.get("blast_cheap", 0))
+	var total_usec := int(usec.get("blast_total", 0))
+	print("\n--- blast VFX spawn cost (measure window) ---")
+	print("Calls: full=%d  cheap=%d  total=%d" % [full, cheap, calls])
+	if calls > 0 and total_usec > 0:
+		print("Total spawn CPU: %.1f ms  (%.1f us/call mean)" % [
+			total_usec / 1000.0, float(total_usec) / float(calls)])
+	var layers: Array[String] = [
+		"sidechain", "view_punch", "cheap_flare", "heat_distortion", "shockwave",
+		"flash_light", "fireball_light", "smoke_push", "smoke_billow", "fire_billow",
+		"flame_shards", "embers", "explosion_audio", "blast_total",
+	]
+	var rows: Array[Dictionary] = []
+	for bucket in layers:
+		var bu := int(usec.get(bucket, 0))
+		if bu <= 0:
+			continue
+		var bn := int(n.get(bucket, 0))
+		rows.append({
+			"bucket": bucket,
+			"ms": bu / 1000.0,
+			"us_per": float(bu) / float(maxi(bn, 1)),
+			"n": bn,
+			"pct": 100.0 * float(bu) / float(maxi(total_usec, 1)),
+		})
+	rows.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return float(a["ms"]) > float(b["ms"]))
+	for row in rows:
+		print("  %-16s %8.1f ms  %7.1f us/call  n=%5d  %5.1f%%" % [
+			row["bucket"], row["ms"], row["us_per"], row["n"], row["pct"]])
+	summary["blast_prof"] = prof
+	summary["blast_prof_rows"] = rows
+
+
+func _count_arena_chunks() -> int:
+	var total := 0
+	for node in get_tree().get_nodes_in_group("destructible"):
+		if node.has_method("debug_chunk_count"):
+			total += int(node.call("debug_chunk_count"))
+	return total
+
+
+func _print_destruct_summary(summary: Dictionary) -> void:
+	var chunks_end := _count_arena_chunks()
+	var chunks_removed := DestructibleManager.debug_chunk_removals()
+	var prem := Violence.debug_debris_premium_bursts()
+	var cheap := Violence.debug_debris_cheap_bursts()
+	var destructibles := DestructibleManager.debug_registered_count()
+	var removals_per_sec := int(float(chunks_removed) / MEASURE_SEC)
+	summary["destruction"] = {
+		"enabled": not BenchFlags.no_destruction,
+		"chunks_at_start": _chunks_at_measure_start,
+		"chunks_at_end": chunks_end,
+		"chunks_removed": chunks_removed,
+		"removals_per_sec": removals_per_sec,
+		"debris_premium_bursts": prem,
+		"debris_cheap_bursts": cheap,
+		"destructible_volumes": destructibles,
+	}
+	print("\n--- level destruction (measure window) ---")
+	print("Enabled:                %s" % ("yes" if not BenchFlags.no_destruction else "no (mode=no_destruction)"))
+	print("Destructible volumes:   %d" % destructibles)
+	print("Arena chunks:           start=%d  end=%d  removed=%d  (~%d/s)"
+		% [_chunks_at_measure_start, chunks_end, chunks_removed, removals_per_sec])
+	print("Debris bursts:          premium=%d  cheap=%d" % [prem, cheap])
+	if not BenchFlags.no_destruction and chunks_removed <= 0:
+		print("WARNING: no chunk removals — destruction may not be wired (check arena + explosive hits)")
+	var prof: Dictionary = DestructibleManager.bench_destruct_prof_summary()
+	var usec: Dictionary = prof.get("usec", {})
+	var n: Dictionary = prof.get("n", {})
+	if usec.is_empty():
+		return
+	var carve_calls := int(n.get("carve_calls", 0))
+	var total_usec := 0
+	for bucket in ["carve_queue", "destruct_flush", "debris_flush", "chunk_remove", "jag"]:
+		total_usec += int(usec.get(bucket, 0))
+	print("Destruction CPU:        %.1f ms total  carve_calls=%d" % [total_usec / 1000.0, carve_calls])
+	var layers: Array[String] = [
+		"carve_queue", "destruct_flush", "debris_flush", "chunk_remove", "jag",
+	]
+	var rows: Array[Dictionary] = []
+	for bucket in layers:
+		var bu := int(usec.get(bucket, 0))
+		if bu <= 0:
+			continue
+		var bn := int(n.get(bucket, 0))
+		rows.append({
+			"bucket": bucket,
+			"ms": bu / 1000.0,
+			"us_per": float(bu) / float(maxi(bn, 1)),
+			"n": bn,
+			"pct": 100.0 * float(bu) / float(maxi(total_usec, 1)),
+		})
+	rows.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return float(a["ms"]) > float(b["ms"]))
+	for row in rows:
+		print("  %-16s %8.1f ms  %7.1f us/call  n=%5d  %5.1f%%" % [
+			row["bucket"], row["ms"], row["us_per"], row["n"], row["pct"]])
+	summary["destruct_prof"] = prof
+	summary["destruct_prof_rows"] = rows
 
 
 func _stats(arr: Array) -> Dictionary:

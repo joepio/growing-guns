@@ -121,6 +121,7 @@ func queue_carve_world(
 func apply_pending_carves() -> bool:
 	if _pending_carves.is_empty():
 		return false
+	var t0 := Time.get_ticks_usec() if BenchFlags.active else 0
 	# Merge every carve queued this tick: accumulate damage per chunk first, then
 	# do ONE threshold/removal sweep + ONE debris burst. The old per-carve path
 	# dropped every sub-MIN_ACCUMULATE_DAMAGE hit (so a stream of small blasts
@@ -210,6 +211,8 @@ func apply_pending_carves() -> bool:
 		remove_from_group("destructible")
 		collision_layer = 0
 		DestructibleManager.unregister_destructible(self)
+	if BenchFlags.active and t0 > 0:
+		DestructibleManager.bench_destruct_prof("chunk_remove", Time.get_ticks_usec() - t0)
 	return true
 
 
@@ -238,7 +241,10 @@ func _process(_delta: float) -> void:
 		_jaggedize_exposed_chunks(job["pos"] as Vector3, float(job["radius"]))
 		jobs += 1
 	if jobs > 0:
-		Trace.prof("jag", Time.get_ticks_usec() - _t)
+		var elapsed := Time.get_ticks_usec() - _t
+		Trace.prof("jag", elapsed)
+		if BenchFlags.active:
+			DestructibleManager.bench_destruct_prof("jag", elapsed)
 	if _pending_exposure_carves.is_empty():
 		set_process(false)
 

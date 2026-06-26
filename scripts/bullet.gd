@@ -334,7 +334,7 @@ func _handle_collision(result: Dictionary) -> void:
 		Violence.hit_corpse(collider as RigidBody3D, hit_pos, direction, corpse_dmg)
 		# Bullet stops on corpse — same as hitting a wall. Explosive rounds
 		# still detonate below.
-		if weapon_stats.explosive_radius > 0.0:
+		if weapon_stats.explosive_radius > 0.0 and Violence.blast_vfx_will_spawn(hit_pos):
 			shooter_node.call("_spawn_bullet_blast", hit_pos, weapon_stats.explosive_radius, weapon_stats.bullet_color, true)
 			if multiplayer.is_server():
 				var splash_pos: Vector3 = hit_pos + normal * 0.1
@@ -388,7 +388,8 @@ func _handle_collision(result: Dictionary) -> void:
 			Violence.spawn_headshot_spray(get_tree().current_scene, hit_pos, direction, blood_ratio)
 	else:
 		shooter_node.call("_spawn_impact", hit_pos, weapon_stats.bullet_color, weapon_stats.get_bullet_scale_for_shot(last_in_mag), impact_dmg_ratio, normal, weapon_stats.explosive_radius, collider)
-		SFX.impact(hit_pos, dmg_ratio)
+		if weapon_stats.explosive_radius <= 0.0:
+			SFX.impact(hit_pos, dmg_ratio)
 		DestructibleManager.carve_from_hit(
 			hit_pos,
 			impact_dmg_ratio,
@@ -399,7 +400,8 @@ func _handle_collision(result: Dictionary) -> void:
 		)
 
 	if weapon_stats.explosive_radius > 0.0 and not bench_skip_visuals:
-		shooter_node.call("_spawn_bullet_blast", hit_pos, weapon_stats.explosive_radius, weapon_stats.bullet_color, true)
+		if Violence.blast_vfx_will_spawn(hit_pos):
+			shooter_node.call("_spawn_bullet_blast", hit_pos, weapon_stats.explosive_radius, weapon_stats.bullet_color, true)
 
 	# Server logic
 	if multiplayer.is_server():
