@@ -12,7 +12,7 @@ config_version=5
 
 config/name="Growing Guns"
 config/description="High-paced multiplayer arena shooter"
-config/version="0.2.32"
+config/version="0.2.33"
 run/main_scene="res://scenes/start_screen.tscn"
 config/features=PackedStringArray("4.6", "Forward Plus")
 run/max_fps=360
