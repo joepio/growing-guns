@@ -60,6 +60,10 @@ const HIGH_RATE_REMOTE_CASING_BPS := 90.0
 const MAX_ACTIVE_TP_CASINGS := 28
 static var _tp_casing_fifo: Array[RigidBody3D] = []
 
+static func clear_tp_casing_fifo() -> void:
+	_tp_casing_fifo.clear()
+
+
 static func _enroll_tp_casing(rb: RigidBody3D) -> void:
 	_tp_casing_fifo.append(rb)
 	rb.tree_exiting.connect(func() -> void: _tp_casing_fifo.erase(rb))
@@ -1129,6 +1133,22 @@ func _clear_hell_emerge_fx() -> void:
 	$CollisionShape3D.disabled = false
 
 
+func _abort_hell_emerge() -> void:
+	if not _hell_emerging:
+		return
+	_hell_emerging = false
+	_hell_emerge_finished = true
+	_hell_emerge_elapsed = 0.0
+	_hell_emerge_start_ms = 0
+	_clear_hell_emerge_shake()
+	_clear_hell_emerge_fx()
+	if not _hell_emerge_telegraph_dismissed:
+		_dismiss_hell_emerge_telegraph()
+	for mesh in _body_meshes():
+		mesh.material_override = _body_materials.get(mesh, mesh.material_override)
+	_apply_identity_skin_materials()
+
+
 func _finish_hell_emerge() -> void:
 	_hell_emerge_finished = true
 	_hell_emerging = false
@@ -1174,11 +1194,19 @@ func begin_hell_emerge(
 	_hell_emerge_elapsed = 0.0
 	_hell_emerging = true
 	_hell_emerge_finished = false
-	_hell_emerge_depth = depth if depth > 0.0 else HELL_EMERGE_DEPTH
+	if depth > 0.0:
+		_hell_emerge_depth = depth
+	elif is_bot:
+		_hell_emerge_depth = _hell_emerge_burial_depth()
+	else:
+		_hell_emerge_depth = HELL_EMERGE_DEPTH
 	var stand := surface_pos
 	var scene := get_tree().current_scene
 	if scene:
-		stand = Violence.hell_emerge_stand_pos(scene, surface_pos)
+		var half_h := 0.9
+		if is_bot:
+			half_h = _hell_emerge_half_height()
+		stand = Violence.hell_emerge_stand_pos(scene, surface_pos, half_h)
 	_hell_emerge_target = stand
 	_hell_emerge_start = stand - Vector3.UP * _hell_emerge_depth
 	_hell_emerge_start_ms = Time.get_ticks_msec()
@@ -1597,6 +1625,8 @@ func _unhandled_input(event: InputEvent) -> void:
 
 func _physics_process(delta: float) -> void:
 	if _hell_emerging:
+		if health <= 0:
+			return
 		_update_hell_emerge(delta)
 		if is_multiplayer_authority():
 			velocity = Vector3.ZERO
@@ -2539,6 +2569,11 @@ func _spawn_muzzle_flash(
 		kick_tw.tween_property(anchor, "position", rest_pos, 0.08)\
 			.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
 
+func clear_live_casings() -> void:
+	if _procedural_gun and _procedural_gun.has_method("clear_live_casings"):
+		_procedural_gun.clear_live_casings()
+
+
 func _spawn_third_person_casing(w: Weapon) -> void:
 	if BenchFlags.active and BenchFlags.no_casings:
 		return
@@ -3418,7 +3453,9 @@ func _apply_damage(
 	blast_severity: float = 0.0,
 	is_head: bool = false,
 ) -> void:
-	if ghost_mode or coop_downed or frozen or health <= 0 or god_mode or _phoenix_ascending or _hell_emerging:
+	if ghost_mode or coop_downed or frozen or health <= 0 or god_mode or _phoenix_ascending:
+		return
+	if _hell_emerging and not is_bot:
 		return
 	var game_scene := get_tree().current_scene
 	if from_id != player_id and game_scene and game_scene.has_method("should_block_player_damage") \
@@ -3560,6 +3597,8 @@ func _execute_lethal_death(
 ) -> void:
 	if not suppress_death_sound:
 		_play_death_sound.rpc(global_position)
+	if _hell_emerging:
+		_abort_hell_emerge()
 	if is_bot:
 		_bot_target = null
 		_bot_shoot_cooldown = 999.0
@@ -3768,12 +3807,69 @@ func set_spawn_health(amount: int) -> void:
 	health = maxi(1, amount)
 
 
+static func _apply_coop_archetype_body(archetype: String, w: Weapon) -> void:
+	w.body_scale = 1.0
+	w.body_scale_axes = Vector3.ONE
+	w.head_scale = 1.0
+	match archetype:
+		"sniper":
+			w.body_scale = 0.92
+			w.body_scale_axes *= Vector3(0.75, 2.4, 0.75)
+		"grenadier":
+			w.body_scale = 1.28
+		"flat_fragger":
+			w.body_scale = 0.86
+			w.body_scale_axes *= Vector3(0.65, 1.0, 1.45)
+		"demolition":
+			w.body_scale = 1.08
+		_:
+			w.body_scale = 0.78
+			w.head_scale = 0.9
+
+
+static func coop_enemy_body_footprint(archetype: String) -> float:
+	var w := Weapon.new()
+	_apply_coop_archetype_body(archetype, w)
+	return maxf(w.body_scale * w.body_scale_axes.x, w.body_scale * w.body_scale_axes.z)
+
+
+static func coop_enemy_body_height_scale(archetype: String) -> float:
+	var w := Weapon.new()
+	_apply_coop_archetype_body(archetype, w)
+	return w.body_scale * w.body_scale_axes.y
+
+
+static func coop_enemy_pentagram_star_radius(archetype: String) -> float:
+	return clampf(1.05 * coop_enemy_body_footprint(archetype), 0.48, 2.05)
+
+
+static func coop_enemy_pentagram_beam_height(archetype: String) -> float:
+	return clampf(Violence.PENTAGRAM_BEAM_HEIGHT * coop_enemy_body_height_scale(archetype), 10.0, 48.0)
+
+
+static func coop_enemy_hell_emerge_half_height(archetype: String) -> float:
+	return HELL_CAPSULE_HEIGHT * 0.5 * coop_enemy_body_height_scale(archetype)
+
+
+static func coop_enemy_hell_emerge_depth(archetype: String) -> float:
+	return HELL_CAPSULE_HEIGHT * coop_enemy_body_height_scale(archetype) + HELL_EMERGE_BURIAL_EXTRA
+
+
+func _hell_emerge_half_height() -> float:
+	return HELL_CAPSULE_HEIGHT * 0.5 * maxf(0.1, weapon.body_scale) * maxf(0.1, weapon.body_scale_axes.y)
+
+
+func _hell_emerge_burial_depth() -> float:
+	return HELL_CAPSULE_HEIGHT * maxf(0.1, weapon.body_scale) * maxf(0.1, weapon.body_scale_axes.y) + HELL_EMERGE_BURIAL_EXTRA
+
+
 @rpc("authority", "call_local", "reliable")
 func apply_enemy_archetype(archetype: String, wave: int = 1) -> void:
 	if not is_bot:
 		return
 	enemy_archetype = archetype
 	weapon.reset()
+	_apply_coop_archetype_body(archetype, weapon)
 	match archetype:
 		"sniper":
 			weapon.damage_mult = 1.45 + float(wave) * 0.04
@@ -3785,8 +3881,6 @@ func apply_enemy_archetype(archetype: String, wave: int = 1) -> void:
 			weapon.bullet_speed_mult = 2.8
 			weapon.bullet_drop = 0.0
 			weapon.headshot_mult = 1.35
-			weapon.body_scale = 0.92
-			weapon.body_scale_axes *= Vector3(0.75, 2.4, 0.75)
 			weapon.bullet_color = Color(0.72, 0.38, 1.0)
 			weapon.special = Weapon.SPECIAL_ZOOM
 		"grenadier":
@@ -3798,7 +3892,6 @@ func apply_enemy_archetype(archetype: String, wave: int = 1) -> void:
 			weapon.spread = 0.014
 			weapon.recoil_per_shot = 0.018
 			weapon.bullet_speed_mult = 0.68
-			weapon.body_scale = 1.28
 			weapon.max_hp_bonus += 60
 			weapon.explosive_radius = 3.4 + minf(float(wave) * 0.12, 1.6)
 			weapon.explosive_damage = 28.0 + float(wave) * 3.0
@@ -3812,8 +3905,6 @@ func apply_enemy_archetype(archetype: String, wave: int = 1) -> void:
 			weapon.spread = deg_to_rad(4.0)
 			weapon.recoil_per_shot = 0.022
 			weapon.bullet_speed_mult = 0.7
-			weapon.body_scale = 0.86
-			weapon.body_scale_axes *= Vector3(0.65, 1.0, 1.45)
 			weapon.bullet_color = Color(1.0, 0.42, 0.62)
 		"demolition":
 			weapon.damage_mult = 0.72 + float(wave) * 0.025
@@ -3826,7 +3917,6 @@ func apply_enemy_archetype(archetype: String, wave: int = 1) -> void:
 			weapon.explosive_damage = 35.0 + float(wave) * 4.0
 			weapon.special = Weapon.SPECIAL_CLUSTER_GRENADE if wave >= 10 else Weapon.SPECIAL_GRENADE
 			weapon.special_cooldown_mult = 0.78
-			weapon.body_scale = 1.08
 			weapon.bullet_color = Color(1.0, 0.42, 0.12)
 		_:
 			weapon.damage_mult = 0.48 + float(wave) * 0.025
@@ -3836,8 +3926,6 @@ func apply_enemy_archetype(archetype: String, wave: int = 1) -> void:
 			weapon.spread = 0.018
 			weapon.recoil_per_shot = 0.012
 			weapon.bullet_speed_mult = 0.82
-			weapon.body_scale = 0.78
-			weapon.head_scale = 0.9
 			weapon.bullet_color = Color(1.0, 0.82, 0.28)
 	mag = weapon.get_mag_size()
 	_update_body_scale()

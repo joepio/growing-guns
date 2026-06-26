@@ -160,6 +160,8 @@ func show_card_pick(card_ids: Array) -> void:
 		_card_pick_locked = false
 		_select_card(0)
 		_card_stick_x_engaged = _stick_x_past_deadzone()
+		if game and game.has_method("_sync_mouse_mode"):
+			game.call("_sync_mouse_mode")
 
 
 func hide_card_pick() -> void:
@@ -223,6 +225,10 @@ func _is_splitscreen_active() -> bool:
 
 func is_card_pick_visible() -> bool:
 	return bool(_hud.get("card_overlay").visible)
+
+
+func is_card_pick_blocking() -> bool:
+	return is_card_pick_visible() and not _card_pick_locked
 
 
 func show_hitmarker(kind: String) -> void:

@@ -1793,7 +1793,7 @@ func _begin_coop_enemy_incoming(archetype: String) -> void:
 	var pick := _pick_coop_enemy_spawn()
 	var ground_pos: Vector3 = pick["pos"]
 	var spawn_yaw: float = float(pick["yaw"])
-	_telegraph_coop_enemy_spawn.rpc(ground_pos)
+	_telegraph_coop_enemy_spawn.rpc(ground_pos, archetype)
 	_coop_enemy_incoming = {
 		"archetype": archetype,
 		"pos": ground_pos,
@@ -1803,12 +1803,14 @@ func _begin_coop_enemy_incoming(archetype: String) -> void:
 
 
 @rpc("authority", "call_local", "reliable")
-func _telegraph_coop_enemy_spawn(ground_pos: Vector3) -> void:
+func _telegraph_coop_enemy_spawn(ground_pos: Vector3, archetype: String = "grunt") -> void:
 	SFX.enemy_incoming(ground_pos)
 	Violence.spawn_enemy_incoming_telegraph(
 		self,
 		ground_pos,
 		COOP_ENEMY_TELEGRAPH_WARMUP,
+		PLAYER_SCRIPT.coop_enemy_pentagram_star_radius(archetype),
+		PLAYER_SCRIPT.coop_enemy_pentagram_beam_height(archetype),
 	)
 
 
@@ -1889,14 +1891,16 @@ func _spawn_coop_enemy(archetype: String, ground_pos: Vector3, spawn_yaw: float)
 	NetworkManager.players[pid] = enemy_name
 	round_wins[pid] = 0
 	_ping_ms_by_player[pid] = -1
-	var stand := Violence.hell_emerge_stand_pos(self, ground_pos)
-	var bury_pos: Vector3 = stand - Vector3.UP * PLAYER_SCRIPT.HELL_EMERGE_DEPTH
+	var half_h := PLAYER_SCRIPT.coop_enemy_hell_emerge_half_height(archetype)
+	var depth := PLAYER_SCRIPT.coop_enemy_hell_emerge_depth(archetype)
+	var stand := Violence.hell_emerge_stand_pos(self, ground_pos, half_h)
+	var bury_pos: Vector3 = stand - Vector3.UP * depth
 	_do_spawn.rpc(pid, enemy_name, bury_pos, true, -1, false, spawn_yaw, appearance_seed)
 	var p := players_root.get_node_or_null(str(pid))
 	if p:
 		p.apply_enemy_archetype.rpc(archetype, coop_wave)
 		_apply_coop_spawn_health(p)
-		p.begin_hell_emerge.rpc(stand, Time.get_ticks_msec())
+		p.begin_hell_emerge.rpc(stand, Time.get_ticks_msec(), depth)
 	NetworkManager.player_list_changed.emit()
 	_broadcast_scores.rpc(round_wins)
 	_refresh_bot_counter()
@@ -2198,8 +2202,7 @@ func _start_round_now() -> void:
 		p.set_frozen.rpc(false)
 		p.clear_ragdoll.rpc()
 	_clear_projectiles.rpc()
-	_clear_blood_splats.rpc()
-	_clear_smoke_puffs.rpc()
+	_clear_combat_vfx.rpc()
 	_clear_pickups.rpc()
 	_clear_air_strike_markers.rpc()
 	_clear_ion_cannon_markers.rpc()
@@ -2650,6 +2653,15 @@ func _clear_projectiles() -> void:
 	for node in get_tree().get_nodes_in_group("projectiles"):
 		if is_instance_valid(node):
 			node.queue_free()
+
+@rpc("authority", "call_local", "reliable")
+func _clear_combat_vfx() -> void:
+	Violence.clear_round_combat_vfx(self)
+	PLAYER_SCRIPT.clear_tp_casing_fifo()
+	for p in players_root.get_children():
+		if p.has_method("clear_live_casings"):
+			p.clear_live_casings()
+
 
 @rpc("authority", "call_local", "reliable")
 func _clear_blood_splats() -> void:
@@ -3435,7 +3447,6 @@ func _show_card_pick(loser_id: int, card_ids: Array) -> void:
 	# round-win banner locally before the card title fades in.
 	_set_banner("", 0.0)
 	_show_render_card_pick(loser_id, card_ids)
-	_sync_mouse_mode()
 
 func _show_render_card_pick(player_id: int, card_ids: Array) -> bool:
 	if _splitscreen and _splitscreen.is_enabled() and _splitscreen.has_method("show_card_pick"):
@@ -4375,7 +4386,7 @@ func _show_hit_damage_number(dmg: int, kind: String, world_pos: Vector3) -> void
 func is_any_modal_open() -> bool:
 	# Used by Player._unhandled_input to avoid recapturing the mouse when a
 	# UI overlay (card pick, dev panel, pause menu, settings, rematch) is visible.
-	if _is_render_card_pick_visible():
+	if _is_render_card_pick_blocking():
 		return true
 	return _is_global_modal_open()
 
@@ -4384,7 +4395,7 @@ func is_any_modal_open() -> bool:
 # splitscreen teammate's card pick must NOT freeze everyone else on the
 # same machine, only the picker themselves.
 func is_modal_blocking_player(pid: int) -> bool:
-	if _is_card_pick_visible_for_player(pid):
+	if _is_card_pick_blocking_for_player(pid):
 		return true
 	return _is_global_modal_open()
 
@@ -4393,7 +4404,7 @@ func _is_cursor_modal_open() -> bool:
 	# controller-using teammate can navigate cards without the cursor, so
 	# their pick shouldn't yank mouse capture away from a kbd+mouse player
 	# who's still alive and running around.
-	if _is_card_pick_visible_for_mouse_player():
+	if _is_card_pick_blocking_for_mouse_player():
 		return true
 	if _dev_panel and _dev_panel.is_open():
 		return true
@@ -4429,12 +4440,30 @@ func _is_render_card_pick_visible() -> bool:
 	return false
 
 
+func _is_render_card_pick_blocking() -> bool:
+	for renderer in _render_players.values():
+		if renderer.is_card_pick_blocking():
+			return true
+	if _splitscreen and _splitscreen.is_enabled() and _splitscreen.has_method("is_card_pick_blocking"):
+		return _splitscreen.is_card_pick_blocking()
+	return false
+
+
 func _is_card_pick_visible_for_player(pid: int) -> bool:
 	var renderer := _render_players.get(pid) as RenderPlayer
 	if renderer and renderer.is_card_pick_visible():
 		return true
 	if _splitscreen and _splitscreen.is_enabled() and _splitscreen.has_method("is_card_pick_visible_for"):
 		return bool(_splitscreen.is_card_pick_visible_for(pid))
+	return false
+
+
+func _is_card_pick_blocking_for_player(pid: int) -> bool:
+	var renderer := _render_players.get(pid) as RenderPlayer
+	if renderer and renderer.is_card_pick_blocking():
+		return true
+	if _splitscreen and _splitscreen.is_enabled() and _splitscreen.has_method("is_card_pick_blocking_for"):
+		return bool(_splitscreen.is_card_pick_blocking_for(pid))
 	return false
 
 
@@ -4447,6 +4476,21 @@ func _is_card_pick_visible_for_mouse_player() -> bool:
 	if _splitscreen and _splitscreen.is_enabled() and _splitscreen.has_method("_local_player_ids"):
 		for pid in _splitscreen._local_player_ids():
 			if not _is_card_pick_visible_for_player(int(pid)):
+				continue
+			if _player_uses_mouse(int(pid)):
+				return true
+	return false
+
+
+func _is_card_pick_blocking_for_mouse_player() -> bool:
+	for pid in _render_players.keys():
+		if not _is_card_pick_blocking_for_player(int(pid)):
+			continue
+		if _player_uses_mouse(int(pid)):
+			return true
+	if _splitscreen and _splitscreen.is_enabled() and _splitscreen.has_method("_local_player_ids"):
+		for pid in _splitscreen._local_player_ids():
+			if not _is_card_pick_blocking_for_player(int(pid)):
 				continue
 			if _player_uses_mouse(int(pid)):
 				return true

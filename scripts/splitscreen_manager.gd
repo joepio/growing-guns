@@ -145,6 +145,20 @@ func is_card_pick_visible_for(player_id: int) -> bool:
 	return renderer.is_card_pick_visible()
 
 
+func is_card_pick_blocking() -> bool:
+	for renderer in _renderers_by_player.values():
+		if (renderer as RenderPlayer).is_card_pick_blocking():
+			return true
+	return false
+
+
+func is_card_pick_blocking_for(player_id: int) -> bool:
+	var renderer := _renderers_by_player.get(player_id) as RenderPlayer
+	if renderer == null:
+		return false
+	return renderer.is_card_pick_blocking()
+
+
 func show_hitmarker_for(player_id: int, kind: String) -> bool:
 	var renderer := _renderers_by_player.get(player_id) as RenderPlayer
 	if renderer == null:
