@@ -20,12 +20,12 @@ func _ready() -> void:
 		world.name = "World"
 		add_child(world)
 		_build_environment(world)
-		_build_wall(world)
+		_build_damage_showcase(world)
 		var cam := Camera3D.new()
-		cam.position = Vector3(5.8, 3.4, 7.2)
+		cam.position = Vector3(0.0, 2.6, 15.5)
 		cam.fov = 52.0
 		world.add_child(cam)
-		cam.look_at(Vector3(2.4, 2.0, 0.8), Vector3.UP)
+		cam.look_at(Vector3(0.0, 1.7, 6.0), Vector3.UP)
 		return
 	await _run_offscreen_capture(capture_path)
 
@@ -36,6 +36,10 @@ func _cli_capture_path() -> String:
 		if args[i] == "--capture" and i + 1 < args.size():
 			return String(args[i + 1])
 	return ""
+
+
+func _cli_has(flag: String) -> bool:
+	return OS.get_cmdline_user_args().has(flag)
 
 
 func _run_offscreen_capture(path: String) -> void:
@@ -49,14 +53,24 @@ func _run_offscreen_capture(path: String) -> void:
 	var world := Node3D.new()
 	world.name = "World"
 	vp.add_child(world)
+	var blast := _cli_has("--blast")
 	_build_environment(world)
-	_build_wall(world)
+	if blast:
+		_build_blast_demo(world)
+	else:
+		_build_damage_showcase(world)
 
 	var cam := Camera3D.new()
-	cam.position = Vector3(5.8, 3.4, 7.2)
-	cam.fov = 52.0
-	world.add_child(cam)
-	cam.look_at(Vector3(2.4, 2.0, 0.8), Vector3.UP)
+	if blast:
+		cam.position = Vector3(0.0, 5.0, 26.0)
+		cam.fov = 54.0
+		world.add_child(cam)
+		cam.look_at(Vector3(0.0, 5.0, 6.0), Vector3.UP)
+	else:
+		cam.position = Vector3(0.0, 2.6, 15.5)
+		cam.fov = 52.0
+		world.add_child(cam)
+		cam.look_at(Vector3(0.0, 1.7, 6.0), Vector3.UP)
 
 	for _i: int in 6:
 		await get_tree().process_frame
@@ -158,6 +172,89 @@ func _build_wall(parent: Node3D) -> void:
 		root, mesh, floor_mat,
 		blocks.filter(func(b: Dictionary) -> bool: return int((b["cell"] as Vector3i).y) == -1),
 	)
+
+
+# A left-to-right row of blocks at increasing damage so the partial-destruction
+# look can be eyeballed via tools/capture_rock_lab.sh. Left = pristine, right =
+# almost destroyed. Top row uses the intact mesh (flat shader cracks); the bottom
+# row uses the battered mesh (geometric chipping).
+const DAMAGE_TIERS := [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+const SHOWCASE_SPACING := 2.8
+const SHOWCASE_Z := 6.0
+
+
+func _build_damage_showcase(parent: Node3D) -> void:
+	var root := Node3D.new()
+	root.name = "DamageShowcase"
+	parent.add_child(root)
+	var mat := ArenaGenerator.make_rock_material(Color(0.58, 0.53, 0.47), 0.96, 77)
+	var intact_mesh: Mesh = DestructibleSolid.get_stone_block_mesh()
+	var x0 := -float(DAMAGE_TIERS.size() - 1) * 0.5 * SHOWCASE_SPACING
+	var intact_blocks: Array[Dictionary] = []
+	for i: int in DAMAGE_TIERS.size():
+		var x := x0 + float(i) * SHOWCASE_SPACING
+		var dmg: float = DAMAGE_TIERS[i]
+		# Top row: intact mesh + shader cracks only.
+		intact_blocks.append({
+			"pos": Vector3(x, 3.0, SHOWCASE_Z), "damage": dmg, "cell": Vector3i(i, 0, 0),
+		})
+		# Bottom row: the actual shattered mesh level this damage maps to in game.
+		var level := _showcase_level_for(dmg)
+		var mesh: Mesh = intact_mesh if level <= 0 else DestructibleSolid.get_damage_mesh(level)
+		_add_damage_batch(root, mesh, mat, [{
+			"pos": Vector3(x, 0.2, SHOWCASE_Z), "damage": dmg, "cell": Vector3i(i, 1, 0),
+		}])
+	_add_damage_batch(root, intact_mesh, mat, intact_blocks)
+
+
+func _showcase_level_for(dmg: float) -> int:
+	var lvl := 0
+	for t in DestructibleSolid.DAMAGE_LEVEL_T:
+		if dmg >= float(t):
+			lvl += 1
+	return lvl
+
+
+func _add_damage_batch(parent: Node3D, mesh: Mesh, mat: Material, blocks: Array) -> void:
+	var mmi := MultiMeshInstance3D.new()
+	mmi.material_override = mat
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.use_custom_data = true
+	mm.mesh = mesh
+	mm.instance_count = blocks.size()
+	for i: int in blocks.size():
+		var b: Dictionary = blocks[i]
+		mm.set_instance_transform(
+			i, Transform3D(Basis.IDENTITY.scaled(Vector3.ONE * BLOCK * INSET), b["pos"] as Vector3))
+		mm.set_instance_custom_data(
+			i, _damage_custom(b["cell"] as Vector3i, float(b["damage"])))
+	mmi.multimesh = mm
+	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	parent.add_child(mmi)
+
+
+func _damage_custom(cell: Vector3i, damage: float) -> Color:
+	var c := _lab_custom_data(cell)
+	# Crack channel (g) encodes damage for the shader: pristine keeps its per-brick
+	# value (<= ~1.57), damage drives it up to 6.0 (see rock_surface.gdshader).
+	if damage > 0.001:
+		c.g = DestructibleSolid.damage_to_crack_channel(damage)
+	return c
+
+
+# Real destructible wall with a blast punched through the middle, so the crater +
+# damage-halo (cracked/chipped rim) can be eyeballed:
+#   tools/capture_rock_lab.sh out.png  (add `--blast` via the script's tail args)
+func _build_blast_demo(parent: Node3D) -> void:
+	var mat := ArenaGenerator.make_rock_material(Color(0.58, 0.53, 0.47), 0.96, 88)
+	var body: Node = DestructibleSolid.new()
+	body.call("setup_box", Vector3(0.0, 5.0, 6.0), Vector3(20.0, 13.0, 2.2), mat)
+	parent.add_child(body)
+	# Punch a hole in the front face; neighbours get the proximity damage halo,
+	# while chunks well outside the blast stay pristine.
+	body.call("queue_blast_damage", Vector3(0.0, 5.0, 7.1), 2.1, 460.0)
+	body.call("apply_pending_carves")
 
 
 func _add_block_batch(parent: Node3D, mesh: Mesh, mat: Material, blocks: Array) -> void:

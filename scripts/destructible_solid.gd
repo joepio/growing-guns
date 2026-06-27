@@ -19,6 +19,11 @@ const MAX_EXPOSURE_JOBS_PER_FRAME := 1
 # Below this VFX quality, exposed chunks stay in the intact MultiMesh (zero extra
 # draws). Existing exposed batches are collapsed back when quality sags.
 const EXPOSURE_SHED_QS := 0.55
+# Surviving chunks swap to progressively more shattered meshes as damage rises.
+# DAMAGE_LEVEL_T[i] is the damage fraction at which mesh level i+1 kicks in; below
+# the first threshold the chunk keeps the intact mesh (shader cracks only).
+const DAMAGE_MESH_LEVELS := 3
+const DAMAGE_LEVEL_T := [0.22, 0.46, 0.72]
 
 const CHUNK_MESH_SUBDIVIDE := 5
 # Visual inset — hairline shadow between bricks; keep tight so walls read solid.
@@ -30,10 +35,10 @@ var _pending_exposure_carves: Array[Dictionary] = []
 var _body_seed: int = 0
 var _mat: Material = null
 var _chunk_cols: Array[CollisionShape3D] = []
-var _chunk_meshes: Dictionary = {}
-var _exposed_mmi: MultiMeshInstance3D = null
-var _exposed_mm: MultiMesh = null
-var _exposed_free: Array[int] = []
+var _chunk_meshes: Dictionary = {}  # chunk id -> Vector2i(damage level 1..3, instance idx)
+var _dmg_mmi: Array[MultiMeshInstance3D] = [null, null, null]
+var _dmg_mm: Array[MultiMesh] = [null, null, null]
+var _dmg_free: Array = [[], [], []]  # free instance indices per level
 var _exposure_shed: bool = false
 var _chunk_grid: Array[CollisionShape3D] = []
 var _intact_mmi: MultiMeshInstance3D = null
@@ -181,18 +186,28 @@ func apply_pending_carves() -> bool:
 
 	# Single threshold + HP sweep over every chunk touched this tick.
 	var to_remove_cols: Array[CollisionShape3D] = []
+	var damaged: Array[Dictionary] = []  # survivors: {col, dmg_t}
 	for col: CollisionShape3D in touched:
 		var amount: float = float(accum[col])
 		if amount < MIN_ACCUMULATE_DAMAGE:
 			continue
 		var chunk_size: Vector3 = col.get_meta("chunk_size") as Vector3
-		var old_hp: float = float(col.get_meta("chunk_hp", _chunk_max_health(chunk_size)))
+		var maxhp: float = _chunk_max_health(chunk_size)
+		var old_hp: float = float(col.get_meta("chunk_hp", maxhp))
 		var new_hp: float = old_hp - amount
 		col.set_meta("chunk_hp", new_hp)
 		if new_hp <= 0.0 or amount >= new_hp + MIN_REMOVE_DAMAGE:
 			to_remove_cols.append(col)
+		else:
+			var dmg_t: float = clampf(1.0 - new_hp / maxhp, 0.0, 1.0)
+			if dmg_t > 0.08:
+				damaged.append({"col": col, "dmg_t": dmg_t})
+	# Surviving chunks show progressive cracks (and battered geometry past a
+	# threshold) before they're ever removed.
+	for d: Dictionary in damaged:
+		_apply_chunk_damage_visual(d["col"] as CollisionShape3D, float(d["dmg_t"]))
 	if to_remove_cols.is_empty():
-		return false
+		return not damaged.is_empty()
 
 	# Disable + hide every removed chunk, then ONE debris burst + ONE jag job.
 	var burst_center := Vector3.ZERO
@@ -332,7 +347,7 @@ func _add_chunk(center: Vector3, chunk_size: Vector3, cell: Vector3i) -> void:
 	col.set_meta("chunk_cell", cell)
 	col.set_meta("chunk_half_diag", chunk_size.length() * 0.5)
 	col.set_meta("chunk_hp", _chunk_max_health(chunk_size))
-	col.set_meta("jagged_visual", false)
+	col.set_meta("dmg_level", 0)
 	col.set_meta("multimesh_index", _chunk_cols.size())
 	col.set_meta("chunk_custom", _chunk_custom_data(cell))
 	add_child(col)
@@ -398,23 +413,33 @@ func _restore_intact_instance(col: CollisionShape3D) -> void:
 		idx, _chunk_visual_transform(center, chunk_size, col.get_meta("chunk_cell") as Vector3i))
 
 
-func _ensure_exposed_multimesh() -> MultiMesh:
-	if _exposed_mm != null:
-		return _exposed_mm
-	_exposed_mmi = MultiMeshInstance3D.new()
-	_exposed_mmi.name = "ExposedChunks"
-	_exposed_mmi.material_override = _mat
-	var unit_box := _chunk_unit_mesh()
-	_exposed_mm = MultiMesh.new()
-	_exposed_mm.transform_format = MultiMesh.TRANSFORM_3D
-	_exposed_mm.use_custom_data = true
-	_exposed_mm.mesh = unit_box
-	_exposed_mm.instance_count = 0
-	_exposed_mmi.multimesh = _exposed_mm
-	_exposed_mmi.custom_aabb = AABB(-box_size * 0.5, box_size)
-	_exposed_mmi.add_to_group("destructible_exposed_mm")
-	add_child(_exposed_mmi)
-	return _exposed_mm
+func _ensure_dmg_mm(level: int) -> MultiMesh:
+	var li: int = level - 1
+	if _dmg_mm[li] != null:
+		return _dmg_mm[li]
+	var mmi := MultiMeshInstance3D.new()
+	mmi.name = "DamageChunksL%d" % level
+	mmi.material_override = _mat
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.use_custom_data = true
+	mm.mesh = get_damage_mesh(level)
+	mm.instance_count = 0
+	mmi.multimesh = mm
+	mmi.custom_aabb = AABB(-box_size * 0.5, box_size)
+	mmi.add_to_group("destructible_exposed_mm")
+	add_child(mmi)
+	_dmg_mmi[li] = mmi
+	_dmg_mm[li] = mm
+	return mm
+
+
+func _dmg_level_for(dmg_t: float) -> int:
+	var lvl := 0
+	for t in DAMAGE_LEVEL_T:
+		if dmg_t >= float(t):
+			lvl += 1
+	return lvl
 
 
 func _update_exposure_lod() -> void:
@@ -433,49 +458,111 @@ func _shed_all_exposed_visuals() -> void:
 	for col: CollisionShape3D in _chunk_cols:
 		if not is_instance_valid(col) or bool(col.get_meta("destroyed", false)):
 			continue
-		if not bool(col.get_meta("jagged_visual", false)):
+		if int(col.get_meta("dmg_level", 0)) <= 0:
 			continue
 		_restore_intact_instance(col)
-		col.set_meta("jagged_visual", false)
+		col.set_meta("dmg_level", 0)
 		shed += 1
 	if shed > 0:
 		DestructibleManager.note_exposed_chunk(-shed)
 	_chunk_meshes.clear()
-	_exposed_free.clear()
-	if _exposed_mm != null:
-		_exposed_mm.instance_count = 0
+	for li: int in DAMAGE_MESH_LEVELS:
+		(_dmg_free[li] as Array).clear()
+		if _dmg_mm[li] != null:
+			_dmg_mm[li].instance_count = 0
 
 
-func _show_exposed_chunk(col: CollisionShape3D, chunk_size: Vector3, center: Vector3) -> void:
-	if Violence.vfx_quality_scale() <= EXPOSURE_SHED_QS:
+# Move a surviving chunk to the mesh batch for `level` (0 = intact mesh, 1..3 =
+# progressively shattered). Carries the chunk's current crack custom data along.
+func _set_chunk_dmg_level(col: CollisionShape3D, level: int) -> void:
+	var cur: int = int(col.get_meta("dmg_level", 0))
+	if level == cur:
+		return
+	if level > cur:
+		_spawn_chip_debris(col)  # a few flecks fly off each time it fractures further
+	if level > 0 and Violence.vfx_quality_scale() <= EXPOSURE_SHED_QS:
+		return  # low quality: stay in the intact batch, no extra draws
+	if cur > 0:
+		_remove_from_dmg_mm(col)
+	if level <= 0:
+		_restore_intact_instance(col)
+		col.set_meta("dmg_level", 0)
+		if cur > 0:
+			DestructibleManager.note_exposed_chunk(-1)
 		return
 	_hide_intact_instance(col)
-	var mm := _ensure_exposed_multimesh()
+	var mm := _ensure_dmg_mm(level)
+	var free: Array = _dmg_free[level - 1]
 	var idx: int
-	if not _exposed_free.is_empty():
-		idx = int(_exposed_free.pop_back())
+	if not free.is_empty():
+		idx = int(free.pop_back())
 	else:
 		idx = mm.instance_count
 		mm.instance_count = idx + 1
 	mm.set_instance_transform(
-		idx, _chunk_visual_transform(center, chunk_size, col.get_meta("chunk_cell") as Vector3i))
+		idx, _chunk_visual_transform(
+			col.get_meta("chunk_center_local") as Vector3,
+			col.get_meta("chunk_size") as Vector3,
+			col.get_meta("chunk_cell") as Vector3i))
 	mm.set_instance_custom_data(idx, col.get_meta("chunk_custom") as Color)
-	_chunk_meshes[col.get_instance_id()] = idx
-	col.set_meta("jagged_visual", true)
-	DestructibleManager.note_exposed_chunk(1)
+	_chunk_meshes[col.get_instance_id()] = Vector2i(level, idx)
+	col.set_meta("dmg_level", level)
+	if cur == 0:
+		DestructibleManager.note_exposed_chunk(1)
 
 
-func _hide_exposed_chunk(col: CollisionShape3D) -> void:
+func _spawn_chip_debris(col: CollisionShape3D) -> void:
+	var scene := _fx_scene()
+	if scene == null:
+		return
+	var world_pos: Vector3 = to_global(col.get_meta("chunk_center_local") as Vector3)
+	# Small chip puff at the fracture — count-scaled down to a few flecks, not a
+	# full removal burst. Merges with concurrent bursts and obeys the debris caps.
+	Violence.spawn_destruction_debris(
+		scene, world_pos, global_basis, (col.get_meta("chunk_size") as Vector3) * 0.5,
+		_material_base_color(), world_pos, 0.5, 1, 0.4)
+
+
+func _remove_from_dmg_mm(col: CollisionShape3D) -> void:
 	var id: int = col.get_instance_id()
 	if not _chunk_meshes.has(id):
 		return
-	var idx: int = int(_chunk_meshes[id])
+	var lv_idx: Vector2i = _chunk_meshes[id]
 	_chunk_meshes.erase(id)
-	if _exposed_mm != null and idx >= 0 and idx < _exposed_mm.instance_count:
-		var center: Vector3 = col.get_meta("chunk_center_local") as Vector3
-		_exposed_mm.set_instance_transform(
-			idx, Transform3D(Basis.IDENTITY.scaled(Vector3.ZERO), center))
-		_exposed_free.append(idx)
+	var mm: MultiMesh = _dmg_mm[lv_idx.x - 1]
+	if mm != null and lv_idx.y >= 0 and lv_idx.y < mm.instance_count:
+		mm.set_instance_transform(
+			lv_idx.y, Transform3D(Basis.IDENTITY.scaled(Vector3.ZERO),
+				col.get_meta("chunk_center_local") as Vector3))
+		(_dmg_free[lv_idx.x - 1] as Array).append(lv_idx.y)
+
+
+# Progressive damage on a surviving chunk: write the damage level into the crack
+# channel (g) of its INSTANCE_CUSTOM and swap it to the matching shattered mesh.
+# Keeps the intact batch's custom data current so LOD shed/restore preserves it.
+func _apply_chunk_damage_visual(col: CollisionShape3D, dmg_t: float) -> void:
+	var c: Color = col.get_meta("chunk_custom") as Color
+	c.g = damage_to_crack_channel(dmg_t)
+	col.set_meta("chunk_custom", c)
+	var level: int = _dmg_level_for(dmg_t)
+	if level != int(col.get_meta("dmg_level", 0)):
+		_set_chunk_dmg_level(col, level)
+	var midx: int = int(col.get_meta("multimesh_index", -1))
+	if _intact_mm != null and midx >= 0 and midx < _intact_mm.instance_count:
+		_intact_mm.set_instance_custom_data(midx, c)
+	var id: int = col.get_instance_id()
+	if _chunk_meshes.has(id):
+		var lv_idx: Vector2i = _chunk_meshes[id]
+		var mm: MultiMesh = _dmg_mm[lv_idx.x - 1]
+		if mm != null and lv_idx.y >= 0 and lv_idx.y < mm.instance_count:
+			mm.set_instance_custom_data(lv_idx.y, c)
+
+
+func _hide_exposed_chunk(col: CollisionShape3D) -> void:
+	if int(col.get_meta("dmg_level", 0)) <= 0:
+		return
+	_remove_from_dmg_mm(col)
+	col.set_meta("dmg_level", 0)
 	DestructibleManager.note_exposed_chunk(-1)
 
 
@@ -555,16 +642,26 @@ func _jaggedize_exposed_chunks(local_center: Vector3, radius: float) -> void:
 		if (
 				not is_instance_valid(col)
 				or bool(col.get_meta("destroyed", false))
-				or bool(col.get_meta("jagged_visual", false))
+				or int(col.get_meta("dmg_level", 0)) >= DAMAGE_MESH_LEVELS
 			):
 			continue
 		var center: Vector3 = col.get_meta("chunk_center_local") as Vector3
 		var half_diag: float = float(col.get_meta("chunk_half_diag"))
 		if center.distance_to(local_center) > radius + half_diag + TARGET_CELL * 0.75:
 			continue
+		# Blocks bordering the hole shouldn't stay pristine: damage them by
+		# proximity — cracks/scorch on the outer ring, chipped geometry on the
+		# immediate rim — and weaken their HP so a follow-up blast cascades.
+		var dist: float = center.distance_to(local_center)
+		var halo: float = clampf(1.0 - dist / maxf(radius, 0.01), 0.0, 1.0)
+		var halo_dmg: float = lerpf(0.22, 0.82, halo * halo)
 		var chunk_size: Vector3 = col.get_meta("chunk_size") as Vector3
-		_hide_intact_instance(col)
-		_show_exposed_chunk(col, chunk_size, center)
+		var maxhp: float = _chunk_max_health(chunk_size)
+		var cur_hp: float = float(col.get_meta("chunk_hp", maxhp))
+		col.set_meta("chunk_hp", minf(cur_hp, maxhp * (1.0 - halo_dmg)))
+		var eff_dmg: float = clampf(
+			1.0 - float(col.get_meta("chunk_hp")) / maxhp, 0.0, 1.0)
+		_apply_chunk_damage_visual(col, eff_dmg)
 		jaggedized += 1
 
 
@@ -578,6 +675,76 @@ static func _chunk_mesh_cache_key() -> String:
 
 static func get_stone_block_mesh() -> Mesh:
 	return _chunk_unit_mesh()
+
+
+static var _cached_dmg_meshes: Array = [null, null, null, null]  # index 1..3 used
+
+
+# Progressively shattered variants of the hand-hewn block (level 1..3), same unit
+# bounds. Struck stone spalls along flat fracture planes — angular chips, not a
+# smooth dent — with more and deeper cuts (plus surface roughening) per level.
+static func get_damage_mesh(level: int) -> Mesh:
+	level = clampi(level, 1, DAMAGE_MESH_LEVELS)
+	if _cached_dmg_meshes[level] == null:
+		_cached_dmg_meshes[level] = _build_damage_mesh(level)
+	return _cached_dmg_meshes[level]
+
+
+static func get_battered_stone_mesh() -> Mesh:
+	return get_damage_mesh(DAMAGE_MESH_LEVELS)
+
+
+# Maps a 0..1 damage fraction to the INSTANCE_CUSTOM.g crack channel the rock
+# shader reads: pristine bricks sit at <= ~1.57, damage drives g up to 6.0.
+static func damage_to_crack_channel(damage: float) -> float:
+	return 1.6 + clampf(damage, 0.0, 1.0) * 4.4
+
+
+static func _build_damage_mesh(level: int) -> ArrayMesh:
+	var box := BoxMesh.new()
+	box.size = Vector3.ONE
+	box.subdivide_width = CHUNK_MESH_SUBDIVIDE
+	box.subdivide_height = CHUNK_MESH_SUBDIVIDE
+	box.subdivide_depth = CHUNK_MESH_SUBDIVIDE
+	var st := SurfaceTool.new()
+	st.create_from(box, 0)
+	var mdt := MeshDataTool.new()
+	mdt.create_from_surface(st.commit(), 0)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash(["damage_mesh_v1", level])
+	var lt: float = float(level - 1) / float(maxi(1, DAMAGE_MESH_LEVELS - 1))  # 0..1
+	var cuts: int = level * 2                       # L1=2, L2=4, L3=6 fracture planes
+	var depth_lo: float = lerpf(0.52, 0.3, lt)      # deeper cuts = bigger chunks gone
+	var depth_hi: float = lerpf(0.64, 0.46, lt)
+	var rough: float = lerpf(0.012, 0.042, lt)      # inward facet roughening
+	var planes: Array[Dictionary] = []
+	for _i: int in cuts:
+		# Bias toward edges/corners: zero one axis ~⅓ of the time for edge shears.
+		var corner := Vector3(
+			signf(rng.randf() - 0.5), signf(rng.randf() - 0.5), signf(rng.randf() - 0.5))
+		if rng.randf() < 0.33:
+			corner[rng.randi() % 3] = 0.0
+		var nrm := (corner + Vector3(
+			rng.randf_range(-0.4, 0.4),
+			rng.randf_range(-0.4, 0.4),
+			rng.randf_range(-0.4, 0.4))).normalized()
+		planes.append({"n": nrm, "d": rng.randf_range(depth_lo, depth_hi)})
+	for i: int in mdt.get_vertex_count():
+		var p := _sculpt_hand_hewn_vertex(mdt.get_vertex(i))
+		for plane: Dictionary in planes:
+			var nrm: Vector3 = plane["n"]
+			var over: float = p.dot(nrm) - float(plane["d"])
+			if over > 0.0:
+				p -= nrm * over  # clamp onto the fracture plane → flat angular chip
+		# Inward-only roughening so facets read as broken stone, not clean-cut.
+		p -= p.normalized() * (rng.randf() * rough)
+		mdt.set_vertex(i, p)
+	var sculpted := ArrayMesh.new()
+	mdt.commit_to_surface(sculpted)
+	var regen := SurfaceTool.new()
+	regen.create_from(sculpted, 0)
+	regen.generate_normals()
+	return regen.commit()
 
 
 func _running_bond_shift(cell: Vector3i) -> Vector3:
