@@ -456,7 +456,7 @@ func _update_heat_visual() -> void:
 	if _heat_light:
 		_heat_light.visible = true
 		_heat_light.light_color = emission
-		_heat_light.light_energy = lerpf(0.0, 1.2, glow_t)
+		_heat_light.light_energy = lerpf(0.0, 0.45, glow_t)
 
 # Map a Weapon's gameplay stats onto the gun's visual parameters. Bulk-set
 # everything inside _suppress_rebuild so we only rebuild meshes once.
@@ -810,7 +810,9 @@ func _rebuild() -> void:
 		var hl := OmniLight3D.new()
 		hl.name = "HeatLight"
 		hl.position = Vector3(0, 0, muzzle_centre_z)
-		hl.omni_range = 0.8
+		hl.omni_range = 0.55
+		hl.light_specular = 0.0
+		hl.light_volumetric_fog_energy = 0.0
 		hl.visible = false
 		add_child(hl)
 		_heat_light = hl

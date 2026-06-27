@@ -4,13 +4,26 @@ extends Node3D
 
 const DestructibleSolid = preload("res://scripts/destructible_solid.gd")
 const DestructionCoordinator = preload("res://scripts/destruction_coordinator.gd")
+const LavaFloorOpenness = preload("res://scripts/lava_floor_openness.gd")
 
 # Large floor/wall spans are tiled so each piece fractures like cover/buildings.
 const TERRAIN_TILE_SIZE := 8.0
+# Hairline mortar gap — keep in sync with DestructibleSolid.VISUAL_CHUNK_INSET.
+const MASONRY_MORTAR := 0.008
+
+# Corner tower proportions — reference: chunky medieval parapet + merlons.
+const CASTLE_TOWER_FOOTPRINT := 7.5
+const CASTLE_TOWER_LIFT := 3.5
+const CASTLE_PARAPET_OVERHANG := 1.15
+const CASTLE_PARAPET_HEIGHT := 1.35
+const CASTLE_MERLON := 1.2
+const CASTLE_MERLON_HEIGHT := 1.35
+const CASTLE_CRENel := 1.0
 
 # Procedural closed-arena map generator — the only map type in MAP_POOL.
 #
-# Layout: 80m x 80m floor, walled in 12m tall, optional center tower, mirrored
+# Layout: procedural floor + perimeter walls with corner castle towers
+# (overhanging parapet + crenellations), optional center tower, mirrored
 # pairs of tall buildings (with side ledges), pillars, cover
 # blocks, and floating platforms. Every placed feature has a 180° rotational
 # mirror at (-x, -z) so the map is symmetric and plays fair from any spawn.
@@ -23,7 +36,8 @@ const TERRAIN_TILE_SIZE := 8.0
 
 signal regenerated(stats: Dictionary)
 
-var _surface_texture_cache: Dictionary = {}
+var _rock_material_cache: Dictionary = {}
+static var _static_rock_material_cache: Dictionary = {}
 
 @export var seed: int = 0:
 	set(v): seed = v; if auto_regenerate: _queue_regen()
@@ -32,6 +46,11 @@ var _surface_texture_cache: Dictionary = {}
 # off when the host wants to drive regeneration explicitly (e.g. game.gd
 # calling apply_seed after instantiating a procedural arena).
 @export var regenerate_on_ready: bool = true
+# When true, every regenerate() uses the lava-sea island layout (floating stone
+# over visible lava). Used by the start menu cinematic.
+@export var force_all_floor_lava: bool = false
+# Larger central fort + horizon silhouettes + inferno atmosphere tuning.
+@export var cinematic_present: bool = false
 # Visible disc under each spawn point — useful in the preview, distracting
 # in actual gameplay. The in-game procedural arena turns this off.
 @export var show_spawn_markers: bool = false
@@ -80,70 +99,88 @@ var arena_size: float = 80.0
 # the whole scene retunes when the seed changes.
 const PALETTES: Array = [
 	{
-		"name": "red_noir",
-		"floor": Color(0.06, 0.05, 0.09),
-		"wall": Color(0.18, 0.16, 0.24),
-		"building": Color(0.42, 0.38, 0.55),
-		"dark": Color(0.24, 0.22, 0.32),
-		"accent_a": Color(1.00, 0.20, 0.18),
-		"accent_b": Color(1.00, 0.85, 0.10),
-		"sky_top": Color(0.04, 0.02, 0.10),
-		"sky_horizon": Color(0.55, 0.10, 0.25),
-		"ambient": Color(0.35, 0.35, 0.55),
-		"fog": Color(0.22, 0.06, 0.18),
-		"fog_density": 0.012,
-		"sun": Color(1.00, 0.75, 0.65),
-		"fill": Color(1.00, 0.35, 0.20),
+		"name": "castle_grey",
+		"floor": Color(0.49, 0.47, 0.44),
+		"wall": Color(0.56, 0.54, 0.50),
+		"building": Color(0.60, 0.57, 0.53),
+		"dark": Color(0.42, 0.40, 0.38),
+		"accent_a": Color(0.95, 0.55, 0.22),
+		"accent_b": Color(0.82, 0.72, 0.38),
+		"sky_top": Color(0.22, 0.24, 0.28),
+		"sky_horizon": Color(0.48, 0.46, 0.44),
+		"ambient": Color(0.52, 0.50, 0.48),
+		"ambient_energy": 1.05,
+		"tonemap_exposure": 1.08,
+		"ssao_intensity": 0.52,
+		"sun_energy": 2.0,
+		"fill_energy": 0.55,
+		"fog": Color(0.38, 0.38, 0.40),
+		"fog_density": 0.010,
+		"sun": Color(1.00, 0.82, 0.58),
+		"fill": Color(0.55, 0.62, 0.82),
 	},
 	{
-		"name": "cyan_factory",
-		"floor": Color(0.03, 0.05, 0.07),
-		"wall": Color(0.10, 0.20, 0.24),
-		"building": Color(0.22, 0.42, 0.46),
-		"dark": Color(0.10, 0.28, 0.32),
-		"accent_a": Color(0.10, 1.00, 0.85),
-		"accent_b": Color(0.85, 1.00, 0.20),
-		"sky_top": Color(0.005, 0.040, 0.050),
-		"sky_horizon": Color(0.04, 0.45, 0.42),
-		"ambient": Color(0.30, 0.55, 0.55),
-		"fog": Color(0.04, 0.22, 0.20),
-		"fog_density": 0.012,
-		"sun": Color(0.80, 1.00, 0.95),
-		"fill": Color(0.10, 0.85, 0.85),
+		"name": "limestone_keep",
+		"floor": Color(0.50, 0.47, 0.43),
+		"wall": Color(0.58, 0.55, 0.50),
+		"building": Color(0.62, 0.58, 0.53),
+		"dark": Color(0.44, 0.41, 0.37),
+		"accent_a": Color(0.90, 0.48, 0.18),
+		"accent_b": Color(0.70, 0.62, 0.34),
+		"sky_top": Color(0.28, 0.26, 0.24),
+		"sky_horizon": Color(0.62, 0.56, 0.48),
+		"ambient": Color(0.54, 0.50, 0.46),
+		"ambient_energy": 1.05,
+		"tonemap_exposure": 1.08,
+		"ssao_intensity": 0.52,
+		"sun_energy": 2.0,
+		"fill_energy": 0.55,
+		"fog": Color(0.50, 0.46, 0.40),
+		"fog_density": 0.009,
+		"sun": Color(1.00, 0.88, 0.68),
+		"fill": Color(0.72, 0.68, 0.58),
 	},
 	{
-		"name": "synthwave",
-		"floor": Color(0.04, 0.02, 0.08),
-		"wall": Color(0.16, 0.08, 0.30),
-		"building": Color(0.38, 0.20, 0.58),
-		"dark": Color(0.22, 0.12, 0.34),
-		"accent_a": Color(1.00, 0.18, 0.85),
-		"accent_b": Color(0.20, 0.95, 1.00),
-		"sky_top": Color(0.05, 0.02, 0.18),
-		"sky_horizon": Color(0.45, 0.10, 0.55),
-		"ambient": Color(0.45, 0.30, 0.65),
-		"fog": Color(0.30, 0.10, 0.40),
-		"fog_density": 0.012,
-		"sun": Color(1.00, 0.65, 0.90),
-		"fill": Color(0.85, 0.30, 1.00),
+		"name": "granite_ruin",
+		"floor": Color(0.47, 0.48, 0.49),
+		"wall": Color(0.54, 0.55, 0.56),
+		"building": Color(0.58, 0.59, 0.60),
+		"dark": Color(0.40, 0.41, 0.42),
+		"accent_a": Color(0.88, 0.42, 0.20),
+		"accent_b": Color(0.55, 0.62, 0.38),
+		"sky_top": Color(0.18, 0.22, 0.26),
+		"sky_horizon": Color(0.42, 0.46, 0.48),
+		"ambient": Color(0.50, 0.52, 0.54),
+		"ambient_energy": 1.05,
+		"tonemap_exposure": 1.08,
+		"ssao_intensity": 0.52,
+		"sun_energy": 2.0,
+		"fill_energy": 0.55,
+		"fog": Color(0.32, 0.36, 0.38),
+		"fog_density": 0.011,
+		"sun": Color(0.92, 0.94, 0.98),
+		"fill": Color(0.58, 0.64, 0.78),
 	},
 	{
-		"name": "desert_dusk",
-		"floor": Color(0.08, 0.06, 0.04),
-		"wall": Color(0.22, 0.16, 0.10),
-		"building": Color(0.78, 0.55, 0.32),
-		"dark": Color(0.36, 0.26, 0.16),
-		"accent_a": Color(1.00, 0.45, 0.08),
-		"accent_b": Color(0.15, 0.85, 1.00),
-		"sky_top": Color(0.18, 0.06, 0.10),
-		"sky_horizon": Color(0.98, 0.42, 0.12),
-		# Cool-leaning ambient so warm geometry doesn't melt into the sky.
-		"ambient": Color(0.40, 0.42, 0.55),
-		"fog": Color(0.45, 0.22, 0.14),
-		# Lower density so the bright desert sky doesn't flood the arena.
-		"fog_density": 0.0035,
-		"sun": Color(1.00, 0.80, 0.55),
-		"fill": Color(1.00, 0.45, 0.18),
+		"name": "sandstone_bastion",
+		"floor": Color(0.50, 0.46, 0.41),
+		"wall": Color(0.58, 0.53, 0.47),
+		"building": Color(0.62, 0.56, 0.50),
+		"dark": Color(0.44, 0.40, 0.36),
+		"accent_a": Color(0.95, 0.50, 0.16),
+		"accent_b": Color(0.78, 0.66, 0.32),
+		"sky_top": Color(0.32, 0.24, 0.20),
+		"sky_horizon": Color(0.72, 0.58, 0.42),
+		"ambient": Color(0.56, 0.50, 0.44),
+		"ambient_energy": 1.05,
+		"tonemap_exposure": 1.08,
+		"ssao_intensity": 0.52,
+		"sun_energy": 2.0,
+		"fill_energy": 0.55,
+		"fog": Color(0.55, 0.46, 0.36),
+		"fog_density": 0.008,
+		"sun": Color(1.00, 0.82, 0.58),
+		"fill": Color(0.82, 0.62, 0.42),
 	},
 ]
 const COLOR_SPAWN := Color(1.00, 0.40, 0.18)
@@ -160,8 +197,10 @@ const LAVA_ISLAND_MAX_HEIGHT_STEP := 2.05
 const LAVA_SPAWN_PLATFORM_INSET := 0.65  # keep the player capsule off platform edges
 
 const LAVA_FLOW_SHADER := preload("res://shaders/lava_flow.gdshader")
+const ROCK_SURFACE_SHADER := preload("res://shaders/rock_surface.gdshader")
 
 static var _lava_noise_texture: ImageTexture = null
+static var _rock_noise_texture: ImageTexture = null
 
 
 static func get_lava_noise_texture() -> ImageTexture:
@@ -183,21 +222,68 @@ static func get_lava_noise_texture() -> ImageTexture:
 	return _lava_noise_texture
 
 
+static func get_rock_noise_texture() -> ImageTexture:
+	if _rock_noise_texture != null:
+		return _rock_noise_texture
+	var fl := FastNoiseLite.new()
+	fl.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	fl.fractal_type = FastNoiseLite.FRACTAL_FBM
+	fl.frequency = 0.032
+	fl.fractal_octaves = 5
+	fl.seed = 44102
+	var size := 256
+	var img := Image.create(size, size, false, Image.FORMAT_RF)
+	for y in size:
+		for x in size:
+			var v: float = fl.get_noise_2d(float(x), float(y)) * 0.5 + 0.5
+			img.set_pixel(x, y, Color(v, 0.0, 0.0, 1.0))
+	_rock_noise_texture = ImageTexture.create_from_image(img)
+	return _rock_noise_texture
+
+
+static func make_rock_material(color: Color, roughness: float = 0.96, seed_salt: int = 0) -> ShaderMaterial:
+	var key := "m10s:%d:%d:%d:%d:%d" % [
+		roundi(color.r * 255.0),
+		roundi(color.g * 255.0),
+		roundi(color.b * 255.0),
+		roundi(roughness * 100.0),
+		seed_salt,
+	]
+	if _static_rock_material_cache.has(key):
+		return _static_rock_material_cache[key]
+	var mat := ShaderMaterial.new()
+	mat.shader = ROCK_SURFACE_SHADER
+	mat.set_shader_parameter("base_color", color)
+	mat.set_shader_parameter("moss_color", Color(0.36, 0.56, 0.30))
+	mat.set_shader_parameter("roughness", roughness)
+	mat.set_shader_parameter("noise_texture", get_rock_noise_texture())
+	mat.set_shader_parameter("material_seed", float(absi(hash(key)) % 10000) * 0.001)
+	mat.set_shader_parameter("pit_depth", 0.48)
+	mat.set_shader_parameter("crack_depth", 0.52)
+	mat.set_shader_parameter("moss_amount", 0.38)
+	mat.set_shader_parameter("noise_scale", 0.085)
+	mat.set_shader_parameter("detail_scale", 2.0)
+	mat.set_shader_parameter("color_variation", 0.28)
+	mat.set_shader_parameter("deform_amount", 0.055)
+	_static_rock_material_cache[key] = mat
+	return mat
+
+
 static func make_lava_shader_material() -> ShaderMaterial:
 	var mat := ShaderMaterial.new()
 	mat.shader = LAVA_FLOW_SHADER
 	mat.set_shader_parameter("noise_texture", get_lava_noise_texture())
-	mat.set_shader_parameter("world_scale", 0.8)
-	mat.set_shader_parameter("pixel_world_size", 0.35)
+	mat.set_shader_parameter("world_scale", 0.048)
+	mat.set_shader_parameter("flow_speed", 0.42)
+	mat.set_shader_parameter("emission_strength", 1.35)
 	return mat
 
 
-var _mat_floor: StandardMaterial3D
-var _mat_wall: StandardMaterial3D
-var _mat_building: StandardMaterial3D
-var _mat_dark: StandardMaterial3D
+var _mat_floor: ShaderMaterial
+var _mat_wall: ShaderMaterial
+var _mat_building: ShaderMaterial
+var _mat_dark: ShaderMaterial
 var _mat_spawn: StandardMaterial3D
-var _mat_cloud: StandardMaterial3D
 
 # Each entry: [Vector2 center_xz, float radius]. Used for collision-free
 # placement (kept flat instead of full AABB — bounding circles are good
@@ -207,6 +293,7 @@ var _spawn_positions: Array[Vector3] = []
 var _lava_damage_accum_by_player: Dictionary = {}
 var _lava_safe_zones: Array = []
 var _all_floor_lava: bool = false
+var _lava_openness: LavaFloorOpenness = null
 
 var last_stats: Dictionary = {}
 var _regen_pending: bool = false
@@ -250,6 +337,7 @@ func regenerate() -> void:
 	_lava_damage_accum_by_player.clear()
 	_lava_safe_zones.clear()
 	_all_floor_lava = false
+	_lava_openness = null
 	_ensure_materials()
 
 	var t0: int = Time.get_ticks_usec()
@@ -268,7 +356,7 @@ func regenerate() -> void:
 	# 16% walled with a hole in the floor, 42% normal walled-and-solid.
 	# Mutually exclusive.
 	var variant_roll: float = rng.randf()
-	var all_floor_lava: bool = variant_roll < 0.18
+	var all_floor_lava: bool = force_all_floor_lava or variant_roll < 0.18
 	var no_walls: bool = (not all_floor_lava) and variant_roll < 0.42
 	var has_hole: bool = (not all_floor_lava) and (not no_walls) and variant_roll < 0.58
 	var hole_pos: Vector2 = Vector2.ZERO
@@ -319,6 +407,7 @@ func regenerate() -> void:
 	if not no_walls:
 		_build_walls()
 	_build_lava_pool()
+	_setup_lava_openness_from_floor()
 	# Reserve the hole as an unplaceable circle so buildings / pillars / etc.
 	# don't land in it. Spawnpoints are corners + rooftops, both safe.
 	if has_hole:
@@ -334,7 +423,8 @@ func regenerate() -> void:
 		tower_h = rng.randf_range(10.0, 14.0)
 		_build_center_tower(tower_h)
 		_placed.append([Vector2.ZERO, 4.5])
-		_spawn_positions.append(Vector3(0, tower_h + 1.0, 0))
+		var tower_roof_y := _castle_tower_top_y(tower_h)
+		_spawn_positions.append(Vector3(0, tower_roof_y + 1.0, 0))
 	else:
 		# Empty center — keep a small reserved disc so cover doesn't all clump there.
 		_placed.append([Vector2.ZERO, 2.0])
@@ -451,11 +541,12 @@ func regenerate() -> void:
 	# (b) Building → center tower bridges (only if a tower exists, and only
 	# when the building roof and tower top are within bridge-able height).
 	if has_center:
+		var tower_roof_y := _castle_tower_top_y(tower_h)
 		for a in primary_buildings:
 			var d_to_center: float = Vector2(a["pos"].x, a["pos"].z).length()
 			if d_to_center < 6.0 or d_to_center > 24.0:
 				continue
-			if absf(a["roof_y"] - tower_h) > 3.0:
+			if absf(a["roof_y"] - tower_roof_y) > 3.0:
 				continue
 			if rng.randf() >= bridge_chance * 0.55:
 				continue
@@ -463,8 +554,8 @@ func regenerate() -> void:
 			# not the tower's centerline.
 			var dir2 := Vector2(-a["pos"].x, -a["pos"].z).normalized()
 			var tower_endpoint := Vector3(dir2.x * 2.5, 0, dir2.y * 2.5)
-			_build_bridge(a["pos"], tower_endpoint, a["roof_y"], tower_h)
-			_build_bridge(_mirror(a["pos"]), -tower_endpoint, a["roof_y"], tower_h)
+			_build_bridge(a["pos"], tower_endpoint, a["roof_y"], tower_roof_y)
+			_build_bridge(_mirror(a["pos"]), -tower_endpoint, a["roof_y"], tower_roof_y)
 			bridges_built += 2
 
 	# Tunnel (sometimes) — covered passage with two open ends. Long footprint
@@ -574,6 +665,7 @@ func regenerate() -> void:
 		"diagonal_walls": diag_built,
 		"spawnpoints": _spawn_positions.size(),
 		"has_center_tower": has_center,
+		"corner_towers": 4 if not no_walls else 0,
 		"no_walls": no_walls,
 		"has_hole": has_hole,
 		"all_floor_lava": false,
@@ -620,16 +712,57 @@ func _try_place(pos: Vector3, radius: float) -> bool:
 
 func _ensure_materials() -> void:
 	var palette: Dictionary = current_palette()
-	_mat_floor = _make_mat(palette["floor"], 0.9)
-	_mat_wall = _make_mat(palette["wall"], 0.82)
-	_mat_building = _make_mat(palette["building"], 0.68)
-	_mat_dark = _make_mat(palette["dark"], 0.78)
+	_mat_floor = _make_mat(palette["floor"], 0.97)
+	_mat_wall = _make_mat(palette["wall"], 0.96)
+	_mat_building = _make_mat(palette["building"], 0.94)
+	_mat_dark = _make_mat(palette["dark"], 0.98)
 	_mat_spawn = _make_emissive(COLOR_SPAWN, 1.5)
-	_mat_cloud = _make_cloud_mat(palette)
+
+
+func _cloud_tint() -> Color:
+	var palette: Dictionary = current_palette()
+	if _all_floor_lava or cinematic_present:
+		return (palette["fog"] as Color).lerp(palette["sky_horizon"] as Color, 0.35).lightened(0.12)
+	var horizon: Color = palette["sky_horizon"]
+	var top: Color = palette["sky_top"]
+	return horizon.lerp(top, 0.25).lightened(0.48)
 
 
 func current_palette() -> Dictionary:
-	return PALETTES[absi(seed) % PALETTES.size()]
+	var p: Dictionary = PALETTES[absi(seed) % PALETTES.size()]
+	if _all_floor_lava or cinematic_present:
+		return _inferno_palette(p)
+	return p
+
+
+func _inferno_palette(base: Dictionary) -> Dictionary:
+	var p: Dictionary = base.duplicate(true)
+	var stone := Color(0.30, 0.28, 0.26)
+	p["floor"] = (base["floor"] as Color).lerp(stone, 0.62)
+	p["wall"] = (base["wall"] as Color).lerp(stone.lightened(0.08), 0.68)
+	p["building"] = (base["building"] as Color).lerp(stone.lightened(0.12), 0.64)
+	p["dark"] = (base["dark"] as Color).lerp(Color(0.20, 0.18, 0.17), 0.72)
+	p["sky_top"] = Color(0.06, 0.05, 0.09)
+	p["sky_horizon"] = Color(0.58, 0.24, 0.10)
+	p["ambient"] = Color(0.42, 0.32, 0.28)
+	p["ambient_energy"] = 1.02
+	p["fog"] = Color(0.62, 0.26, 0.10)
+	p["fog_density"] = 0.010
+	p["fog_sun_scatter"] = 0.0
+	p["fog_aerial_perspective"] = 0.0
+	p["fog_light_energy"] = 0.82
+	p["tonemap_exposure"] = 1.14
+	p["sun"] = Color(1.0, 0.72, 0.38)
+	p["sun_energy"] = 2.55
+	p["fill"] = Color(0.72, 0.38, 0.22)
+	p["fill_energy"] = 0.48
+	p["sky_energy"] = 1.55
+	p["sun_angle_max"] = 28.0
+	p["sun_curve"] = 0.12
+	p["sun_angular_distance"] = 0.48
+	p["glow_intensity"] = 1.18
+	p["glow_bloom"] = 0.30
+	return p
 
 
 func is_all_floor_lava() -> bool:
@@ -696,66 +829,26 @@ func _prune_lava_spawn_positions() -> void:
 	_spawn_positions = kept
 
 
-func _make_mat(color: Color, roughness: float) -> StandardMaterial3D:
-	var m := StandardMaterial3D.new()
-	m.albedo_color = Color.WHITE
-	m.albedo_texture = _make_low_poly_surface_texture(color)
-	m.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
-	m.roughness = 1.0
-	m.metallic = 0.0
-	m.diffuse_mode = BaseMaterial3D.DIFFUSE_TOON
-	m.specular_mode = BaseMaterial3D.SPECULAR_DISABLED
-	return m
+func _make_mat(color: Color, roughness: float) -> ShaderMaterial:
+	return make_rock_material(color, roughness, absi(hash(color)) % 997)
 
 
-func _make_low_poly_surface_texture(base: Color) -> ImageTexture:
-	var key := "%d:%d:%d:%d" % [
-		roundi(base.r * 255.0),
-		roundi(base.g * 255.0),
-		roundi(base.b * 255.0),
-		absi(seed) % 4096,
-	]
-	if _surface_texture_cache.has(key):
-		return _surface_texture_cache[key]
+static func material_surface_color(mat: Material, fallback: Color = Color(0.45, 0.44, 0.42)) -> Color:
+	if mat is StandardMaterial3D:
+		return (mat as StandardMaterial3D).albedo_color
+	if mat is ShaderMaterial:
+		var bc = (mat as ShaderMaterial).get_shader_parameter("base_color")
+		if bc is Color:
+			return bc
+	return fallback
 
-	var size := 64
-	var brick_w := 16
-	var brick_h := 8
-	var mortar := 1
-	var img := Image.create(size, size, false, Image.FORMAT_RGBA8)
-	var rng := RandomNumberGenerator.new()
-	rng.seed = absi(hash(key))
-	var mortar_color := Color(
-		clampf(base.r - 0.18, 0.0, 1.0),
-		clampf(base.g - 0.18, 0.0, 1.0),
-		clampf(base.b - 0.18, 0.0, 1.0),
-		1.0
-	)
-	for y in range(size):
-		var row := y / brick_h
-		var offset := (brick_w / 2) if (row % 2 == 1) else 0
-		for x in range(size):
-			var bx := posmod(x + offset, brick_w)
-			var by := posmod(y, brick_h)
-			if bx < mortar or by < mortar:
-				img.set_pixel(x, y, mortar_color)
-				continue
-			var brick_id := int(row * 17 + ((x + offset) / brick_w))
-			var brick_rng := RandomNumberGenerator.new()
-			brick_rng.seed = absi(hash("%s:%d" % [key, brick_id]))
-			var brick_shade := brick_rng.randf_range(-0.10, 0.12)
-			var pixel_noise := rng.randf_range(-0.035, 0.035)
-			var edge_wear := -0.035 if bx <= mortar + 1 or by <= mortar + 1 else 0.0
-			var shade := brick_shade + pixel_noise + edge_wear
-			img.set_pixel(x, y, Color(
-				clampf(base.r + shade, 0.0, 1.0),
-				clampf(base.g + shade, 0.0, 1.0),
-				clampf(base.b + shade, 0.0, 1.0),
-				1.0
-			))
-	var tex := ImageTexture.create_from_image(img)
-	_surface_texture_cache[key] = tex
-	return tex
+
+func warmup_gpu_materials(scene: Node) -> void:
+	if scene == null:
+		return
+	_ensure_materials()
+	Violence.warmup_material(scene, _mat_wall)
+	Violence.warmup_rock_multimesh(scene, _mat_wall)
 
 
 func _make_emissive(color: Color, energy: float) -> StandardMaterial3D:
@@ -768,19 +861,6 @@ func _make_emissive(color: Color, energy: float) -> StandardMaterial3D:
 	m.emission_enabled = true
 	m.emission = color
 	m.emission_energy_multiplier = energy * 0.75
-	return m
-
-
-func _make_cloud_mat(palette: Dictionary) -> StandardMaterial3D:
-	var horizon: Color = palette["sky_horizon"]
-	var top: Color = palette["sky_top"]
-	var tint := horizon.lerp(top, 0.25).lightened(0.48)
-	var m := StandardMaterial3D.new()
-	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	m.albedo_color = Color(tint.r, tint.g, tint.b, 0.82)
-	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	m.diffuse_mode = BaseMaterial3D.DIFFUSE_TOON
-	m.specular_mode = BaseMaterial3D.SPECULAR_DISABLED
 	return m
 
 
@@ -797,11 +877,37 @@ func _editor_owner() -> Node:
 	return tree.edited_scene_root if tree else null
 
 
+func get_lava_openness_ratio() -> float:
+	if _all_floor_lava:
+		return 1.0
+	if _lava_openness != null and is_instance_valid(_lava_openness):
+		return _lava_openness.get_ratio()
+	return 0.0
+
+
+func _setup_lava_openness_from_floor() -> void:
+	if _all_floor_lava:
+		return
+	if _lava_openness != null and is_instance_valid(_lava_openness):
+		_lava_openness.queue_free()
+	_lava_openness = LavaFloorOpenness.new()
+	_lava_openness.name = "LavaOpenness"
+	add_child(_lava_openness)
+	_lava_openness.setup(self, LAVA_POOL_Y, arena_size, 5.5, arena_size * 0.85)
+	for child in get_children():
+		if child is StaticBody3D and child.is_in_group("lava_floor"):
+			child.set_meta("_lava_openness_tracker", _lava_openness)
+	var owner_root := _editor_owner()
+	if owner_root:
+		_lava_openness.owner = owner_root
+
+
 func _add_destructible_region(
 	center: Vector3,
 	size: Vector3,
-	mat: StandardMaterial3D,
+	mat: Material,
 	rotation_y: float = 0.0,
+	tracks_lava_openness: bool = false,
 ) -> void:
 	var counts := Vector3i(
 		maxi(1, ceili(size.x / TERRAIN_TILE_SIZE)),
@@ -825,30 +931,34 @@ func _add_destructible_region(
 				var tile_center := corner + local
 				if rotation_y != 0.0:
 					tile_center = center + (local - size * 0.5).rotated(Vector3.UP, rotation_y)
-				_add_static_box(tile_center, cell, mat, rotation_y)
+				_add_static_box(tile_center, cell, mat, rotation_y, true, true, tracks_lava_openness)
 
 
 func _add_static_box(
 	pos: Vector3,
 	size: Vector3,
-	mat: StandardMaterial3D,
+	mat: Material,
 	rotation_y: float = 0.0,
 	with_collider: bool = true,
 	destructible: bool = true,
+	tracks_lava_openness: bool = false,
 ) -> StaticBody3D:
 	var body: StaticBody3D
 	if destructible:
 		body = DestructibleSolid.new()
 		body.setup_box(pos, size, mat, rotation_y, with_collider)
+		if tracks_lava_openness:
+			body.add_to_group("lava_floor")
+			if _lava_openness != null and is_instance_valid(_lava_openness):
+				body.set_meta("_lava_openness_tracker", _lava_openness)
 	else:
 		body = StaticBody3D.new()
 		body.position = pos
 		if rotation_y != 0.0:
 			body.rotation.y = rotation_y
 		var mi := MeshInstance3D.new()
-		var box := BoxMesh.new()
-		box.size = size
-		mi.mesh = box
+		mi.mesh = DestructibleSolid.get_stone_block_mesh()
+		mi.scale = size
 		mi.material_override = mat
 		body.add_child(mi)
 		if with_collider:
@@ -873,7 +983,7 @@ func _add_floor_slab(center: Vector3, size: Vector3) -> void:
 	var top_y := center.y + size.y * 0.5 - layer_h * 0.5
 	for i in layers:
 		var y := top_y - float(i) * layer_h
-		_add_destructible_region(Vector3(center.x, y, center.z), Vector3(size.x, layer_h, size.z), _mat_floor)
+		_add_destructible_region(Vector3(center.x, y, center.z), Vector3(size.x, layer_h, size.z), _mat_floor, 0.0, true)
 
 
 func _build_floor(has_hole: bool = false, hole_pos: Vector2 = Vector2.ZERO, hole_size: float = 0.0) -> void:
@@ -970,6 +1080,14 @@ func _build_lava_floor_surface() -> void:
 	mi.position = Vector3(0, LAVA_FLOOR_SURFACE_Y, 0)
 	mi.material_override = _make_lava_material()
 	add_child(mi)
+	var glow_energy := 16.0 if cinematic_present else 8.0
+	_add_lava_glow_light(
+		Vector3(0.0, LAVA_FLOOR_SURFACE_Y + 0.35, 0.0),
+		arena_size * 0.78,
+		glow_energy,
+	)
+	if cinematic_present:
+		_build_cinematic_lava_sea_glow()
 	var floor_owner := _editor_owner()
 	if floor_owner:
 		mi.owner = floor_owner
@@ -977,6 +1095,102 @@ func _build_lava_floor_surface() -> void:
 
 func _make_lava_material() -> ShaderMaterial:
 	return make_lava_shader_material()
+
+
+func _add_lava_glow_light(local_pos: Vector3, omni_range: float, energy: float) -> void:
+	var light := OmniLight3D.new()
+	light.name = "LavaGlow"
+	light.position = local_pos
+	light.light_color = Color(1.0, 0.42, 0.12)
+	light.light_energy = energy
+	light.omni_range = omni_range
+	light.omni_attenuation = 0.65
+	light.shadow_enabled = false
+	add_child(light)
+	var owner_root := _editor_owner()
+	if owner_root:
+		light.owner = owner_root
+
+
+func _build_cinematic_lava_sea_glow() -> void:
+	# Extra rim fill so exposed lava reads hot even under the floating fort.
+	for i in 8:
+		var ang := TAU * float(i) / 8.0
+		var dist := arena_size * 0.22
+		_add_lava_glow_light(
+			Vector3(cos(ang) * dist, LAVA_FLOOR_SURFACE_Y + 0.22, sin(ang) * dist),
+			arena_size * 0.38,
+			5.5,
+		)
+
+
+func _add_torch_brazier(local_pos: Vector3, energy: float = 2.8, omni_range: float = 14.0) -> void:
+	var root := Node3D.new()
+	root.name = "Torch"
+	root.position = local_pos
+	add_child(root)
+	var owner_root := _editor_owner()
+	if owner_root:
+		root.owner = owner_root
+
+	var pole := MeshInstance3D.new()
+	var pole_mesh := CylinderMesh.new()
+	pole_mesh.top_radius = 0.08
+	pole_mesh.bottom_radius = 0.11
+	pole_mesh.height = 1.35
+	pole.mesh = pole_mesh
+	pole.position.y = 0.68
+	pole.material_override = _mat_dark
+	root.add_child(pole)
+
+	var flame := MeshInstance3D.new()
+	var flame_mesh := SphereMesh.new()
+	flame_mesh.radius = 0.22
+	flame_mesh.height = 0.44
+	flame.mesh = flame_mesh
+	flame.position.y = 1.45
+	var flame_mat := StandardMaterial3D.new()
+	flame_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	flame_mat.emission_enabled = true
+	flame_mat.emission = Color(1.0, 0.55, 0.15)
+	flame_mat.emission_energy_multiplier = 3.2
+	flame_mat.albedo_color = Color(1.0, 0.62, 0.18)
+	flame.material_override = flame_mat
+	root.add_child(flame)
+
+	var light := OmniLight3D.new()
+	light.position.y = 1.35
+	light.light_color = Color(1.0, 0.58, 0.18)
+	light.light_energy = energy
+	light.omni_range = omni_range
+	light.omni_attenuation = 0.85
+	light.shadow_enabled = false
+	root.add_child(light)
+
+	if owner_root:
+		pole.owner = owner_root
+		flame.owner = owner_root
+		light.owner = owner_root
+
+
+func _build_cinematic_fort_underglow(slab_base_y: float, footprint: float) -> void:
+	var y := slab_base_y + 0.08
+	var ring := footprint * 0.46
+	for i in 12:
+		var ang := TAU * float(i) / 12.0
+		var pos := Vector3(cos(ang) * ring, y, sin(ang) * ring)
+		var light := OmniLight3D.new()
+		light.name = "FortUnderglow"
+		light.position = pos
+		light.light_color = Color(1.0, 0.38, 0.10)
+		light.light_energy = 4.8
+		light.omni_range = 13.0
+		light.omni_attenuation = 0.55
+		light.shadow_enabled = false
+		add_child(light)
+		var owner_root := _editor_owner()
+		if owner_root:
+			light.owner = owner_root
 
 
 func _apply_all_floor_lava_damage(delta: float) -> void:
@@ -1056,86 +1270,203 @@ func _build_walls() -> void:
 	# E + W walls span Z, depth 1m on X.
 	_add_destructible_region(Vector3(half, wall_height * 0.5, 0), Vector3(1, wall_height, arena_size), _mat_wall)
 	_add_destructible_region(Vector3(-half, wall_height * 0.5, 0), Vector3(1, wall_height, arena_size), _mat_wall)
+	_build_corner_towers(half)
+
+
+func _build_corner_towers(half: float) -> void:
+	var corners: Array[Vector2] = [
+		Vector2(half, -half),
+		Vector2(half, half),
+		Vector2(-half, half),
+		Vector2(-half, -half),
+	]
+	for corner: Vector2 in corners:
+		_build_castle_tower(Vector3(corner.x, 0.0, corner.y))
+		_placed.append([corner, CASTLE_TOWER_FOOTPRINT * 0.55 + CASTLE_PARAPET_OVERHANG + 1.5])
+		var top_y := _castle_tower_top_y()
+		_spawn_positions.append(Vector3(corner.x, top_y + 1.0, corner.y))
+
+
+func _castle_tower_top_y(shaft_height: float = -1.0) -> float:
+	var shaft := shaft_height if shaft_height > 0.0 else wall_height + CASTLE_TOWER_LIFT
+	return shaft + CASTLE_PARAPET_HEIGHT + CASTLE_MERLON_HEIGHT
+
+
+func _build_castle_tower(
+	center_xz: Vector3,
+	footprint: float = CASTLE_TOWER_FOOTPRINT,
+	shaft_height: float = -1.0,
+	shaft_mat: Material = null,
+	parapet_mat: Material = null,
+) -> void:
+	var shaft_h := shaft_height if shaft_height > 0.0 else wall_height + CASTLE_TOWER_LIFT
+	var shaft_material: Material = shaft_mat if shaft_mat != null else _mat_wall
+	var parapet_material: Material = parapet_mat if parapet_mat != null else _mat_building
+
+	_add_destructible_region(
+		Vector3(center_xz.x, shaft_h * 0.5, center_xz.z),
+		Vector3(footprint, shaft_h, footprint),
+		shaft_material,
+	)
+
+	var parapet_w := footprint + CASTLE_PARAPET_OVERHANG * 2.0
+	var parapet_base_y := shaft_h
+	var parapet_center_y := parapet_base_y + CASTLE_PARAPET_HEIGHT * 0.5
+	_add_destructible_region(
+		Vector3(center_xz.x, parapet_center_y, center_xz.z),
+		Vector3(parapet_w, CASTLE_PARAPET_HEIGHT, parapet_w),
+		parapet_material,
+	)
+
+	_build_crenellation_ring(
+		Vector3(center_xz.x, parapet_base_y + CASTLE_PARAPET_HEIGHT, center_xz.z),
+		parapet_w,
+	)
+
+
+func _build_crenellation_ring(origin: Vector3, ring_width: float) -> void:
+	var merlon_y := origin.y + CASTLE_MERLON_HEIGHT * 0.5
+	var half_w := ring_width * 0.5
+	var depth := CASTLE_MERLON * 0.88
+	_build_crenellation_run(
+		Vector3(origin.x, merlon_y, origin.z - half_w),
+		Vector3.RIGHT, ring_width, Vector3(0.0, 0.0, -1.0), depth,
+	)
+	_build_crenellation_run(
+		Vector3(origin.x, merlon_y, origin.z + half_w),
+		Vector3.RIGHT, ring_width, Vector3(0.0, 0.0, 1.0), depth,
+	)
+	_build_crenellation_run(
+		Vector3(origin.x - half_w, merlon_y, origin.z),
+		Vector3(0.0, 0.0, 1.0), ring_width, Vector3(-1.0, 0.0, 0.0), depth,
+	)
+	_build_crenellation_run(
+		Vector3(origin.x + half_w, merlon_y, origin.z),
+		Vector3(0.0, 0.0, 1.0), ring_width, Vector3(1.0, 0.0, 0.0), depth,
+	)
+
+
+func _build_crenellation_run(
+	edge_center: Vector3,
+	axis: Vector3,
+	span: float,
+	outward: Vector3,
+	depth: float,
+) -> void:
+	var merlon := CASTLE_MERLON
+	var gap := CASTLE_CRENel
+	var pitch := merlon + gap
+	var count := maxi(2, int(floor((span + gap) / pitch)))
+	var total := float(count) * pitch - gap
+	var axis_n := axis.normalized()
+	var outward_n := outward.normalized()
+	var start := edge_center - axis_n * (total * 0.5 - merlon * 0.5)
+	var merlon_size := Vector3(merlon, CASTLE_MERLON_HEIGHT, depth)
+	if absf(outward_n.x) > 0.5:
+		merlon_size = Vector3(depth, CASTLE_MERLON_HEIGHT, merlon)
+	for i: int in count:
+		var pos := start + axis_n * (float(i) * pitch) + outward_n * (depth * 0.35)
+		_add_static_box(pos, merlon_size, _mat_wall)
 
 
 func _build_lava_island_layout(rng: RandomNumberGenerator, perim_radius: float) -> Dictionary:
 	var platforms: Array = []
 	var edges: Array = []
-	var center_radius: float = 4.2
-	var center_top := Vector3(0, LAVA_ISLAND_TOP_Y, 0)
-	_register_lava_platform(center_top, center_radius, 1.0, platforms)
-	_placed.append([Vector2.ZERO, center_radius + 0.9])
+	var center_top: Vector3
+	var center_radius: float
+	if cinematic_present:
+		_build_cinematic_lava_fort(rng, platforms)
+		if not platforms.is_empty():
+			var hub: Dictionary = platforms[0]
+			center_top = hub["pos"] as Vector3
+			center_radius = float(hub["radius"])
+		else:
+			center_top = Vector3(0, LAVA_ISLAND_TOP_Y, 0)
+			center_radius = 4.2
+	else:
+		center_radius = 4.2
+		center_top = Vector3(0, LAVA_ISLAND_TOP_Y, 0)
+		_register_lava_platform(center_top, center_radius, 1.0, platforms)
+		_placed.append([Vector2.ZERO, center_radius + 0.9])
 
-	var spine_anchor := center_top
-	var spine_anchor_radius := center_radius
-	for spine_i in rng.randi_range(3, 5):
-		var radius: float = rng.randf_range(3.0, 4.7)
-		var height_step: float = rng.randf_range(1.25, LAVA_ISLAND_MAX_HEIGHT_STEP)
-		var top_y: float = clampf(spine_anchor.y + height_step, LAVA_ISLAND_MIN_TOP_Y, LAVA_ISLAND_MAX_TOP_Y)
-		var gap: float = rng.randf_range(2.7, _lava_max_gap_for_height_step(top_y - spine_anchor.y))
-		var dist: float = spine_anchor_radius + radius + gap
-		var dir2 := Vector2(-1.0, rng.randf_range(-0.28, 0.28)).normalized()
-		var pos := Vector3(spine_anchor.x + dir2.x * dist, top_y, spine_anchor.z + dir2.y * dist)
-		if absf(pos.x) + radius > perim_radius or absf(pos.z) + radius > perim_radius:
-			break
-		if not _try_place(pos, radius + 0.9):
-			break
-		var mirror_pos := _mirror(pos)
-		var column_extra: float = rng.randf_range(0.6, 1.4)
-		_register_lava_platform(pos, radius, column_extra, platforms)
-		_register_lava_platform(mirror_pos, radius, column_extra, platforms)
-		edges.append([spine_anchor, pos])
-		edges.append([_mirror(spine_anchor), mirror_pos])
-		spine_anchor = pos
-		spine_anchor_radius = radius
-
-	var target_pairs: int = clampi(int(round(arena_size / 6.0)) + rng.randi_range(1, 4), 10, 18)
-	for i in target_pairs:
-		for attempt in 80:
-			var anchor: Dictionary = platforms[rng.randi_range(0, platforms.size() - 1)]
-			var anchor_pos: Vector3 = anchor["pos"]
-			var anchor_radius: float = anchor["radius"]
-			if anchor_pos.x > 0.0:
-				anchor_pos = _mirror(anchor_pos)
-			var radius: float = rng.randf_range(2.2, 5.2)
-			var angle: float = rng.randf() * TAU
-			var height_step: float = rng.randf_range(-1.55, LAVA_ISLAND_MAX_HEIGHT_STEP)
-			if rng.randf() < 0.58 and anchor_pos.y < LAVA_ISLAND_MAX_TOP_Y - 0.7:
-				height_step = rng.randf_range(0.6, LAVA_ISLAND_MAX_HEIGHT_STEP)
-			var top_y: float = clampf(anchor_pos.y + height_step, LAVA_ISLAND_MIN_TOP_Y, LAVA_ISLAND_MAX_TOP_Y)
-			var actual_height_step: float = top_y - anchor_pos.y
-			var gap: float = rng.randf_range(2.8, _lava_max_gap_for_height_step(actual_height_step))
-			var dist: float = anchor_radius + radius + gap
-			var pos := Vector3(
-				anchor_pos.x + cos(angle) * dist,
-				top_y,
-				anchor_pos.z + sin(angle) * dist
-			)
-			if pos.x > -0.35:
-				continue
+	var spine_anchor: Vector3
+	var spine_anchor_radius: float
+	if cinematic_present and not platforms.is_empty():
+		var hub: Dictionary = platforms[0]
+		spine_anchor = hub["pos"] as Vector3
+		spine_anchor_radius = float(hub["radius"])
+	else:
+		spine_anchor = Vector3(0, LAVA_ISLAND_TOP_Y, 0)
+		spine_anchor_radius = 4.2
+	if not cinematic_present:
+		for spine_i in rng.randi_range(3, 5):
+			var radius: float = rng.randf_range(3.0, 4.7)
+			var height_step: float = rng.randf_range(1.25, LAVA_ISLAND_MAX_HEIGHT_STEP)
+			var top_y: float = clampf(spine_anchor.y + height_step, LAVA_ISLAND_MIN_TOP_Y, LAVA_ISLAND_MAX_TOP_Y)
+			var gap: float = rng.randf_range(2.7, _lava_max_gap_for_height_step(top_y - spine_anchor.y))
+			var dist: float = spine_anchor_radius + radius + gap
+			var dir2 := Vector2(-1.0, rng.randf_range(-0.28, 0.28)).normalized()
+			var pos := Vector3(spine_anchor.x + dir2.x * dist, top_y, spine_anchor.z + dir2.y * dist)
 			if absf(pos.x) + radius > perim_radius or absf(pos.z) + radius > perim_radius:
-				continue
-			if absf(pos.y - anchor_pos.y) > LAVA_ISLAND_MAX_HEIGHT_STEP:
-				continue
+				break
 			if not _try_place(pos, radius + 0.9):
-				continue
+				break
 			var mirror_pos := _mirror(pos)
-			var column_extra: float = rng.randf_range(0.45, 1.5)
+			var column_extra: float = rng.randf_range(0.6, 1.4)
 			_register_lava_platform(pos, radius, column_extra, platforms)
 			_register_lava_platform(mirror_pos, radius, column_extra, platforms)
-			edges.append([anchor_pos, pos])
-			edges.append([_mirror(anchor_pos), mirror_pos])
-			break
+			edges.append([spine_anchor, pos])
+			edges.append([_mirror(spine_anchor), mirror_pos])
+			spine_anchor = pos
+			spine_anchor_radius = radius
 
-	# A few guaranteed cross-arena stepping stones keep the graph from feeling
-	# like two disconnected mirrored halves. They are also individually within
-	# reach of the center platform.
-	var axis_step := Vector3(-(center_radius + 3.2 + LAVA_ISLAND_MAX_GAP * 0.55), LAVA_ISLAND_TOP_Y + 0.15, 0.0)
-	if _try_place(axis_step, 3.1):
-		_register_lava_platform(axis_step, 3.0, 1.25, platforms)
-		_register_lava_platform(_mirror(axis_step), 3.0, 1.25, platforms)
-		edges.append([center_top, axis_step])
-		edges.append([center_top, _mirror(axis_step)])
+		var target_pairs: int = clampi(int(round(arena_size / 6.0)) + rng.randi_range(1, 4), 10, 18)
+		for i in target_pairs:
+			for attempt in 80:
+				var anchor: Dictionary = platforms[rng.randi_range(0, platforms.size() - 1)]
+				var anchor_pos: Vector3 = anchor["pos"]
+				var anchor_radius: float = anchor["radius"]
+				if anchor_pos.x > 0.0:
+					anchor_pos = _mirror(anchor_pos)
+				var radius: float = rng.randf_range(2.2, 5.2)
+				var angle: float = rng.randf() * TAU
+				var height_step: float = rng.randf_range(-1.55, LAVA_ISLAND_MAX_HEIGHT_STEP)
+				if rng.randf() < 0.58 and anchor_pos.y < LAVA_ISLAND_MAX_TOP_Y - 0.7:
+					height_step = rng.randf_range(0.6, LAVA_ISLAND_MAX_HEIGHT_STEP)
+				var top_y: float = clampf(anchor_pos.y + height_step, LAVA_ISLAND_MIN_TOP_Y, LAVA_ISLAND_MAX_TOP_Y)
+				var actual_height_step: float = top_y - anchor_pos.y
+				var gap: float = rng.randf_range(2.8, _lava_max_gap_for_height_step(actual_height_step))
+				var dist: float = anchor_radius + radius + gap
+				var pos := Vector3(
+					anchor_pos.x + cos(angle) * dist,
+					top_y,
+					anchor_pos.z + sin(angle) * dist
+				)
+				if pos.x > -0.35:
+					continue
+				if absf(pos.x) + radius > perim_radius or absf(pos.z) + radius > perim_radius:
+					continue
+				if absf(pos.y - anchor_pos.y) > LAVA_ISLAND_MAX_HEIGHT_STEP:
+					continue
+				if not _try_place(pos, radius + 0.9):
+					continue
+				var mirror_pos := _mirror(pos)
+				var column_extra: float = rng.randf_range(0.45, 1.5)
+				_register_lava_platform(pos, radius, column_extra, platforms)
+				_register_lava_platform(mirror_pos, radius, column_extra, platforms)
+				edges.append([anchor_pos, pos])
+				edges.append([_mirror(anchor_pos), mirror_pos])
+				break
+
+		# A few guaranteed cross-arena stepping stones keep the graph from feeling
+		# like two disconnected mirrored halves. They are also individually within
+		# reach of the center platform.
+		var axis_step := Vector3(-(center_radius + 3.2 + LAVA_ISLAND_MAX_GAP * 0.55), LAVA_ISLAND_TOP_Y + 0.15, 0.0)
+		if _try_place(axis_step, 3.1):
+			_register_lava_platform(axis_step, 3.0, 1.25, platforms)
+			_register_lava_platform(_mirror(axis_step), 3.0, 1.25, platforms)
+			edges.append([center_top, axis_step])
+			edges.append([center_top, _mirror(axis_step)])
 
 	var decorative_bridges: int = _build_lava_island_bridges(edges, rng)
 	_add_lava_island_cover(platforms, rng)
@@ -1149,6 +1480,59 @@ func _build_lava_island_layout(rng: RandomNumberGenerator, perim_radius: float) 
 		"bridges": decorative_bridges,
 		"reachable_valid": reachable_valid,
 	}
+
+
+func _build_cinematic_lava_fort(rng: RandomNumberGenerator, platforms: Array) -> void:
+	var slab_base_y := LAVA_ISLAND_TOP_Y + 0.35
+	var footprint := 24.0
+	var slab_h := 3.2
+	var slab_center_y := slab_base_y + slab_h * 0.5
+	_add_static_box(
+		Vector3(0.0, slab_center_y, 0.0),
+		Vector3(footprint, slab_h, footprint),
+		_mat_wall,
+	)
+	var deck_y := slab_base_y + slab_h
+	var half := footprint * 0.5 - 0.35
+	var parapet_h := 2.6
+	for side in 4:
+		var along_x := side % 2 == 0
+		var sign := -1.0 if side < 2 else 1.0
+		var wall_len := footprint - 1.2
+		var wall_center := Vector3(
+			0.0 if along_x else sign * half,
+			deck_y + parapet_h * 0.5,
+			sign * half if along_x else 0.0,
+		)
+		var wall_size := Vector3(wall_len, parapet_h, 1.35) if along_x else Vector3(1.35, parapet_h, wall_len)
+		_add_static_box(wall_center, wall_size, _mat_wall)
+	_build_crenellation_ring(Vector3(0.0, deck_y + parapet_h, 0.0), footprint - 1.0)
+
+	var tower_h := rng.randf_range(11.5, 13.5)
+	_build_castle_tower(
+		Vector3(0.0, deck_y - 0.15, 0.0),
+		9.5, tower_h, _mat_wall, _mat_building,
+	)
+	for i in 4:
+		var ang := float(i) * PI * 0.5 + PI * 0.25
+		var off := Vector3(cos(ang), 0.0, sin(ang)) * footprint * 0.36
+		_add_static_box(
+			Vector3(off.x, deck_y + 1.4, off.z),
+			Vector3(5.2, 2.8, 5.2),
+			_mat_building,
+		)
+		_add_torch_brazier(
+			Vector3(off.x, deck_y + 0.2, off.z),
+			2.4, 12.0,
+		)
+	_add_torch_brazier(Vector3(0.0, deck_y + 0.35, 0.0), 4.2, 18.0)
+	_build_cinematic_fort_underglow(slab_base_y, footprint)
+
+	var hub_top := Vector3(0.0, deck_y, 0.0)
+	_lava_safe_zones.append([Vector2.ZERO, footprint * 0.44])
+	_spawn_positions.append(Vector3(0.0, _castle_tower_top_y(tower_h) + 1.0, 0.0))
+	_placed.append([Vector2.ZERO, footprint * 0.48])
+	platforms.append({"pos": hub_top, "radius": footprint * 0.44, "height": slab_h})
 
 
 func _register_lava_platform(top_pos: Vector3, radius: float, platform_height: float, platforms: Array) -> void:
@@ -1269,11 +1653,10 @@ func _build_lava_jump_platform(center: Vector3, radius: float, height: float) ->
 
 
 func _build_center_tower(h: float) -> void:
-	var size: float = 5.0
-	_add_static_box(Vector3(0, h * 0.5, 0), Vector3(size, h, size), _mat_building)
-	# Light at the top.
+	var footprint := 6.5
+	_build_castle_tower(Vector3.ZERO, footprint, h, _mat_building, _mat_building)
 	var light := OmniLight3D.new()
-	light.position = Vector3(0, h + 2.0, 0)
+	light.position = Vector3(0.0, _castle_tower_top_y(h) + 1.5, 0.0)
 	light.light_color = Color(1, 0.4, 0.3, 1)
 	light.light_energy = 2.5
 	light.omni_range = 30.0
@@ -1360,52 +1743,61 @@ func _build_floating_platform(pos: Vector3) -> void:
 
 func _build_sky_visuals(rng: RandomNumberGenerator) -> void:
 	var root := Node3D.new()
-	root.name = "BoxClouds"
+	root.name = "SkyClouds"
 	add_child(root)
 	var owner_root := _editor_owner()
 	if owner_root:
 		root.owner = owner_root
 
-	var cloud_count := 9
-	var cloud_ring_min := arena_size * 0.34
-	var cloud_ring_max := arena_size * 0.86
+	var hell := _all_floor_lava or cinematic_present
+	var tint := _cloud_tint()
+	var cloud_count := 16 if hell else 9
+	var ring_min := arena_size * (0.28 if hell else 0.34)
+	var ring_max := arena_size * (0.92 if hell else 0.86)
+	var y_min := 24.0 if hell else 24.0
+	var y_max := 40.0 if hell else 39.0
 	for i in cloud_count:
 		var angle := (TAU * float(i) / float(cloud_count)) + rng.randf_range(-0.22, 0.22)
-		var dist := rng.randf_range(cloud_ring_min, cloud_ring_max)
-		var center := Vector3(cos(angle) * dist, rng.randf_range(24.0, 39.0), sin(angle) * dist)
-		_build_box_cloud(root, center, rng, owner_root)
+		var dist := rng.randf_range(ring_min, ring_max)
+		var center := Vector3(cos(angle) * dist, rng.randf_range(y_min, y_max), sin(angle) * dist)
+		var cluster := Violence.spawn_sky_cloud_cluster(
+			root, center, rng, tint,
+			rng.randi_range(7 if hell else 6, 12 if hell else 10),
+			rng.randf_range(14.0 if hell else 11.0, 22.0 if hell else 18.0),
+			rng.randf_range(8.0 if hell else 6.5, 14.0 if hell else 10.0),
+			rng.randf_range(14.0 if hell else 12.0, 26.0 if hell else 20.0),
+			hell,
+		)
+		if owner_root and cluster != null:
+			cluster.owner = owner_root
+	if hell:
+		_build_horizon_silhouettes(rng, root, owner_root)
 
 
-func _build_box_cloud(root: Node3D, center: Vector3, rng: RandomNumberGenerator, owner_root: Node = null) -> void:
-	var cloud := Node3D.new()
-	cloud.name = "BoxCloud"
-	cloud.position = center
-	cloud.rotation.y = rng.randf_range(-PI, PI)
-	root.add_child(cloud)
+func _build_horizon_silhouettes(rng: RandomNumberGenerator, root: Node3D, owner_root: Node = null) -> void:
+	var silhouettes := Node3D.new()
+	silhouettes.name = "HorizonSilhouettes"
+	root.add_child(silhouettes)
 	if owner_root:
-		cloud.owner = owner_root
-
-	var block_count := rng.randi_range(5, 9)
-	for i in block_count:
+		silhouettes.owner = owner_root
+	var peak_mat := StandardMaterial3D.new()
+	peak_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	peak_mat.albedo_color = Color(0.035, 0.028, 0.04)
+	var dist := arena_size * 0.88
+	for i in 14:
+		var ang := TAU * float(i) / 14.0 + rng.randf_range(-0.12, 0.12)
 		var mi := MeshInstance3D.new()
-		mi.name = "CloudBlock"
 		var mesh := BoxMesh.new()
-		mesh.size = Vector3(
-			rng.randf_range(4.0, 9.0),
-			rng.randf_range(1.4, 3.4),
-			rng.randf_range(2.8, 7.0)
-		)
+		var w := rng.randf_range(16.0, 42.0)
+		var h := rng.randf_range(20.0, 52.0)
+		mesh.size = Vector3(w, h, w * rng.randf_range(0.22, 0.42))
 		mi.mesh = mesh
-		mi.material_override = _mat_cloud
-		mi.extra_cull_margin = 96.0
+		mi.material_override = peak_mat
+		mi.position = Vector3(cos(ang) * dist, h * 0.32 - 8.0, sin(ang) * dist)
+		mi.rotation.y = ang + PI * 0.5
+		mi.extra_cull_margin = 220.0
 		mi.ignore_occlusion_culling = true
-		mi.position = Vector3(
-			rng.randf_range(-8.0, 8.0),
-			rng.randf_range(-1.2, 1.2),
-			rng.randf_range(-4.0, 4.0)
-		)
-		mi.rotation.y = rng.randf_range(-0.18, 0.18)
-		cloud.add_child(mi)
+		silhouettes.add_child(mi)
 		if owner_root:
 			mi.owner = owner_root
 
@@ -1449,11 +1841,32 @@ func apply_palette_to_environment(env: Environment, sun: DirectionalLight3D = nu
 		sky_mat.sky_horizon_color = p["sky_horizon"]
 		sky_mat.ground_horizon_color = (p["sky_horizon"] as Color).darkened(0.55)
 		sky_mat.ground_bottom_color = (p["sky_top"] as Color).darkened(0.45)
+		sky_mat.energy_multiplier = float(p.get("sky_energy", 1.25))
+		sky_mat.sky_energy_multiplier = float(p.get("sky_energy", 1.25))
+		sky_mat.sun_angle_max = float(p.get("sun_angle_max", 28.0))
+		sky_mat.sun_curve = float(p.get("sun_curve", 0.08))
 	if env:
 		env.ambient_light_color = p["ambient"]
+		env.ambient_light_energy = float(p.get("ambient_energy", 1.05))
+		env.tonemap_exposure = float(p.get("tonemap_exposure", 1.08))
+		env.ssao_enabled = true
+		env.ssao_radius = float(p.get("ssao_radius", 1.0))
+		env.ssao_intensity = float(p.get("ssao_intensity", 0.52))
+		env.fog_enabled = true
 		env.fog_light_color = p["fog"]
 		env.fog_density = p.get("fog_density", 0.012)
+		env.fog_light_energy = float(p.get("fog_light_energy", 1.0))
+		env.fog_sun_scatter = float(p.get("fog_sun_scatter", 0.0))
+		env.fog_aerial_perspective = float(p.get("fog_aerial_perspective", 0.0))
+		env.glow_enabled = true
+		env.glow_intensity = float(p.get("glow_intensity", 0.9))
+		env.glow_bloom = float(p.get("glow_bloom", 0.2))
 	if sun:
 		sun.light_color = p["sun"]
+		sun.light_energy = float(p.get("sun_energy", 2.0))
+		sun.light_angular_distance = float(p.get("sun_angular_distance", 0.85))
+		sun.sky_mode = DirectionalLight3D.SKY_MODE_LIGHT_AND_SKY
 	if fill:
 		fill.light_color = p["fill"]
+		fill.light_energy = float(p.get("fill_energy", 0.55))
+		fill.sky_mode = DirectionalLight3D.SKY_MODE_LIGHT_ONLY

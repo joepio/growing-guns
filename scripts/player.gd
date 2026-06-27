@@ -437,6 +437,7 @@ func _build_flashlight() -> void:
 	_flashlight.spot_attenuation = 1.0
 	_flashlight.light_energy = 14.0
 	_flashlight.light_color = Color(1.0, 0.97, 0.88)
+	_flashlight.light_volumetric_fog_energy = 0.0
 	# Cast shadows for the dramatic flashlight-in-the-dark look. Only ~N players,
 	# only during blackout rounds, so the per-light shadow cost is acceptable.
 	_flashlight.shadow_enabled = true

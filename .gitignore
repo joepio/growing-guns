@@ -14,3 +14,6 @@ tools/bin/
 /sendme
 .sendme-send-*/
 .sendme-recv-*/
+
+artifacts
+EspeWhe

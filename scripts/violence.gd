@@ -201,6 +201,7 @@ static func warmup_blast_materials(scene: Node) -> void:
 	var billow := ShaderMaterial.new()
 	billow.shader = _get_billow_mm_shader()
 	billow.set_shader_parameter("anim", 0.3)
+	billow.set_shader_parameter("sky_mode", 1.0)
 	_warmup_mm_material(scene, billow)
 	# Additive MultiMesh projectile shader (embers + shards) — its own PSO.
 	var proj := ShaderMaterial.new()
@@ -227,6 +228,32 @@ static func _warmup_mm_material(scene: Node, mat: Material) -> void:
 	mm.set_instance_transform(0, Transform3D(Basis.IDENTITY.scaled(Vector3.ONE * 0.001), Vector3.ZERO))
 	mm.set_instance_color(0, Color(1, 1, 1, 0.5))
 	mm.set_instance_custom_data(0, Color(0.5, 0.0, 0.5, 0.0))
+	var mmi := MultiMeshInstance3D.new()
+	mmi.multimesh = mm
+	mmi.material_override = mat
+	_attach_world_3d(scene, mmi, Vector3.ZERO)
+	var t := Timer.new()
+	t.wait_time = 0.4
+	t.one_shot = true
+	t.process_mode = Node.PROCESS_MODE_ALWAYS
+	mmi.add_child(t)
+	t.start()
+	t.timeout.connect(mmi.queue_free)
+
+
+static func warmup_rock_multimesh(scene: Node, mat: Material) -> void:
+	if scene == null or mat == null:
+		return
+	var box := BoxMesh.new()
+	box.size = Vector3.ONE
+	box.subdivide_width = 5
+	box.subdivide_height = 5
+	box.subdivide_depth = 5
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.mesh = box
+	mm.instance_count = 1
+	mm.set_instance_transform(0, Transform3D(Basis.IDENTITY.scaled(Vector3(2.0, 1.5, 2.0)), Vector3.ZERO))
 	var mmi := MultiMeshInstance3D.new()
 	mmi.multimesh = mm
 	mmi.material_override = mat
@@ -1690,6 +1717,7 @@ const _BILLOW_MM_CODE := "
 	uniform float lump_amount = 0.32;
 	uniform float growth_min = 0.35;
 	uniform float tail_power = 1.5;    // <1 = long lingering tail, >1 = quick fade
+	uniform float sky_mode = 0.0;      // 1 = persistent sky clouds (no blast fade)
 	uniform vec3 warm_glow : source_color = vec3(1.0, 0.45, 0.12);
 	uniform vec3 fire_cool : source_color = vec3(1.0, 0.5, 0.16);
 	uniform vec3 fire_hot : source_color = vec3(1.0, 0.97, 0.86);
@@ -1706,8 +1734,13 @@ const _BILLOW_MM_CODE := "
 		v_heat = INSTANCE_CUSTOM.z;
 		v_body = COLOR.rgb;
 		v_opk = COLOR.a;
-		// Staggered local age so puffs don't all pop at once.
-		v_age = clamp((anim - delay) / max(1.0 - delay, 0.001), 0.0, 1.0);
+		// Staggered local age so puffs don't all pop at once. Sky clouds use a
+		// fixed hold age per puff (INSTANCE_CUSTOM.y) instead of the blast tween.
+		if (sky_mode > 0.5) {
+			v_age = clamp(delay, 0.0, 1.0);
+		} else {
+			v_age = clamp((anim - delay) / max(1.0 - delay, 0.001), 0.0, 1.0);
+		}
 		// Per-instance lumpy displacement (seed varies every puff).
 		float s = seed * 100.0;
 		float a = sin(VERTEX.x * 6.3 + s) * sin(VERTEX.y * 5.1 + s * 1.7) * sin(VERTEX.z * 7.2 + s * 0.9);
@@ -1729,6 +1762,10 @@ const _BILLOW_MM_CODE := "
 		// Long lingering tail (tail_power < 1) but with a SOFT landing — the last
 		// stretch eases gently to zero instead of dropping off a cliff at the end.
 		float fade_out = pow(1.0 - t, tail_power) * (1.0 - smoothstep(0.5, 1.0, t));
+		if (sky_mode > 0.5) {
+			fade_in = 1.0;
+			fade_out = 1.0;
+		}
 		ALPHA = v_opk * fade_in * fade_out * smoothstep(0.0, 0.5, facing);
 		ALPHA = floor(ALPHA * 6.0 + 0.5) / 6.0;
 		vec2 px_cell = floor(UV * vec2(8.0, 5.0));
@@ -1756,6 +1793,10 @@ const _BILLOW_MM_CODE := "
 			shade = floor(clamp(shade + cell_band * 0.08, 0.0, 1.0) * 4.0 + 0.5) / 4.0;
 			float grey = dot(v_body, vec3(0.3333)) * shade;
 			grey = mix(grey, grey * 0.22, fres);
+			if (sky_mode > 0.5) {
+				vec3 warm = warm_glow * (0.18 + v_heat * 0.42) * (0.35 + fres * 0.65);
+				grey = clamp(grey + warm.r * 0.55, 0.0, 1.0);
+			}
 			grey = floor(grey * 6.0 + 0.5) / 6.0;
 			ALBEDO = vec3(grey);
 		}
@@ -1864,6 +1905,85 @@ static func _spawn_blast_billow(scene: Node, pos: Vector3, radius: float, count:
 			.set_trans(Tween.TRANS_LINEAR)
 		if not is_fire:
 			host.set_meta("billow_rise_tween", rise_tw)
+
+
+# Persistent sky clouds — same lumpy billow MultiMesh as blast smoke, frozen in
+# sky_mode so they don't pop/fade. One draw call per cluster.
+static func spawn_sky_cloud_cluster(
+	parent: Node3D,
+	center: Vector3,
+	rng: RandomNumberGenerator,
+	tint: Color,
+	puff_count: int = 7,
+	cluster_radius: float = 14.0,
+	scale_lo: float = 7.0,
+	scale_hi: float = 15.0,
+	hell_mode: bool = false,
+) -> Node3D:
+	if parent == null:
+		return null
+	var pivot := Node3D.new()
+	pivot.name = "SkyCloudCluster"
+	pivot.position = center
+	pivot.rotation.y = rng.randf_range(-PI, PI)
+	parent.add_child(pivot)
+
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.use_colors = true
+	mm.use_custom_data = true
+	mm.mesh = _get_smoke_billow_mesh()
+	mm.instance_count = puff_count
+	var spread := cluster_radius
+	for i in puff_count:
+		var ang := rng.randf() * TAU
+		var rad := rng.randf_range(0.0, spread)
+		var off := Vector3(
+			cos(ang) * rad,
+			rng.randf_range(-1.8, 2.4),
+			sin(ang) * rad,
+		)
+		var end_scale := rng.randf_range(scale_lo, scale_hi)
+		mm.set_instance_transform(i, Transform3D(Basis.IDENTITY.scaled(Vector3.ONE * end_scale), off))
+		var seed := rng.randf()
+		var hold := rng.randf_range(0.48 if hell_mode else 0.42, 0.82 if hell_mode else 0.78)
+		var heat := rng.randf_range(0.22 if hell_mode else 0.08, 0.48 if hell_mode else 0.22)
+		var g := rng.randf_range(0.18 if hell_mode else 0.46, 0.38 if hell_mode else 0.72)
+		var body: Color
+		if hell_mode:
+			body = Color(g * tint.r * 1.35, g * tint.g * 0.72, g * tint.b * 0.42)
+		else:
+			body = Color(g * tint.r, g * tint.g, g * tint.b)
+		var opk := rng.randf_range(0.52 if hell_mode else 0.38, 0.78 if hell_mode else 0.58)
+		mm.set_instance_color(i, Color(body.r, body.g, body.b, opk))
+		mm.set_instance_custom_data(i, Color(seed, hold, heat, 0.0))
+
+	var mmi := MultiMeshInstance3D.new()
+	mmi.name = "SkyCloudBillows"
+	mmi.multimesh = mm
+	mmi.extra_cull_margin = 128.0
+	mmi.ignore_occlusion_culling = true
+	mmi.custom_aabb = AABB(Vector3.ONE * (-spread * 2.2), Vector3.ONE * (spread * 4.4))
+	var mat := ShaderMaterial.new()
+	mat.shader = _get_billow_mm_shader()
+	mat.set_shader_parameter("anim", 0.0)
+	mat.set_shader_parameter("is_fire", 0.0)
+	mat.set_shader_parameter("sky_mode", 1.0)
+	mat.set_shader_parameter("tail_power", 0.38)
+	mat.set_shader_parameter("lump_amount", 0.34 if hell_mode else 0.28)
+	mat.set_shader_parameter("edge_power", 1.65 if hell_mode else 2.1)
+	mat.set_shader_parameter("warm_glow", tint.lerp(Color(1.0, 0.55, 0.18), 0.72 if hell_mode else 0.35))
+	mmi.material_override = mat
+	pivot.add_child(mmi)
+
+	var drift := Vector3(rng.randf_range(-3.5, 3.5), rng.randf_range(-0.4, 0.4), rng.randf_range(-3.5, 3.5))
+	if drift.length_squared() > 0.01:
+		var tw := pivot.create_tween().set_loops()
+		tw.tween_property(pivot, "position", center + drift, rng.randf_range(28.0, 44.0))\
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+		tw.tween_property(pivot, "position", center - drift * 0.65, rng.randf_range(28.0, 44.0))\
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	return pivot
 
 
 static func reset_smoke_push_bench() -> void:
@@ -2372,10 +2492,6 @@ static func spawn_shockwave_ring(scene: Node, pos: Vector3, radius: float) -> vo
 		_shock_shader.code = """
 			shader_type spatial;
 			render_mode unshaded, cull_disabled, depth_draw_never, blend_mix;
-
-			uniform sampler2D screen_tex : hint_screen_texture, filter_nearest;
-			uniform float distortion_strength = 0.05;
-			uniform float ring_thickness = 7.0;
 			uniform float opacity = 0.9;
 
 			void fragment() {
@@ -2998,8 +3114,8 @@ static func _get_impact_chip_mesh() -> Mesh:
 static func _debris_chip_material(color: Color, alpha: float, roughness: float = 0.9) -> StandardMaterial3D:
 	if _debris_mat_template == null:
 		_debris_mat_template = StandardMaterial3D.new()
-		_debris_mat_template.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		_debris_mat_template.roughness = roughness
+		_debris_mat_template.metallic = 0.0
 	var mat: StandardMaterial3D = _debris_mat_template.duplicate() as StandardMaterial3D
 	mat.albedo_color = Color(color.r, color.g, color.b, alpha)
 	mat.roughness = roughness
@@ -3032,6 +3148,10 @@ static func _surface_color_from_collider(collider: Node, fallback: Color) -> Col
 		mat = mesh_owner.material_override
 	if mat is StandardMaterial3D:
 		return (mat as StandardMaterial3D).albedo_color
+	if mat is ShaderMaterial:
+		var bc = (mat as ShaderMaterial).get_shader_parameter("base_color")
+		if bc is Color:
+			return bc
 	return fallback.lerp(Color(0.72, 0.66, 0.55), 0.65)
 
 
@@ -3054,107 +3174,37 @@ static func _animate_impact_chip(
 	mat.albedo_color = Color(col.r, col.g, col.b, start_alpha * (1.0 - smoothstep(0.96, 1.0, t)))
 
 
-# Parabolic arc: constant initial velocity + uniform downward acceleration.
-# Not a bezier — this is the textbook projectile equation sampled over elapsed time.
-static func _animate_debris_fragment(
+# Parabolic free-fall: constant initial velocity + uniform downward acceleration,
+# sampled over the chip's whole life. No ground collision — the chip arcs out and
+# falls straight through the floor, fading to nothing over the tail of its life so
+# it's gone before it travels far underground. The textbook projectile equation.
+static func _animate_debris_freefall(
 	t_norm: float,
 	chip: MeshInstance3D,
+	mat: StandardMaterial3D,
 	start: Vector3,
 	initial_velocity: Vector3,
-	flight_time: float,
-	impact_pos: Vector3,
+	life: float,
 	start_rot: Vector3,
 	end_rot: Vector3,
+	start_alpha: float,
+	fade_start: float,
 ) -> void:
 	if not is_instance_valid(chip):
 		return
-	if t_norm >= 1.0:
-		chip.global_position = impact_pos
-		chip.rotation = end_rot
-		return
-	var elapsed: float = t_norm * flight_time
-	var gravity_accel := Vector3.DOWN * DEBRIS_GRAVITY
+	var elapsed: float = t_norm * life
 	chip.global_position = (
 		start
 		+ initial_velocity * elapsed
-		+ gravity_accel * (0.5 * elapsed * elapsed)
+		+ Vector3.DOWN * DEBRIS_GRAVITY * (0.5 * elapsed * elapsed)
 	)
 	chip.rotation = start_rot.lerp(end_rot, t_norm)
-
-
-static func _debris_ground_y_at(scene: Node, probe: Vector3) -> float:
-	if scene == null or not is_instance_valid(scene):
-		return probe.y - 12.0
-	var world: World3D = scene.get_world_3d()
-	if world == null:
-		return probe.y - 12.0
-	var space: PhysicsDirectSpaceState3D = world.direct_space_state
-	var from := probe + Vector3.UP * 48.0
-	var to := probe + Vector3.DOWN * 120.0
-	var q := PhysicsRayQueryParameters3D.create(from, to)
-	q.collision_mask = 1
-	var hit: Dictionary = space.intersect_ray(q)
-	if hit.is_empty():
-		return probe.y - 12.0
-	return float(hit.position.y)
-
-
-static func _debris_flight_time_to_ground(start_y: float, vel_y: float, ground_y: float) -> float:
-	var drop: float = start_y - ground_y
-	if drop <= 0.05:
-		return 0.35
-	var disc: float = vel_y * vel_y + 2.0 * DEBRIS_GRAVITY * drop
-	if disc <= 0.0:
-		return sqrt(2.0 * drop / DEBRIS_GRAVITY)
-	return maxf(0.25, (vel_y + sqrt(disc)) / DEBRIS_GRAVITY)
-
-
-static func _debris_impact_position(
-	start: Vector3,
-	initial_velocity: Vector3,
-	flight_time: float,
-	ground_y: float,
-) -> Vector3:
-	var gravity_accel := Vector3.DOWN * DEBRIS_GRAVITY
-	var impact := (
-		start
-		+ initial_velocity * flight_time
-		+ gravity_accel * (0.5 * flight_time * flight_time)
-	)
-	impact.y = ground_y
-	return impact
-
-
-static func _debris_fade_mat(t: float, mat: StandardMaterial3D, start_alpha: float) -> void:
-	if mat == null:
-		return
-	var col := mat.albedo_color
-	mat.albedo_color = Color(col.r, col.g, col.b, start_alpha * (1.0 - t))
-
-
-static func _debris_bury_after_impact(
-	chip: MeshInstance3D,
-	mat: StandardMaterial3D,
-	impact_pos: Vector3,
-	start_alpha: float,
-) -> void:
-	if not is_instance_valid(chip):
-		return
-	chip.global_position = impact_pos
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	var bury_depth: float = randf_range(0.18, 0.55)
-	var buried := impact_pos + Vector3.DOWN * bury_depth
-	var tw := chip.create_tween()
-	tw.tween_property(chip, "global_position", buried, randf_range(0.14, 0.26))\
-		.set_trans(Tween.TRANS_QUAD)\
-		.set_ease(Tween.EASE_IN)
-	tw.parallel().tween_method(
-		Callable(Violence, "_debris_fade_mat").bind(mat, start_alpha),
-		0.0,
-		1.0,
-		randf_range(0.22, 0.38),
-	).set_trans(Tween.TRANS_LINEAR)
-	tw.tween_callback(chip.queue_free)
+	if t_norm >= fade_start and mat != null:
+		if mat.transparency == BaseMaterial3D.TRANSPARENCY_DISABLED:
+			mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		var f: float = (t_norm - fade_start) / maxf(0.0001, 1.0 - fade_start)
+		var c := mat.albedo_color
+		mat.albedo_color = Color(c.r, c.g, c.b, start_alpha * (1.0 - f))
 
 
 static func _spawn_impact_rock_chips(scene: Node, pos: Vector3, normal: Vector3, scale_f: float, dmg_ratio: float, collider: Node, bullet_color: Color) -> void:
@@ -3283,9 +3333,16 @@ static func spawn_destruction_debris(
 		if str(last.get("tier", "")) == tier and last.get("scene") == scene:
 			var last_pos: Vector3 = last.get("global_pos") as Vector3
 			if last_pos.distance_squared_to(global_pos) <= DEBRIS_JOB_MERGE_DIST_SQ:
-				var cap := 8 if tier == "cheap" else 28
+				# Combine a wall's per-block bursts into one fx, but grow the chip
+				# budget with total chunks felled so a 10-block blast reads as a
+				# real collapse instead of collapsing to a few specks.
+				var merged_chunks: int = (
+					int(last.get("chunks_removed", 1)) + maxi(1, chunks_removed))
+				var cap: int = clampi(
+					merged_chunks * 4, (8 if tier == "cheap" else 16),
+					(24 if tier == "cheap" else 56))
 				last["chip_count"] = mini(cap, int(last.get("chip_count", 0)) + chip_count)
-				last["chunks_removed"] = int(last.get("chunks_removed", 1)) + maxi(1, chunks_removed)
+				last["chunks_removed"] = merged_chunks
 				last["blast_radius"] = maxf(float(last.get("blast_radius", 0.0)), blast_radius)
 				return
 	if tier == "premium":
@@ -3374,9 +3431,9 @@ static func _pick_debris_tier(blast_radius: float, chunks_removed: int) -> Strin
 
 static func _debris_chip_count_cheap(blast_radius: float, chunks_removed: int) -> int:
 	var sev: float = _debris_blast_severity(blast_radius, chunks_removed)
-	var count: float = lerpf(3.0, 7.0, pow(sev, 0.75))
-	count += float(maxi(1, chunks_removed)) * 0.08
-	return clampi(int(round(count)), 2, 8)
+	var count: float = lerpf(6.0, 14.0, pow(sev, 0.75))
+	count += float(maxi(1, chunks_removed)) * 0.5
+	return clampi(int(round(count)), 4, 20)
 
 
 static func _debris_blast_severity(blast_radius: float, chunks_removed: int) -> float:
@@ -3387,19 +3444,19 @@ static func _debris_blast_severity(blast_radius: float, chunks_removed: int) -> 
 
 static func _debris_chip_count_for_blast(blast_radius: float, chunks_removed: int) -> int:
 	var sev: float = _debris_blast_severity(blast_radius, chunks_removed)
-	var count: float = lerpf(4.0, 26.0, pow(sev, 0.82))
-	count += float(maxi(1, chunks_removed)) * lerpf(0.04, 0.32, sev)
-	return clampi(int(round(count)), 3, 28)
+	var count: float = lerpf(9.0, 38.0, pow(sev, 0.82))
+	count += float(maxi(1, chunks_removed)) * lerpf(0.06, 0.4, sev)
+	return clampi(int(round(count)), 6, 46)
 
 
 static func _debris_fragment_longest_axis(blast_radius: float, block_size: Vector3) -> float:
 	var sev: float = clampf((blast_radius - 0.45) / 10.0, 0.0, 1.0)
 	var chunk_hint: float = clampf(block_size.length() / 4.2, 0.7, 1.25)
-	var base_lo: float = lerpf(0.11, 0.28, sev) * chunk_hint
-	var base_hi: float = lerpf(0.2, 0.62, sev) * chunk_hint
+	var base_lo: float = lerpf(0.3, 0.52, sev) * chunk_hint
+	var base_hi: float = lerpf(0.54, 1.08, sev) * chunk_hint
 	# Heavier blasts occasionally throw a chunky shard.
-	if randf() < lerpf(0.04, 0.26, sev):
-		return randf_range(lerpf(0.42, 0.62, sev), lerpf(0.72, 1.15, sev)) * chunk_hint
+	if randf() < lerpf(0.08, 0.3, sev):
+		return randf_range(lerpf(0.72, 1.0, sev), lerpf(1.2, 1.7, sev)) * chunk_hint
 	return randf_range(base_lo, base_hi) * randf_range(0.82, 1.22)
 
 
@@ -3466,9 +3523,6 @@ static func _spawn_debris_job_premium(job: Dictionary, max_chips: int) -> int:
 		block_size.length() * lerpf(0.35, 0.55, blast_sev),
 		blast_radius * lerpf(0.12, 0.24, blast_sev),
 	)
-	if not job.has("ground_y"):
-		job["ground_y"] = _debris_ground_y_at(scene, global_pos)
-	var job_ground_y: float = float(job["ground_y"])
 	var spawned := 0
 	for i in range(start_i, chip_count):
 		if spawned >= max_chips:
@@ -3516,12 +3570,22 @@ static func _spawn_debris_job_premium(job: Dictionary, max_chips: int) -> int:
 			lerpf(1.8, 4.5, blast_sev),
 			lerpf(4.5, 11.5, blast_sev),
 		) * randf_range(0.88, 1.12)
-		var ground_y: float = job_ground_y
-		var flight_time: float = _debris_flight_time_to_ground(start.y, initial_velocity_y, ground_y)
-		var horizontal_speed: float = horizontal_dist / flight_time
+		# No ground query — the chip rides its ballistic arc and falls straight
+		# through the floor, fading out as it sinks. Cheaper (no raycast, no second
+		# bury tween) and it never freezes mid-air.
+		var life: float = randf_range(1.05, 1.7)
+		var fade_start := 0.72
+		# Loft ~40% of chips into tall parabolas instead of a flat sideways spray:
+		# launch them hard upward, cut their horizontal travel, and stretch life to
+		# cover the full up-and-down arc so they peak high and fall back through.
+		if randf() < 0.4:
+			initial_velocity_y = randf_range(9.0, 15.0) * lerpf(1.0, 1.25, blast_sev)
+			horizontal_dist *= randf_range(0.22, 0.55)
+			life = maxf(life, 2.0 * initial_velocity_y / DEBRIS_GRAVITY * randf_range(1.04, 1.18))
+			fade_start = 0.85
+		var horizontal_speed: float = horizontal_dist / life
 		var initial_velocity := horizontal_dir * horizontal_speed
 		initial_velocity.y = initial_velocity_y
-		var impact_pos := _debris_impact_position(start, initial_velocity, flight_time, ground_y)
 		var start_rot := chip.rotation
 		var end_rot := start_rot + Vector3(
 			randf_range(-PI, PI) * randf_range(2.0, 4.5),
@@ -3530,16 +3594,14 @@ static func _spawn_debris_job_premium(job: Dictionary, max_chips: int) -> int:
 		)
 		var tw := chip.create_tween()
 		tw.tween_method(
-			Callable(Violence, "_animate_debris_fragment").bind(
-				chip, start, initial_velocity, flight_time, impact_pos, start_rot, end_rot,
+			Callable(Violence, "_animate_debris_freefall").bind(
+				chip, mat, start, initial_velocity, life, start_rot, end_rot, start_alpha, fade_start,
 			),
 			0.0,
 			1.0,
-			flight_time,
+			life,
 		).set_trans(Tween.TRANS_LINEAR)
-		tw.tween_callback(
-			Callable(Violence, "_debris_bury_after_impact").bind(chip, mat, impact_pos, start_alpha),
-		)
+		tw.tween_callback(chip.queue_free)
 		spawned += 1
 	job["next_i"] = chip_count
 	return spawned
@@ -3561,9 +3623,6 @@ static func _spawn_debris_job_cheap(job: Dictionary, max_chips: int) -> int:
 	var blast_radius: float = float(job.get("blast_radius"))
 	var chunks_removed: int = int(job.get("chunks_removed", 1))
 	var blast_sev: float = _debris_blast_severity(blast_radius, chunks_removed)
-	if not job.has("ground_y"):
-		job["ground_y"] = _debris_ground_y_at(scene, global_pos)
-	var ground_y: float = float(job["ground_y"])
 	var away: Vector3 = global_pos - blast_world
 	if away.length_squared() < 0.04:
 		away = Vector3(randf() - 0.5, 0.2, randf() - 0.5)
@@ -3602,7 +3661,7 @@ static func _spawn_debris_job_cheap(job: Dictionary, max_chips: int) -> int:
 			0.92,
 		)
 		chip.material_override = mat
-		var target_longest_axis_m := lerpf(0.1, 0.38, blast_sev) * randf_range(0.85, 1.15)
+		var target_longest_axis_m := lerpf(0.3, 0.72, blast_sev) * randf_range(0.85, 1.15)
 		var proportions := Vector3(
 			randf_range(0.55, 1.0),
 			randf_range(0.35, 0.85),
@@ -3625,11 +3684,17 @@ static func _spawn_debris_job_cheap(job: Dictionary, max_chips: int) -> int:
 			lerpf(1.4, 3.0, blast_sev),
 			lerpf(3.0, 7.0, blast_sev),
 		)
-		var flight_time: float = _debris_flight_time_to_ground(start.y, initial_velocity_y, ground_y)
-		var horizontal_speed: float = horizontal_dist / flight_time
+		var life: float = randf_range(0.9, 1.5)
+		var fade_start := 0.72
+		# Loft ~35% of chips straight up into tall arcs rather than sideways spray.
+		if randf() < 0.35:
+			initial_velocity_y = randf_range(7.0, 12.0) * lerpf(1.0, 1.2, blast_sev)
+			horizontal_dist *= randf_range(0.25, 0.6)
+			life = maxf(life, 2.0 * initial_velocity_y / DEBRIS_GRAVITY * randf_range(1.04, 1.18))
+			fade_start = 0.85
+		var horizontal_speed: float = horizontal_dist / life
 		var initial_velocity := horizontal_dir * horizontal_speed
 		initial_velocity.y = initial_velocity_y
-		var impact_pos := _debris_impact_position(start, initial_velocity, flight_time, ground_y)
 		var start_rot := chip.rotation
 		var end_rot := start_rot + Vector3(
 			randf_range(-PI, PI) * 1.6,
@@ -3638,12 +3703,12 @@ static func _spawn_debris_job_cheap(job: Dictionary, max_chips: int) -> int:
 		)
 		var tw := chip.create_tween()
 		tw.tween_method(
-			Callable(Violence, "_animate_debris_fragment").bind(
-				chip, start, initial_velocity, flight_time, impact_pos, start_rot, end_rot,
+			Callable(Violence, "_animate_debris_freefall").bind(
+				chip, mat, start, initial_velocity, life, start_rot, end_rot, 1.0, fade_start,
 			),
 			0.0,
 			1.0,
-			flight_time,
+			life,
 		).set_trans(Tween.TRANS_LINEAR)
 		tw.tween_callback(chip.queue_free)
 		spawned += 1

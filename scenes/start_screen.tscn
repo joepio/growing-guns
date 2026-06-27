@@ -1,23 +1,8 @@
-[gd_scene load_steps=4 format=3 uid="uid://bstartscreen01"]
+[gd_scene load_steps=3 format=3 uid="uid://bstartscreen01"]
 
 [ext_resource type="Script" path="res://scripts/start_screen.gd" id="1_start"]
 [ext_resource type="PackedScene" uid="uid://barenaproc01" path="res://scenes/arena_procedural.tscn" id="2_arena"]
-
-[sub_resource type="StyleBoxFlat" id="MenuPanelStyle"]
-bg_color = Color(0.055, 0.055, 0.07, 0.92)
-border_color = Color(0.35, 0.7, 1, 0.95)
-border_width_left = 2
-border_width_top = 2
-border_width_right = 2
-border_width_bottom = 2
-corner_radius_top_left = 8
-corner_radius_top_right = 8
-corner_radius_bottom_right = 8
-corner_radius_bottom_left = 8
-content_margin_left = 22.0
-content_margin_top = 20.0
-content_margin_right = 22.0
-content_margin_bottom = 20.0
+[ext_resource type="Script" path="res://scripts/gothic_menu_frame.gd" id="3_frame"]
 
 [node name="StartScreen" type="Node3D"]
 script = ExtResource("1_start")
@@ -56,18 +41,39 @@ text = "GROWING GUNS"
 horizontal_alignment = 1
 vertical_alignment = 1
 
-[node name="MenuPanel" type="PanelContainer" parent="UI"]
+[node name="MenuPanel" type="Control" parent="UI"]
 anchors_preset = 4
 anchor_top = 0.5
 anchor_bottom = 0.5
-offset_left = 62.0
-offset_top = -172.0
-offset_right = 412.0
-offset_bottom = 172.0
+offset_left = 52.0
+offset_top = -196.0
+offset_right = 402.0
+offset_bottom = 196.0
 grow_vertical = 2
-theme_override_styles/panel = SubResource("MenuPanelStyle")
+custom_minimum_size = Vector2(350, 392)
+
+[node name="Frame" type="Control" parent="UI/MenuPanel"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("3_frame")
 
 [node name="VBox" type="VBoxContainer" parent="UI/MenuPanel"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 22.0
+offset_top = 42.0
+offset_right = -22.0
+offset_bottom = -18.0
+grow_horizontal = 2
+grow_vertical = 2
+alignment = 1
 theme_override_constants/separation = 8
 
 [node name="VersusButton" type="Button" parent="UI/MenuPanel/VBox"]

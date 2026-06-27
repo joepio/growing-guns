@@ -10,7 +10,7 @@ extends Node3D
 @onready var generator: Node3D = $Generator
 @onready var world_env: WorldEnvironment = $WorldEnvironment
 @onready var sun: DirectionalLight3D = $Sun
-@onready var fill_light: OmniLight3D = $FillLight
+@onready var fill_light: DirectionalLight3D = $FillLight
 
 const LAVA_TICK_SECONDS := 0.5
 const LAVA_TICK_DAMAGE := 15
@@ -34,6 +34,7 @@ var _lava_front_meshes: Array[BoxMesh] = []
 var _lava_walls: Array[MeshInstance3D] = []
 var _lava_wall_meshes: Array[BoxMesh] = []
 var _lava_damage_accum_by_player: Dictionary = {}
+var _lava_leak_glow: OmniLight3D = null
 
 
 func _ready() -> void:
@@ -76,12 +77,24 @@ func apply_seed(s: int, size_min: float = -1.0, size_max: float = -1.0) -> void:
 	# Set seed first so palette lookup uses the new value, then regenerate
 	# synchronously so spawnpoints exist before the caller queries them.
 	stop_lava_leak()
+	generator.force_all_floor_lava = false
+	generator.cinematic_present = false
 	if size_min >= 0.0 and size_max >= 0.0:
 		generator.arena_size_min = size_min
 		generator.arena_size_max = size_max
 	else:
 		generator.arena_size_min = 55.0
 		generator.arena_size_max = 95.0
+	generator.seed = s
+	generator.regenerate()
+
+
+func apply_cinematic_seed(s: int = 424242, size: float = 72.0) -> void:
+	stop_lava_leak()
+	generator.force_all_floor_lava = true
+	generator.cinematic_present = true
+	generator.arena_size_min = size
+	generator.arena_size_max = size
 	generator.seed = s
 	generator.regenerate()
 
@@ -158,6 +171,9 @@ func start_lava_leak(spread_seconds: float = 20.0, start_elapsed: float = 0.0) -
 func stop_lava_leak() -> void:
 	_lava_leak_active = false
 	_lava_floor_already_full = false
+	if _lava_leak_glow and is_instance_valid(_lava_leak_glow):
+		_lava_leak_glow.queue_free()
+	_lava_leak_glow = null
 	for n in _lava_fronts:
 		if n and is_instance_valid(n):
 			n.queue_free()
@@ -175,8 +191,18 @@ func _build_lava_leak_nodes() -> void:
 	var floor_mat := _make_lava_material()
 	_build_lava_front("NorthLavaFront", floor_mat)
 	_build_lava_front("SouthLavaFront", floor_mat)
-	_build_lava_front("WestLavaFront", floor_mat)
 	_build_lava_front("EastLavaFront", floor_mat)
+	_build_lava_front("WestLavaFront", floor_mat)
+
+	if _lava_leak_glow == null or not is_instance_valid(_lava_leak_glow):
+		_lava_leak_glow = OmniLight3D.new()
+		_lava_leak_glow.name = "LavaLeakGlow"
+		_lava_leak_glow.light_color = Color(1.0, 0.42, 0.12)
+		_lava_leak_glow.light_energy = 7.0
+		_lava_leak_glow.omni_attenuation = 0.65
+		_lava_leak_glow.shadow_enabled = false
+		add_child(_lava_leak_glow)
+	_lava_leak_glow.omni_range = _lava_arena_half * 1.35
 
 	if _lava_has_walls:
 		var wall_mat := _make_lava_material()
@@ -236,6 +262,8 @@ func _update_lava_front_visuals(floor_t: float) -> void:
 	if _lava_floor_already_full:
 		for front in _lava_fronts:
 			front.visible = false
+		if _lava_leak_glow and is_instance_valid(_lava_leak_glow):
+			_lava_leak_glow.visible = false
 		return
 	var visible := floor_t > 0.0 or not _lava_has_walls
 	var h := _lava_arena_half
@@ -243,6 +271,16 @@ func _update_lava_front_visuals(floor_t: float) -> void:
 	var side_len := h * 2.0
 	var center_len := maxf(0.0, side_len - i * 2.0)
 	var lava_y := LAVA_FLOOR_Y + _lava_rise_height
+	if _lava_leak_glow and is_instance_valid(_lava_leak_glow):
+		_lava_leak_glow.visible = visible
+		_lava_leak_glow.position = Vector3(0.0, lava_y + 0.45, 0.0)
+		var openness := 0.0
+		if generator and generator.has_method("get_lava_openness_ratio"):
+			openness = float(generator.get_lava_openness_ratio())
+		var leak_exposure := clampf(_lava_inset / maxf(_lava_arena_half, 0.01), 0.0, 1.0)
+		var exposure := maxf(openness, leak_exposure * 0.92)
+		var spread := clampf(floor_t * 1.4, 0.0, 1.0)
+		_lava_leak_glow.light_energy = lerpf(0.0, 7.5, spread * pow(exposure, 0.72))
 	for front in _lava_fronts:
 		front.visible = visible
 	if _lava_fronts.size() < 4:

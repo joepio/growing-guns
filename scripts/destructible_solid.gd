@@ -13,18 +13,22 @@ const CHUNK_BASE_HEALTH := 42.0
 const CHUNK_VOLUME_HEALTH := 4.0
 const TARGET_CELL := 2.4
 const MAX_CHUNKS_PER_AXIS := 6
-const EDGE_JITTER := 0.28
+const EDGE_JITTER := 0.38
 const MAX_JAGGEDIZE_PER_CARVE := 18
 const MAX_EXPOSURE_JOBS_PER_FRAME := 1
 # Below this VFX quality, exposed chunks stay in the intact MultiMesh (zero extra
 # draws). Existing exposed batches are collapsed back when quality sags.
 const EXPOSURE_SHED_QS := 0.55
 
+const CHUNK_MESH_SUBDIVIDE := 5
+# Visual inset — hairline shadow between bricks; keep tight so walls read solid.
+const VISUAL_CHUNK_INSET := 0.992
+
 var box_size: Vector3 = Vector3.ONE
 var _pending_carves: Array[Dictionary] = []
 var _pending_exposure_carves: Array[Dictionary] = []
 var _body_seed: int = 0
-var _mat: StandardMaterial3D = null
+var _mat: Material = null
 var _chunk_cols: Array[CollisionShape3D] = []
 var _chunk_meshes: Dictionary = {}
 var _exposed_mmi: MultiMeshInstance3D = null
@@ -43,7 +47,7 @@ var _z_edges := PackedFloat32Array()
 func setup_box(
 	pos: Vector3,
 	size: Vector3,
-	mat: StandardMaterial3D,
+	mat: Material,
 	rotation_y: float = 0.0,
 	_with_collider: bool = true,
 ) -> void:
@@ -65,7 +69,7 @@ func setup_cylinder(
 	pos: Vector3,
 	radius: float,
 	height: float,
-	mat: StandardMaterial3D,
+	mat: Material,
 	bottom_radius_scale: float = 0.8,
 ) -> void:
 	setup_box(pos, Vector3(radius * 2.0, height, radius * 2.0), mat)
@@ -212,7 +216,11 @@ func apply_pending_carves() -> bool:
 	if scene and max_blood_cleanup_r > 0.0:
 		Violence.clear_blood_splats_near(scene, burst_center / n, max_blood_cleanup_r)
 	DestructibleManager.note_chunk_removals(to_remove_cols.size())
-	var base_color := _mat.albedo_color if _mat != null else Color(0.45, 0.7, 0.72)
+	if is_in_group("lava_floor") and has_meta("_lava_openness_tracker"):
+		var tracker: Variant = get_meta("_lava_openness_tracker")
+		if tracker != null and is_instance_valid(tracker) and tracker.has_method("notify_chunks_removed"):
+			tracker.call("notify_chunks_removed", self, to_remove_cols)
+	var base_color := _material_base_color()
 	Violence.spawn_destruction_debris(
 		scene, burst_center / n, global_basis, burst_size / n, base_color,
 		burst_center / n, max_radius, to_remove_cols.size())
@@ -286,7 +294,7 @@ func _build_chunks() -> void:
 				var min_corner := Vector3(_x_edges[x], _y_edges[y], _z_edges[z])
 				var max_corner := Vector3(_x_edges[x + 1], _y_edges[y + 1], _z_edges[z + 1])
 				var chunk_size := max_corner - min_corner
-				var center := (min_corner + max_corner) * 0.5
+				var center := (min_corner + max_corner) * 0.5 + _running_bond_shift(Vector3i(x, y, z))
 				_add_chunk(center, chunk_size, Vector3i(x, y, z))
 	_build_intact_multimesh()
 
@@ -321,30 +329,48 @@ func _add_chunk(center: Vector3, chunk_size: Vector3, cell: Vector3i) -> void:
 	col.position = center
 	col.set_meta("chunk_center_local", center)
 	col.set_meta("chunk_size", chunk_size)
+	col.set_meta("chunk_cell", cell)
 	col.set_meta("chunk_half_diag", chunk_size.length() * 0.5)
 	col.set_meta("chunk_hp", _chunk_max_health(chunk_size))
 	col.set_meta("jagged_visual", false)
 	col.set_meta("multimesh_index", _chunk_cols.size())
+	col.set_meta("chunk_custom", _chunk_custom_data(cell))
 	add_child(col)
 	_chunk_cols.append(col)
 	_chunk_grid[_flat_index(cell.x, cell.y, cell.z)] = col
+
+
+func _chunk_custom_data(cell: Vector3i) -> Color:
+	# Per-brick variation for MultiMesh INSTANCE_CUSTOM (no extra draw calls).
+	var h: int = hash([_body_seed, cell.x, cell.y, cell.z])
+	var h2: int = hash([h, 90210])
+	var h3: int = hash([h, 31337])
+	var h4: int = hash([h, 4242])
+	return Color(
+		float(h % 1000) / 1000.0,
+		0.72 + float(h2 % 100) / 118.0,
+		0.86 + float(h3 % 140) / 280.0,
+		0.38 + float(h4 % 100) / 115.0,
+	)
 
 
 func _build_intact_multimesh() -> void:
 	_intact_mmi = MultiMeshInstance3D.new()
 	_intact_mmi.name = "IntactChunks"
 	_intact_mmi.material_override = _mat
-	var unit_box := BoxMesh.new()
-	unit_box.size = Vector3.ONE
+	var unit_box := _chunk_unit_mesh()
 	_intact_mm = MultiMesh.new()
 	_intact_mm.transform_format = MultiMesh.TRANSFORM_3D
+	_intact_mm.use_custom_data = true
 	_intact_mm.mesh = unit_box
 	_intact_mm.instance_count = _chunk_cols.size()
 	for i: int in _chunk_cols.size():
 		var col: CollisionShape3D = _chunk_cols[i]
 		var center: Vector3 = col.get_meta("chunk_center_local") as Vector3
 		var chunk_size: Vector3 = col.get_meta("chunk_size") as Vector3
-		_intact_mm.set_instance_transform(i, Transform3D(Basis.IDENTITY.scaled(chunk_size), center))
+		_intact_mm.set_instance_transform(
+			i, _chunk_visual_transform(center, chunk_size, col.get_meta("chunk_cell") as Vector3i))
+		_intact_mm.set_instance_custom_data(i, col.get_meta("chunk_custom") as Color)
 	_intact_mmi.multimesh = _intact_mm
 	_intact_mmi.custom_aabb = AABB(-box_size * 0.5, box_size)
 	add_child(_intact_mmi)
@@ -368,7 +394,8 @@ func _restore_intact_instance(col: CollisionShape3D) -> void:
 		return
 	var center: Vector3 = col.get_meta("chunk_center_local") as Vector3
 	var chunk_size: Vector3 = col.get_meta("chunk_size") as Vector3
-	_intact_mm.set_instance_transform(idx, Transform3D(Basis.IDENTITY.scaled(chunk_size), center))
+	_intact_mm.set_instance_transform(
+		idx, _chunk_visual_transform(center, chunk_size, col.get_meta("chunk_cell") as Vector3i))
 
 
 func _ensure_exposed_multimesh() -> MultiMesh:
@@ -377,10 +404,10 @@ func _ensure_exposed_multimesh() -> MultiMesh:
 	_exposed_mmi = MultiMeshInstance3D.new()
 	_exposed_mmi.name = "ExposedChunks"
 	_exposed_mmi.material_override = _mat
-	var unit_box := BoxMesh.new()
-	unit_box.size = Vector3.ONE
+	var unit_box := _chunk_unit_mesh()
 	_exposed_mm = MultiMesh.new()
 	_exposed_mm.transform_format = MultiMesh.TRANSFORM_3D
+	_exposed_mm.use_custom_data = true
 	_exposed_mm.mesh = unit_box
 	_exposed_mm.instance_count = 0
 	_exposed_mmi.multimesh = _exposed_mm
@@ -430,7 +457,9 @@ func _show_exposed_chunk(col: CollisionShape3D, chunk_size: Vector3, center: Vec
 	else:
 		idx = mm.instance_count
 		mm.instance_count = idx + 1
-	mm.set_instance_transform(idx, Transform3D(Basis.IDENTITY.scaled(chunk_size), center))
+	mm.set_instance_transform(
+		idx, _chunk_visual_transform(center, chunk_size, col.get_meta("chunk_cell") as Vector3i))
+	mm.set_instance_custom_data(idx, col.get_meta("chunk_custom") as Color)
 	_chunk_meshes[col.get_instance_id()] = idx
 	col.set_meta("jagged_visual", true)
 	DestructibleManager.note_exposed_chunk(1)
@@ -537,3 +566,102 @@ func _jaggedize_exposed_chunks(local_center: Vector3, radius: float) -> void:
 		_hide_intact_instance(col)
 		_show_exposed_chunk(col, chunk_size, center)
 		jaggedized += 1
+
+
+static var _cached_chunk_mesh: Mesh = null
+static var _cached_chunk_mesh_key: String = ""
+
+
+static func _chunk_mesh_cache_key() -> String:
+	return "round:%d:0.09" % CHUNK_MESH_SUBDIVIDE
+
+
+static func get_stone_block_mesh() -> Mesh:
+	return _chunk_unit_mesh()
+
+
+func _running_bond_shift(cell: Vector3i) -> Vector3:
+	# Stagger every other course so joints aren't a perfect grid.
+	if _grid.x > 1 and cell.y % 2 == 1:
+		return Vector3(box_size.x / float(_grid.x) * 0.5, 0.0, 0.0)
+	if _grid.y <= 1 and _grid.z > 1 and _grid.x > 1 and cell.z % 2 == 1:
+		return Vector3(box_size.x / float(_grid.x) * 0.5, 0.0, 0.0)
+	return Vector3.ZERO
+
+
+static func _visual_chunk_scale(chunk_size: Vector3) -> Vector3:
+	return chunk_size * VISUAL_CHUNK_INSET
+
+
+func _chunk_visual_transform(center: Vector3, chunk_size: Vector3, _cell: Vector3i) -> Transform3D:
+	return Transform3D(Basis.IDENTITY.scaled(_visual_chunk_scale(chunk_size)), center)
+
+
+static func _chunk_unit_mesh() -> Mesh:
+	var key := _chunk_mesh_cache_key()
+	if _cached_chunk_mesh == null or _cached_chunk_mesh_key != key:
+		var built: ArrayMesh = _build_hand_hewn_stone_mesh()
+		if built.get_surface_count() == 0:
+			push_warning("DestructibleSolid: hand-hewn mesh failed; using subdivided box fallback")
+			var box := BoxMesh.new()
+			box.size = Vector3.ONE
+			box.subdivide_width = CHUNK_MESH_SUBDIVIDE
+			box.subdivide_height = CHUNK_MESH_SUBDIVIDE
+			box.subdivide_depth = CHUNK_MESH_SUBDIVIDE
+			var st := SurfaceTool.new()
+			st.create_from(box, 0)
+			built = st.commit()
+		_cached_chunk_mesh = built
+		_cached_chunk_mesh_key = key
+	return _cached_chunk_mesh
+
+
+static func _build_hand_hewn_stone_mesh() -> ArrayMesh:
+	var box := BoxMesh.new()
+	box.size = Vector3.ONE
+	box.subdivide_width = CHUNK_MESH_SUBDIVIDE
+	box.subdivide_height = CHUNK_MESH_SUBDIVIDE
+	box.subdivide_depth = CHUNK_MESH_SUBDIVIDE
+	var st := SurfaceTool.new()
+	st.create_from(box, 0)
+	var base_mesh: ArrayMesh = st.commit()
+	var mdt := MeshDataTool.new()
+	mdt.create_from_surface(base_mesh, 0)
+	for i: int in mdt.get_vertex_count():
+		var p: Vector3 = mdt.get_vertex(i)
+		mdt.set_vertex(i, _sculpt_hand_hewn_vertex(p))
+	var sculpted := ArrayMesh.new()
+	mdt.commit_to_surface(sculpted)
+	var regen := SurfaceTool.new()
+	regen.create_from(sculpted, 0)
+	regen.generate_normals()
+	return regen.commit()
+
+
+static func _sculpt_hand_hewn_vertex(p: Vector3) -> Vector3:
+	const HALF := 0.5
+	const BEVEL := 0.09
+	var s := Vector3(
+		signf(p.x) if absf(p.x) > 0.0001 else 1.0,
+		signf(p.y) if absf(p.y) > 0.0001 else 1.0,
+		signf(p.z) if absf(p.z) > 0.0001 else 1.0,
+	)
+	var ap := p.abs()
+	var inner := HALF - BEVEL
+	var q := ap - Vector3(inner, inner, inner)
+	var q_pos := Vector3(maxf(q.x, 0.0), maxf(q.y, 0.0), maxf(q.z, 0.0))
+	var dist := q_pos.length()
+	var out_ap := ap
+	if dist > 0.0001:
+		out_ap = Vector3(inner, inner, inner) + q_pos / dist * BEVEL
+	return Vector3(out_ap.x * s.x, out_ap.y * s.y, out_ap.z * s.z)
+
+
+func _material_base_color() -> Color:
+	if _mat is StandardMaterial3D:
+		return (_mat as StandardMaterial3D).albedo_color
+	if _mat is ShaderMaterial:
+		var bc = (_mat as ShaderMaterial).get_shader_parameter("base_color")
+		if bc is Color:
+			return bc
+	return Color(0.45, 0.44, 0.42)
