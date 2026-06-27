@@ -1518,16 +1518,12 @@ static var _blast_ember_mesh: Mesh = null
 
 static func _get_blast_shard_mesh() -> Mesh:
 	if _blast_shard_mesh == null:
-		# Tapered cone (tip at +Y) — a flame petal. Unit height/radius; the
-		# spawner scales it into a long thin shard.
-		var c := CylinderMesh.new()
-		c.top_radius = 0.0
-		c.bottom_radius = 0.5
+		# Blobby puff — a fast-expanding little fire cloud, not an angular petal.
+		var c := SphereMesh.new()
+		c.radius = 0.5
 		c.height = 1.0
-		c.radial_segments = 6
-		c.rings = 1
-		c.cap_bottom = true
-		c.cap_top = false
+		c.radial_segments = 12
+		c.rings = 7
 		_blast_shard_mesh = c
 	return _blast_shard_mesh
 
@@ -1587,8 +1583,7 @@ const _BLAST_PROJECTILE_CODE := "
 		v_b = (1.0 - smoothstep(fade_start, 1.0, age)) * COLOR.a;
 	}
 	void fragment() {
-		vec3 px = floor(tint * 12.0 + 0.5) / 12.0;
-		ALBEDO = px * brightness;     // additive (blend_add); HDR brightness blooms
+		ALBEDO = tint * brightness;   // additive (blend_add); HDR brightness blooms
 		ALPHA = v_b;                  // fade modulates the added light
 	}
 "
@@ -1622,31 +1617,13 @@ static func spawn_blast_flame_shards(scene: Node, pos: Vector3, radius: float, c
 		return
 	if BenchFlags.active and BenchFlags.no_explosion_visuals:
 		return
-	var count := int(round(clampi(int(radius * 0.9), 5, 14) * blast_shard_count_scale * vfx_quality_scale()))
+	var count := int(round(clampi(int(radius * 0.7), 5, 12) * blast_shard_count_scale * vfx_quality_scale()))
 	if count <= 0:
 		return
-	var rng := RandomNumberGenerator.new()
-	var mm := MultiMesh.new()
-	mm.transform_format = MultiMesh.TRANSFORM_3D
-	mm.use_colors = true
-	mm.use_custom_data = true
-	mm.mesh = _get_blast_shard_mesh()
-	mm.instance_count = count
-	var size_scale := radius * 0.11   # max thick → COLOR.r is thick normalised to [0,1]
-	for i in count:
-		var theta := rng.randf() * TAU
-		var elev := rng.randf_range(-0.35, 1.3)
-		var dir := Vector3(cos(theta) * cos(elev), sin(elev), sin(theta) * cos(elev)).normalized()
-		var thick := radius * rng.randf_range(0.05, 0.11)
-		var length := radius * rng.randf_range(0.6, 1.25)
-		var travel := dir * length * rng.randf_range(0.4, 0.75)   # how far the petal launches
-		mm.set_instance_transform(i, Transform3D.IDENTITY)
-		# COLOR = (size01, elong01, grow_start, brightness_jitter)
-		mm.set_instance_color(i, Color(thick / size_scale, clampf((length / thick - 1.0) / 24.0, 0.0, 1.0), 0.35, rng.randf_range(0.75, 1.0)))
-		# CUSTOM = (travel.xyz, delay)
-		mm.set_instance_custom_data(i, Color(travel.x, travel.y, travel.z, rng.randf_range(0.0, 0.28)))
-	var hot := color.lerp(Color(1.0, 0.92, 0.7), 0.5)
-	_finish_projectile_layer(scene, mm, pos, hot, 7.0, 0.2 + radius * 0.025, radius * 2.5, size_scale, 25.0)
+	# Reuse the fire-cloud billow (lumpy orange->grey gradient) but elongate each
+	# blob radially so it reads as a fast-stretching fire tongue, not a round puff.
+	# Erupt a little after the initial fireball (delay_bias), each tongue staggered.
+	_spawn_blast_billow(scene, pos, radius, count, true, color, 0.34 + radius * 0.05, 0.28, 0.6, radius * 0.28, 2.6, 0.14)
 
 
 static func spawn_blast_embers(scene: Node, pos: Vector3, radius: float, color: Color) -> void:
@@ -1726,6 +1703,7 @@ const _BILLOW_MM_CODE := "
 	uniform vec3 fire_hot : source_color = vec3(1.0, 0.97, 0.86);
 	uniform float fire_glow_lo = 14.0;
 	uniform float fire_glow_hi = 65.0;
+	uniform sampler2D depth_tex : hint_depth_texture, filter_linear;
 	varying float v_age;
 	varying float v_heat;
 	varying vec3 v_body;
@@ -1742,7 +1720,7 @@ const _BILLOW_MM_CODE := "
 		if (sky_mode > 0.5) {
 			v_age = clamp(delay, 0.0, 1.0);
 		} else {
-			v_age = clamp((anim - delay) / max(1.0 - delay, 0.001), 0.0, 1.0);
+			v_age = clamp((anim - delay) * (1.0 + INSTANCE_CUSTOM.w) / max(1.0 - delay, 0.001), 0.0, 1.0);
 		}
 		// Per-instance lumpy displacement (seed varies every puff).
 		float s = seed * 100.0;
@@ -1769,8 +1747,13 @@ const _BILLOW_MM_CODE := "
 			fade_in = 1.0;
 			fade_out = 1.0;
 		}
-		ALPHA = v_opk * fade_in * fade_out * smoothstep(0.0, 0.5, facing);
-		ALPHA = floor(ALPHA * 14.0 + 0.5) / 14.0;
+		ALPHA = v_opk * fade_in * fade_out * smoothstep(0.0, 0.85, facing);
+		// Soft particles: dissolve where the puff meets solid geometry so it
+		// doesn't slice into walls/ground with a hard polygon edge.
+		float scene_d = texture(depth_tex, SCREEN_UV).r;
+		vec4 vpos = INV_PROJECTION_MATRIX * vec4(SCREEN_UV * 2.0 - 1.0, scene_d, 1.0);
+		float scene_z = (vpos.xyz / vpos.w).z;
+		ALPHA *= clamp((VERTEX.z - scene_z) / 1.6, 0.0, 1.0);
 		vec2 px_cell = floor(UV * vec2(8.0, 5.0));
 		float cell_band = mod(px_cell.x + px_cell.y, 3.0) - 1.0;
 		if (is_fire > 0.5) {
@@ -1778,8 +1761,8 @@ const _BILLOW_MM_CODE := "
 			float age_cool = 1.0 - smoothstep(0.0, 0.75, v_age);
 			float fire_band = clamp(heat * 0.6 + facing * 0.25 + age_cool * 0.15, 0.0, 1.0);
 			// fire_band computed smoothly above (no hard banding).
-			vec3 c0 = vec3(0.20, 0.18, 0.17);
-			vec3 c1 = vec3(0.46, 0.18, 0.07);
+			vec3 c0 = vec3(0.03, 0.025, 0.02);
+			vec3 c1 = vec3(0.30, 0.09, 0.025);
 			vec3 c2 = vec3(1.00, 0.24, 0.04);
 			vec3 c3 = vec3(1.00, 0.62, 0.12);
 			vec3 c4 = vec3(1.00, 0.95, 0.72);
@@ -1788,13 +1771,13 @@ const _BILLOW_MM_CODE := "
 			color = mix(color, c2, smoothstep(0.30, 0.54, fire_band));
 			color = mix(color, c3, smoothstep(0.52, 0.74, fire_band));
 			color = mix(color, c4, smoothstep(0.74, 0.94, fire_band));
-			ALBEDO = color * mix(0.9, 14.0, fire_band);
+			ALBEDO = color * mix(0.45, 16.0, fire_band);
 		} else {
 			// Darkness varies across the surface — some patches near-black, some
 			// lighter — for turbulent, non-uniform smoke.
 			float shade = 0.45 + 0.85 * (v_shade * 0.5 + 0.5);
 			shade = clamp(shade + cell_band * 0.05, 0.0, 1.0);
-			float grey = dot(v_body, vec3(0.3333)) * shade;
+			float grey = dot(v_body, vec3(0.3333)) * shade * 0.42;
 			grey = mix(grey, grey * 0.22, fres);
 			if (sky_mode > 0.5) {
 				vec3 warm = warm_glow * (0.18 + v_heat * 0.42) * (0.35 + fres * 0.65);
@@ -1825,7 +1808,8 @@ static func _get_billow_mm_shader() -> Shader:
 
 # Builds one cloud layer as a single MultiMesh + material + tween.
 static func _spawn_blast_billow(scene: Node, pos: Vector3, radius: float, count: int,
-		is_fire: bool, tint: Color, layer_life: float, scale_lo: float, scale_hi: float, rise: float) -> void:
+		is_fire: bool, tint: Color, layer_life: float, scale_lo: float, scale_hi: float, rise: float,
+		stretch: float = 1.0, delay_bias: float = 0.0) -> void:
 	# Smoke layers (non-fire) join "blast_smoke_layers" and get re-tweened by every
 	# later blast — bound how many can pile up. Bail before building the MultiMesh
 	# so a capped layer costs nothing. Fire billows aren't pushed, so they skip this.
@@ -1845,9 +1829,27 @@ static func _spawn_blast_billow(scene: Node, pos: Vector3, radius: float, count:
 		var rad := rng.randf_range(0.0, spread)
 		var off := Vector3(cos(ang) * rad, rng.randf_range(-0.2, 0.6) * radius * 0.45, sin(ang) * rad)
 		var end_scale := radius * rng.randf_range(scale_lo, scale_hi)
-		mm.set_instance_transform(i, Transform3D(Basis.IDENTITY.scaled(Vector3.ONE * end_scale), off))
+		var xform_basis := Basis.IDENTITY.scaled(Vector3.ONE * end_scale)
+		if stretch > 1.01:
+			# Each tongue fires off radially: uniform azimuth (full 360° horizontal
+			# spread) with only a mild elevation range, so they don't all shoot up.
+			var azim := rng.randf() * TAU
+			var elev := rng.randf_range(-0.25, 0.85)
+			var ce := cos(elev)
+			var dir := Vector3(cos(azim) * ce, sin(elev), sin(azim) * ce)
+			off = dir * (rad + radius * 0.15)
+			var up := Vector3.UP if absf(dir.y) < 0.95 else Vector3.RIGHT
+			var ex := up.cross(dir).normalized()
+			var ez := dir.cross(ex)
+			# Scale the COLUMNS (local axes) so the LONG axis follows dir. Using
+			# Basis.scaled() scales in world space — that stretched every tongue
+			# along world-up no matter which way it pointed.
+			xform_basis.x = ex * end_scale
+			xform_basis.y = dir * (end_scale * stretch)
+			xform_basis.z = ez * end_scale
+		mm.set_instance_transform(i, Transform3D(xform_basis, off))
 		var seed := rng.randf()
-		var delay := rng.randf_range(0.0, 0.22 if is_fire else 0.12)
+		var delay := delay_bias + rng.randf_range(0.0, 0.22 if is_fire else 0.12)
 		var heat: float
 		var body: Color
 		var opk: float
@@ -1864,7 +1866,8 @@ static func _spawn_blast_billow(scene: Node, pos: Vector3, radius: float, count:
 			body = Color(g * 1.08, g, g * 0.9)
 			opk = rng.randf_range(0.6, 0.85)
 		mm.set_instance_color(i, Color(body.r, body.g, body.b, opk))
-		mm.set_instance_custom_data(i, Color(seed, delay, heat, 0.0))
+		# w = per-instance age-speed: some puffs/tongues burn out earlier, some later.
+		mm.set_instance_custom_data(i, Color(seed, delay, heat, rng.randf_range(0.0, 0.8)))
 	var mmi := MultiMeshInstance3D.new()
 	mmi.multimesh = mm
 	# Generous AABB so the grown/displaced puffs aren't frustum-culled early.
@@ -2124,11 +2127,15 @@ static func _tween_blast_light_pop(
 
 static func _spawn_blast_flash_light(scene: Node, pos: Vector3, radius: float) -> void:
 	var flash := OmniLight3D.new()
-	var peak := 45.0 + radius * 5.5
-	flash.omni_range = clampf(radius * 6.5, 55.0, 190.0)
+	# Scale brightness AND duration with blast size: small pops stay dim/brief, big
+	# blasts flash brighter and linger. The old flat 45 base over-lit small blasts.
+	var peak := 6.0 + radius * 6.5
+	var hold := clampf(0.018 + radius * 0.0035, 0.018, 0.13)
+	var decay := clampf(0.05 + radius * 0.008, 0.05, 0.32)
+	flash.omni_range = clampf(radius * 6.5, 45.0, 190.0)
 	flash.shadow_enabled = false
 	_attach_world_3d(scene, flash, pos)
-	_tween_blast_light_pop(flash, peak, BLAST_LIGHT_FLASH_HOLD, BLAST_LIGHT_FLASH_DECAY)
+	_tween_blast_light_pop(flash, peak, hold, decay)
 
 
 static func _blast_fireball_light_peak(radius: float, energy_mult: float = 1.0) -> float:
@@ -2149,8 +2156,11 @@ static func _tween_blast_fireball_light(
 	var timing := _blast_fireball_timing(radius)
 	var grow: float = timing.grow
 	var fade: float = timing.fade
-	var life: float = grow + fade
-	var hold: float = life * 0.28
+	# Hold through the tongue eruption (which starts ~0.14s after the blast and
+	# lingers) before easing out, so the orange glow tracks the whole fireball —
+	# not just the initial flash.
+	var life: float = (grow + fade) * 1.8
+	var hold: float = life * 0.5
 	var sustain := _blast_fireball_light_peak(radius, energy_mult)
 	var spike := sustain * 1.45
 	var spike_s := minf(0.045, grow * 0.2)
