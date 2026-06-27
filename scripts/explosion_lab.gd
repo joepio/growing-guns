@@ -81,6 +81,10 @@ func _ready() -> void:
 	_build_perf_hud()
 	_warmup()
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	var cap := _cli_capture_path()
+	if not cap.is_empty():
+		await _capture_explosion(cap)
+		return
 	if "--benchmark" in OS.get_cmdline_args() or "--benchmark" in OS.get_cmdline_user_args():
 		_bench = true
 		_radius = 10.0
@@ -208,6 +212,46 @@ func _bench_tick(delta: float) -> void:
 			get_tree().quit()
 		else:
 			_stress_rate = _bench_rates[_bench_stage]
+
+# -------------------- capture --------------------
+
+func _cli_capture_path() -> String:
+	var args := OS.get_cmdline_user_args()
+	for i: int in args.size():
+		if args[i] == "--capture" and i + 1 < args.size():
+			return String(args[i + 1])
+	return ""
+
+func _capture_explosion(path: String) -> void:
+	DisplayServer.window_set_size(Vector2i(1280, 720))
+	get_viewport().size = Vector2i(1280, 720)
+	if "--shock-only" in OS.get_cmdline_user_args():
+		for k in _fx:
+			_fx[k] = (k == "shock")
+	_camera.global_position = Vector3(0.0, 4.5, 15.0)
+	_camera.look_at(Vector3(0.0, 3.0, 0.0), Vector3.UP)
+	await get_tree().process_frame
+	var wait_frames := 13
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with("--frame="):
+			wait_frames = int(a.substr(8))
+	_boom()
+	# Let the fireball reach its meaty peak before grabbing the frame.
+	for _i: int in wait_frames:
+		await get_tree().process_frame
+	RenderingServer.force_draw(true)
+	await get_tree().process_frame
+	var img: Image = get_viewport().get_texture().get_image()
+	if img == null or img.is_empty():
+		push_error("ExplosionLab: empty capture")
+		get_tree().quit(1)
+		return
+	if not path.is_absolute_path():
+		path = ProjectSettings.globalize_path("res://").path_join(path)
+	DirAccess.make_dir_recursive_absolute(path.get_base_dir())
+	img.save_png(path)
+	print("ExplosionLab captured: ", path)
+	get_tree().quit()
 
 # -------------------- explosions --------------------
 

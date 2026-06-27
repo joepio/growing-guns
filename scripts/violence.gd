@@ -212,7 +212,6 @@ static func warmup_blast_materials(scene: Node) -> void:
 	# blasts use them, but the back-buffer-reading PSO is pricey to compile, so
 	# warm it with sub-pixel (invisible) instances so the first airstrike is smooth.
 	spawn_heat_distortion(scene, Vector3.ZERO, 0.005, 0.25, 0.01)
-	spawn_shockwave_ring(scene, Vector3.ZERO, 0.005)
 	# Run the full bullet-blast path once at sub-pixel scale so every lazily-built
 	# effect mesh/resource (billows, flame shards, embers, blast lights) is cached
 	# before the first real explosion — otherwise that first blast pays for them.
@@ -1771,37 +1770,37 @@ const _BILLOW_MM_CODE := "
 			fade_out = 1.0;
 		}
 		ALPHA = v_opk * fade_in * fade_out * smoothstep(0.0, 0.5, facing);
-		ALPHA = floor(ALPHA * 6.0 + 0.5) / 6.0;
+		ALPHA = floor(ALPHA * 14.0 + 0.5) / 14.0;
 		vec2 px_cell = floor(UV * vec2(8.0, 5.0));
 		float cell_band = mod(px_cell.x + px_cell.y, 3.0) - 1.0;
 		if (is_fire > 0.5) {
-			float heat_band = floor(clamp(v_heat + cell_band * 0.08, 0.0, 1.0) * 4.0 + 0.5) / 4.0;
-			float face_band = floor(facing * 4.0 + 0.5) / 4.0;
-			float age_band = floor((1.0 - smoothstep(0.0, 0.75, v_age)) * 4.0 + 0.5) / 4.0;
-			float fire_band = floor(clamp(heat_band * 0.55 + face_band * 0.30 + age_band * 0.15, 0.0, 1.0) * 5.0 + 0.5) / 5.0;
-			vec3 c0 = vec3(0.28, 0.04, 0.015);
-			vec3 c1 = vec3(0.62, 0.08, 0.02);
+			float heat = clamp(v_heat + cell_band * 0.06, 0.0, 1.0);
+			float age_cool = 1.0 - smoothstep(0.0, 0.75, v_age);
+			float fire_band = clamp(heat * 0.6 + facing * 0.25 + age_cool * 0.15, 0.0, 1.0);
+			// fire_band computed smoothly above (no hard banding).
+			vec3 c0 = vec3(0.20, 0.18, 0.17);
+			vec3 c1 = vec3(0.46, 0.18, 0.07);
 			vec3 c2 = vec3(1.00, 0.24, 0.04);
 			vec3 c3 = vec3(1.00, 0.62, 0.12);
 			vec3 c4 = vec3(1.00, 0.95, 0.72);
 			vec3 color = c0;
-			color = mix(color, c1, step(0.20, fire_band));
-			color = mix(color, c2, step(0.40, fire_band));
-			color = mix(color, c3, step(0.65, fire_band));
-			color = mix(color, c4, step(0.85, fire_band));
-			ALBEDO = color * mix(3.5, 14.0, fire_band);
+			color = mix(color, c1, smoothstep(0.05, 0.34, fire_band));
+			color = mix(color, c2, smoothstep(0.30, 0.54, fire_band));
+			color = mix(color, c3, smoothstep(0.52, 0.74, fire_band));
+			color = mix(color, c4, smoothstep(0.74, 0.94, fire_band));
+			ALBEDO = color * mix(0.9, 14.0, fire_band);
 		} else {
 			// Darkness varies across the surface — some patches near-black, some
 			// lighter — for turbulent, non-uniform smoke.
 			float shade = 0.45 + 0.85 * (v_shade * 0.5 + 0.5);
-			shade = floor(clamp(shade + cell_band * 0.08, 0.0, 1.0) * 4.0 + 0.5) / 4.0;
+			shade = clamp(shade + cell_band * 0.05, 0.0, 1.0);
 			float grey = dot(v_body, vec3(0.3333)) * shade;
 			grey = mix(grey, grey * 0.22, fres);
 			if (sky_mode > 0.5) {
 				vec3 warm = warm_glow * (0.18 + v_heat * 0.42) * (0.35 + fres * 0.65);
 				grey = clamp(grey + warm.r * 0.55, 0.0, 1.0);
 			}
-			grey = floor(grey * 6.0 + 0.5) / 6.0;
+			grey = floor(grey * 16.0 + 0.5) / 16.0;
 			ALBEDO = vec3(grey);
 		}
 	}
@@ -1812,8 +1811,8 @@ static func _get_smoke_billow_mesh() -> Mesh:
 		var s := SphereMesh.new()
 		s.radius = 0.5
 		s.height = 1.0
-		s.radial_segments = 5
-		s.rings = 3
+		s.radial_segments = 16
+		s.rings = 9
 		_smoke_billow_mesh = s
 	return _smoke_billow_mesh
 
@@ -2232,8 +2231,6 @@ static func spawn_bullet_blast(scene: Node, pos: Vector3, radius: float, color: 
 	if radius >= BLAST_DISTORTION_MIN_RADIUS:
 		_bench_blast_scope("heat_distortion", func() -> void:
 			spawn_heat_distortion(scene, pos, radius, blast_heat_distortion_duration(radius), blast_heat_distortion_strength(radius)))
-		_bench_blast_scope("shockwave", func() -> void:
-			spawn_shockwave_ring(scene, pos, radius))
 	_bench_blast_scope("flash_light", func() -> void:
 		_spawn_blast_flash_light(scene, pos, radius))
 	_bench_blast_scope("fireball_light", func() -> void:
@@ -2424,7 +2421,7 @@ static func spawn_heat_distortion(scene: Node, pos: Vector3, radius: float, dura
 			shader_type spatial;
 			render_mode unshaded, cull_disabled, depth_draw_never;
 
-			uniform sampler2D screen_tex : hint_screen_texture, filter_nearest;
+			uniform sampler2D screen_tex : hint_screen_texture, filter_linear;
 			uniform float distortion_strength = 0.04;
 			uniform float zoom_strength = 0.015;
 			uniform float opacity = 0.18;
@@ -2437,9 +2434,9 @@ static func spawn_heat_distortion(scene: Node, pos: Vector3, radius: float, dura
 				vec2 offset = n.xy * distortion_strength * weight * falloff;
 				vec2 zoom = (SCREEN_UV - vec2(0.5)) * zoom_strength * weight * falloff;
 				vec2 uv = SCREEN_UV - zoom + offset;
-				uv = (floor(uv * vec2(180.0, 101.0)) + vec2(0.5)) / vec2(180.0, 101.0);
+				// smooth refraction — no pixel snap
 				vec3 col = texture(screen_tex, uv).rgb;
-				col = floor(col * 18.0 + 0.5) / 18.0;
+				// smooth — no colour posterise
 				ALBEDO = col;
 				ALPHA = opacity * weight * falloff;
 			}
@@ -2487,7 +2484,10 @@ static func spawn_shockwave_ring(scene: Node, pos: Vector3, radius: float) -> vo
 		_shock_shader.code = """
 			shader_type spatial;
 			render_mode unshaded, cull_disabled, depth_draw_never, blend_mix;
+			uniform sampler2D screen_tex : hint_screen_texture, filter_linear;
 			uniform float opacity = 0.9;
+			uniform float ring_thickness = 4.0;
+			uniform float distortion_strength = 0.16;
 
 			void fragment() {
 				// High exponent -> energy concentrated on silhouette ring only.
@@ -2495,9 +2495,9 @@ static func spawn_shockwave_ring(scene: Node, pos: Vector3, radius: float) -> vo
 				vec3 n = normalize((VIEW_MATRIX * vec4(NORMAL, 0.0)).xyz);
 				vec2 offset = n.xy * distortion_strength * fresnel;
 				vec2 uv = SCREEN_UV + offset;
-				uv = (floor(uv * vec2(180.0, 101.0)) + vec2(0.5)) / vec2(180.0, 101.0);
+				// smooth refraction — no pixel snap
 				vec3 col = texture(screen_tex, uv).rgb;
-				col = floor(col * 18.0 + 0.5) / 18.0;
+				// smooth — no colour posterise
 				ALBEDO = col;
 				ALPHA = fresnel * opacity;
 			}
@@ -2511,8 +2511,8 @@ static func spawn_shockwave_ring(scene: Node, pos: Vector3, radius: float) -> vo
 	_attach_world_3d(scene, shell, pos)
 	# Roughly sound-speed expansion, slowed a touch + 0.12s floor so the shock
 	# front is actually visible rather than a single-frame flicker.
-	var dur: float = maxf(0.12, radius / 343.0 * 1.6)
-	var target_scale := Vector3.ONE * maxf(0.01, (radius * 1.05) / _shock_mesh.radius)
+	var dur: float = maxf(0.3, radius / 343.0 * 3.5)
+	var target_scale := Vector3.ONE * maxf(0.01, (radius * 1.9) / _shock_mesh.radius)
 	var tw := shell.create_tween().set_parallel(true)
 	tw.tween_property(shell, "scale", target_scale, dur)\
 		.set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_OUT)
