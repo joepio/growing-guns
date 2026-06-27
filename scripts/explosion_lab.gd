@@ -225,9 +225,11 @@ func _cli_capture_path() -> String:
 func _capture_explosion(path: String) -> void:
 	DisplayServer.window_set_size(Vector2i(1280, 720))
 	get_viewport().size = Vector2i(1280, 720)
-	if "--shock-only" in OS.get_cmdline_user_args():
-		for k in _fx:
-			_fx[k] = (k == "shock")
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with("--only="):
+			var only := a.substr(7)
+			for k in _fx:
+				_fx[k] = (k == only)
 	_camera.global_position = Vector3(0.0, 4.5, 15.0)
 	_camera.look_at(Vector3(0.0, 3.0, 0.0), Vector3.UP)
 	await get_tree().process_frame
