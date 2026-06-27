@@ -213,6 +213,10 @@ static func warmup_blast_materials(scene: Node) -> void:
 	# warm it with sub-pixel (invisible) instances so the first airstrike is smooth.
 	spawn_heat_distortion(scene, Vector3.ZERO, 0.005, 0.25, 0.01)
 	spawn_shockwave_ring(scene, Vector3.ZERO, 0.005)
+	# Run the full bullet-blast path once at sub-pixel scale so every lazily-built
+	# effect mesh/resource (billows, flame shards, embers, blast lights) is cached
+	# before the first real explosion — otherwise that first blast pays for them.
+	spawn_bullet_blast(scene, Vector3.ZERO, 0.005, Color(1.0, 0.6, 0.3), null, false)
 
 
 # Like warmup_material but compiles the instanced (MultiMesh) PSO variant.
@@ -2424,27 +2428,30 @@ static func spawn_heat_distortion(scene: Node, pos: Vector3, radius: float, dura
 			uniform float distortion_strength = 0.04;
 			uniform float zoom_strength = 0.015;
 			uniform float opacity = 0.18;
+			uniform float falloff = 1.0;
 
 			void fragment() {
 				vec3 n = normalize((VIEW_MATRIX * vec4(NORMAL, 0.0)).xyz);
 				float fresnel = pow(1.0 - abs(dot(normalize(VIEW), NORMAL)), 1.1);
 				float weight = 0.38 + 0.62 * fresnel;
-				vec2 offset = n.xy * distortion_strength * weight;
-				vec2 zoom = (SCREEN_UV - vec2(0.5)) * zoom_strength * weight;
+				vec2 offset = n.xy * distortion_strength * weight * falloff;
+				vec2 zoom = (SCREEN_UV - vec2(0.5)) * zoom_strength * weight * falloff;
 				vec2 uv = SCREEN_UV - zoom + offset;
 				uv = (floor(uv * vec2(180.0, 101.0)) + vec2(0.5)) / vec2(180.0, 101.0);
 				vec3 col = texture(screen_tex, uv).rgb;
 				col = floor(col * 18.0 + 0.5) / 18.0;
 				ALBEDO = col;
-				ALPHA = opacity * weight;
+				ALPHA = opacity * weight * falloff;
 			}
 		"""
 	var mat := ShaderMaterial.new()
 	mat.shader = _heat_shader
-	var heat_distort := strength * 5.2
-	mat.set_shader_parameter("distortion_strength", heat_distort)
-	mat.set_shader_parameter("zoom_strength", strength * 2.2)
+	# Static base magnitudes; a single `falloff` uniform animates the whole effect
+	# out, so we tween one param instead of allocating three closures per blast.
+	mat.set_shader_parameter("distortion_strength", strength * 5.2)
+	mat.set_shader_parameter("zoom_strength", strength * 1.4)
 	mat.set_shader_parameter("opacity", 1.0)
+	mat.set_shader_parameter("falloff", 1.0)
 	shell.material_override = mat
 	_attach_world_3d(scene, shell, pos)
 
@@ -2453,22 +2460,10 @@ static func spawn_heat_distortion(scene: Node, pos: Vector3, radius: float, dura
 	tw.tween_property(shell, "scale", target_scale, duration)\
 		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
 	tw.tween_method(
-		func(v: float) -> void: mat.set_shader_parameter("distortion_strength", v),
-		heat_distort,
-		0.0,
-		duration * 0.9
-	).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
-	tw.tween_method(
-		func(v: float) -> void: mat.set_shader_parameter("zoom_strength", v),
-		strength * 1.4,
-		0.0,
-		duration * 0.9
-	).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
-	tw.tween_method(
-		func(v: float) -> void: mat.set_shader_parameter("opacity", v),
+		func(v: float) -> void: mat.set_shader_parameter("falloff", v),
 		1.0,
 		0.0,
-		duration * 0.85
+		duration * 0.9
 	).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
 	tw.chain().tween_callback(shell.queue_free)
 
@@ -3318,6 +3313,7 @@ static func spawn_destruction_debris(
 	blast_world: Vector3,
 	blast_radius: float,
 	chunks_removed: int = 1,
+	count_scale: float = 1.0,
 ) -> void:
 	if scene == null or block_size.length_squared() < 0.0001:
 		return
@@ -3327,7 +3323,7 @@ static func spawn_destruction_debris(
 		if tier == "cheap"
 		else _debris_chip_count_for_blast(blast_radius, chunks_removed)
 	)
-	chip_count = maxi(2, int(round(float(chip_count) * _debris_spawn_scale())))
+	chip_count = maxi(2, int(round(float(chip_count) * _debris_spawn_scale() * count_scale)))
 	if not _debris_queue.is_empty():
 		var last: Dictionary = _debris_queue[-1]
 		if str(last.get("tier", "")) == tier and last.get("scene") == scene:

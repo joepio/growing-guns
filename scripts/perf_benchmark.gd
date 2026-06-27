@@ -98,6 +98,7 @@ func _ready() -> void:
 		% [RNG_SEED, NUM_BOTS, WARMUP_SEC, MEASURE_SEC, bench_mode, str(build)])
 	_build_arena()
 	_build_camera()
+	_warmup_effect_shaders()
 	_spawn_bots()
 	# Top-up HP every second so bots can't actually die.
 	var hp_timer := Timer.new()
@@ -148,6 +149,21 @@ func _build_arena() -> void:
 	var players_root := Node3D.new()
 	players_root.name = "Players"
 	add_child(players_root)
+
+
+func _warmup_effect_shaders() -> void:
+	# Mirror game.gd's boot warmup so the bench measures steady-state, not the
+	# one-time first-explosion effect-cache/shader population (these caches are
+	# process-wide). Without this the first blasts compile shaders / build cached
+	# meshes mid-run — the ~23ms "first time" spike.
+	if not has_node("Arena"):
+		return
+	var arena := $Arena
+	Violence.prewarm_disintegration_cache()
+	Violence.warmup_blast_materials(arena)
+	Violence.warmup_gib_render(arena)
+	if DisplayServer.get_name() != "headless":
+		RenderingServer.force_draw(true)
 
 
 func _build_camera() -> void:

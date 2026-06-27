@@ -95,15 +95,23 @@ void fragment() {
 	float pit2 = 1.0 - smoothstep(0.22, 0.48, detail);
 	pit = max(pit, pit2 * 0.72);
 
-	float ridge = 1.0 - abs(rock * 2.0 - 1.0);
-	ridge = smoothstep(0.78, 0.97, ridge) * crack_mul;
-	float vein = 1.0 - abs(detail * 2.0 - 1.0);
-	vein = smoothstep(0.70, 0.94, vein) * crack_mul * 0.75;
-	float crack_line = max(ridge, vein);
+	// Damage encoded in the crack channel (g): pristine bricks sit at <= 1.6, hits
+	// push it toward ~6. Higher damage lowers the crack threshold so more fracture
+	// lines emerge, raises their contrast, and scorches the stone darker.
+	float dmg = clamp((crack_mul - 1.6) / 4.4, 0.0, 1.0);
+
+	float crack_raw = max(1.0 - abs(rock * 2.0 - 1.0), 1.0 - abs(detail * 2.0 - 1.0));
+	// Pristine hairline cracks (per-brick variation), plus damage fractures that
+	// grow more numerous (lower threshold) and contrastier as damage rises.
+	float base_cracks = smoothstep(0.80, 0.97, crack_raw) * min(crack_mul, 1.5);
+	float dmg_cracks = smoothstep(mix(0.82, 0.62, dmg), 0.96, crack_raw) * dmg;
+	float crack_line = clamp(max(base_cracks, dmg_cracks), 0.0, 1.0);
 
 	vec3 stone_face = base_color * tint_mul * (0.76 + combined * color_variation);
+	stone_face *= 1.0 - dmg * 0.28;
 	stone_face = mix(stone_face * 0.62, stone_face, 1.0 - pit * pit_depth);
-	stone_face = mix(stone_face * 0.38, stone_face, 1.0 - crack_line * crack_depth);
+	float crack_dark = clamp(crack_depth + dmg * 0.4, 0.0, 0.95);
+	stone_face = mix(stone_face, stone_face * 0.12, crack_line * crack_dark);
 
 	float edge_dist = min(min(0.5 - abs(lp.x), 0.5 - abs(lp.y)), 0.5 - abs(lp.z));
 	float moss_mask = step(0.5, face_local.y) * smoothstep(0.10, 0.18, edge_dist);
