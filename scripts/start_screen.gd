@@ -2,11 +2,15 @@ extends Node3D
 
 const MenuHelpers = preload("res://scripts/menu_helpers.gd")
 const RetroFilter = preload("res://scripts/retro_filter.gd")
+const GothicMenuUi = preload("res://scripts/gothic_menu_ui.gd")
 const GAME_SCENE := "res://scenes/game.tscn"
 const GAME_MODE_VERSUS := "versus"
 const GAME_MODE_COOP := "coop"
 const PLAYER_SCENE := preload("res://scenes/player.tscn")
 const GRENADE_SCRIPT := preload("res://scripts/grenade.gd")
+const MENU_ARENA_SEED := 424242
+const MENU_ARENA_SIZE := 72.0
+const MENU_CAPTURE_ORBIT := 0.72
 
 @onready var _camera: Camera3D = $Camera3D
 @onready var _arena: Node3D = $Arena
@@ -17,6 +21,8 @@ const GRENADE_SCRIPT := preload("res://scripts/grenade.gd")
 
 var _orbit_t := 0.0
 var _orbit_origin := Vector3.ZERO
+var _capture_path := ""
+var _capture_mode := false
 
 # Multiplayer and settings UI elements
 var _players_root: Node3D
@@ -35,6 +41,11 @@ var state: int = 1  # State.PLAYING == 1 (required so bots can shoot in the back
 
 
 func _ready() -> void:
+	_capture_path = _cli_capture_path()
+	_capture_mode = not _capture_path.is_empty()
+	if _capture_mode:
+		DisplayServer.window_set_size(Vector2i(1280, 720))
+		get_viewport().size = Vector2i(1280, 720)
 	# Load settings first using the unified settings system
 	MenuHelpers.load_settings()
 	if MenuHelpers.player_name.is_empty():
@@ -46,9 +57,12 @@ func _ready() -> void:
 	MenuHelpers.settings_changed_callback = _apply_settings
 	MenuHelpers.player_name_committed_callback = _on_player_name_committed
 	
-	# Generate background arena
-	if _arena and _arena.has_method("apply_seed"):
-		_arena.call("apply_seed", randi(), 60.0, 90.0)
+	# Cinematic lava-island fort for the menu backdrop (matches reference art).
+	if _arena and _arena.has_method("apply_cinematic_seed"):
+		_arena.call("apply_cinematic_seed", MENU_ARENA_SEED, MENU_ARENA_SIZE)
+	elif _arena and _arena.has_method("apply_seed"):
+		_arena.call("apply_seed", MENU_ARENA_SEED, MENU_ARENA_SIZE, MENU_ARENA_SIZE)
+	if _arena:
 		_orbit_origin = _arena.global_position
 	
 	# Container for background fight bots
@@ -56,20 +70,23 @@ func _ready() -> void:
 	_players_root.name = "Players"
 	add_child(_players_root)
 	
-	# Spawn background fighting bots
-	_spawn_background_bots()
+	# Spawn background fighting bots (skip for PNG capture runs).
+	if not _capture_mode:
+		_spawn_background_bots()
 	
 	_versus_button.pressed.connect(_start_versus)
 	_wave_button.pressed.connect(_start_wave_survival)
 	
 	# Build the start screen multiplayer / settings UI
 	_build_start_screen_multiplayer_ui()
+	GothicMenuUi.apply_start_screen($UI)
 	_build_retro_filter()
 	_apply_settings()
 	
 	# Auto-host online iroh room immediately so the match ID is ready
-	if NetworkManager.multiplayer.multiplayer_peer == null or NetworkManager.multiplayer.multiplayer_peer is OfflineMultiplayerPeer:
-		NetworkManager.host_game_iroh(MenuHelpers.player_name)
+	if not _capture_mode:
+		if NetworkManager.multiplayer.multiplayer_peer == null or NetworkManager.multiplayer.multiplayer_peer is OfflineMultiplayerPeer:
+			NetworkManager.host_game_iroh(MenuHelpers.player_name)
 		
 	if _share_field:
 		_share_field.text = NetworkManager.current_iroh_game_id
@@ -78,9 +95,14 @@ func _ready() -> void:
 		NetworkManager.network_status_changed.connect(_on_network_status_changed)
 		
 	_show_network_notice()
-	_versus_button.grab_focus()
-	_position_camera(0.0)
-	call_deferred("_warmup_menu_assets")
+	if not _capture_mode:
+		_versus_button.grab_focus()
+	_orbit_t = MENU_CAPTURE_ORBIT if _capture_mode else 0.0
+	_position_camera(_orbit_t)
+	if _capture_mode:
+		call_deferred("_capture_and_quit", _capture_path)
+	else:
+		call_deferred("_warmup_menu_assets")
 
 
 func _warmup_menu_assets() -> void:
@@ -94,6 +116,8 @@ func _warmup_menu_assets() -> void:
 
 
 func _process(delta: float) -> void:
+	if _capture_mode:
+		return
 	_orbit_t += delta * 0.055
 	_position_camera(_orbit_t)
 	_update_custom_cursor()
@@ -118,11 +142,46 @@ func _unhandled_input(event: InputEvent) -> void:
 func _position_camera(t: float) -> void:
 	if _camera == null:
 		return
-	var radius := 68.0
-	var height := 28.0
+	var radius := 82.0
+	var height := 34.0
 	var pos := _orbit_origin + Vector3(cos(t) * radius, height, sin(t) * radius)
 	_camera.global_position = pos
-	_camera.look_at(_orbit_origin + Vector3(0.0, 6.5, 0.0), Vector3.UP)
+	_camera.look_at(_orbit_origin + Vector3(0.0, 5.5, 0.0), Vector3.UP)
+
+
+func _cli_capture_path() -> String:
+	var args := OS.get_cmdline_user_args()
+	for i: int in args.size():
+		if args[i] == "--capture" and i + 1 < args.size():
+			return String(args[i + 1])
+	return ""
+
+
+func _capture_and_quit(path: String) -> void:
+	for _i: int in 10:
+		await get_tree().process_frame
+	RenderingServer.force_draw(true)
+	await get_tree().process_frame
+	var tex := get_viewport().get_texture()
+	if tex == null:
+		push_error("StartScreen: viewport texture is null")
+		get_tree().quit(1)
+		return
+	var img: Image = tex.get_image()
+	if img == null or img.is_empty():
+		push_error("StartScreen: captured image is empty")
+		get_tree().quit(1)
+		return
+	if not path.is_absolute_path():
+		path = ProjectSettings.globalize_path("res://").path_join(path)
+	DirAccess.make_dir_recursive_absolute(path.get_base_dir())
+	var err := img.save_png(path)
+	if err != OK:
+		push_error("StartScreen capture failed (%d): %s" % [err, path])
+		get_tree().quit(1)
+		return
+	print("StartScreen captured: ", path, " (", img.get_width(), "x", img.get_height(), ")")
+	get_tree().quit()
 
 
 func _start_versus() -> void:
@@ -202,9 +261,10 @@ func _on_bot_died(bot: Node3D, spawn_pos: Vector3) -> void:
 
 # ── UI Construction ──
 func _build_start_screen_multiplayer_ui() -> void:
-	# Make the main panel a bit wider to hold IDs cleanly
+	# Keep the panel's fixed frame size (set in the scene) — don't zero the height,
+	# or the gothic frame collapses and the menu floats to the top of the screen.
 	var menu_panel = $UI/MenuPanel
-	menu_panel.custom_minimum_size = Vector2(350, 0)
+	menu_panel.custom_minimum_size = Vector2(350, 392)
 	
 	var exit_note = $UI/MenuPanel/VBox/ExitNote
 	var notice = $UI/MenuPanel/VBox/Notice
@@ -279,6 +339,7 @@ func _build_start_screen_multiplayer_ui() -> void:
 		
 	# Force the menu panel to resize to its new minimum size including the dynamic controls
 	menu_panel.size = Vector2.ZERO
+	GothicMenuUi.apply_start_screen($UI)
 
 
 func _on_copy_pressed() -> void:
@@ -344,6 +405,10 @@ func _open_settings_menu() -> void:
 	if _settings_panel:
 		_settings_panel.queue_free()
 	_settings_panel = MenuHelpers.build_settings_panel($UI, _close_settings_menu, true)
+	for child in _settings_panel.get_children():
+		if child is PanelContainer:
+			GothicMenuUi.apply_settings_panel(child as PanelContainer)
+			break
 	$UI/MenuPanel.visible = false
 	_settings_panel.visible = true
 	MenuHelpers.grab_first_menu_focus(_settings_panel)

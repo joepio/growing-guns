@@ -88,15 +88,15 @@ static func _shader_code() -> Shader:
 			bleed += texture(screen_texture, clamp(uv + vec2(-b_offset.x, b_offset.y), uv_min, uv_max)).rgb;
 			bleed += texture(screen_texture, clamp(uv + vec2(b_offset.x, -b_offset.y), uv_min, uv_max)).rgb;
 			bleed += texture(screen_texture, clamp(uv + vec2(-b_offset.x, -b_offset.y), uv_min, uv_max)).rgb;
-			color += bleed * 0.15;
+			color += bleed * 0.08;
 
 			ivec2 p = ivec2(FRAGCOORD.xy / float(p_size));
 			float threshold = (bayer[(p.x % 4) * 4 + (p.y % 4)] - 0.5) * 0.5 * dither_strength;
 
 			float levels = 32.0;
-			float vignette = clamp(1.0 - dist * 1.4, 0.0, 1.0);
+			float vignette = clamp(1.0 - dist * 1.15, 0.0, 1.0);
 			color = floor(color * levels + threshold + 0.5) / levels;
-			color *= mix(0.7, 1.0, vignette);
+			color *= mix(0.84, 1.0, vignette);
 
 			if (cursor_visible > 0.5) {
 				vec2 d = (uv - mouse_uv) * res;

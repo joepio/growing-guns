@@ -3896,6 +3896,8 @@ func _warmup_effect_shaders_and_hide_overlay() -> void:
 		ION_CANNON_SCRIPT.warmup_shaders(arena)
 		PLAYER_SCRIPT.warmup_phoenix_shaders(arena)
 		Violence.warmup_gib_render(arena)
+		if arena is ArenaGenerator:
+			(arena as ArenaGenerator).warmup_gpu_materials(arena)
 		_update_render_player_layouts()
 		await get_tree().process_frame
 		RenderingServer.force_draw()
