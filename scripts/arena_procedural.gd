@@ -49,6 +49,44 @@ func _ready() -> void:
 	# and end up outside the arena bounds. The first real round start will
 	# overwrite this with the proper seed via apply_seed().
 	apply_seed(0)
+	if "--arena-capture" in OS.get_cmdline_user_args():
+		_capture_arena_wall()
+
+
+func _capture_path() -> String:
+	var args := OS.get_cmdline_user_args()
+	for i: int in args.size():
+		if args[i] == "--capture" and i + 1 < args.size():
+			return String(args[i + 1])
+	return ""
+
+
+func _capture_arena_wall() -> void:
+	apply_seed(7, 50.0, 50.0)
+	var half: float = float(generator.get("arena_size")) * 0.5
+	DisplayServer.window_set_size(Vector2i(1280, 720))
+	get_viewport().size = Vector2i(1280, 720)
+	var cam := Camera3D.new()
+	cam.fov = 60.0
+	add_child(cam)
+	cam.current = true
+	cam.global_position = Vector3(5.0, 8.0, -half + 13.0)
+	cam.look_at(Vector3(0.0, 7.0, -half), Vector3.UP)
+	for _i: int in 24:
+		await get_tree().process_frame
+	RenderingServer.force_draw(true)
+	await get_tree().process_frame
+	var img: Image = get_viewport().get_texture().get_image()
+	var path := _capture_path()
+	if path.is_empty() or img == null or img.is_empty():
+		get_tree().quit(1)
+		return
+	if not path.is_absolute_path():
+		path = ProjectSettings.globalize_path("res://").path_join(path)
+	DirAccess.make_dir_recursive_absolute(path.get_base_dir())
+	img.save_png(path)
+	print("ArenaCapture saved: ", path)
+	get_tree().quit()
 
 
 func _process(delta: float) -> void:
