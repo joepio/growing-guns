@@ -198,6 +198,7 @@ const LAVA_SPAWN_PLATFORM_INSET := 0.65  # keep the player capsule off platform 
 
 const LAVA_FLOW_SHADER := preload("res://shaders/lava_flow.gdshader")
 const ROCK_SURFACE_SHADER := preload("res://shaders/rock_surface.gdshader")
+const BANNER_SHADER := preload("res://shaders/banner.gdshader")
 
 static var _lava_noise_texture: ImageTexture = null
 static var _rock_noise_texture: ImageTexture = null
@@ -283,6 +284,7 @@ var _mat_floor: ShaderMaterial
 var _mat_wall: ShaderMaterial
 var _mat_building: ShaderMaterial
 var _mat_dark: ShaderMaterial
+var _banner_mat: ShaderMaterial
 var _mat_spawn: StandardMaterial3D
 
 # Each entry: [Vector2 center_xz, float radius]. Used for collision-free
@@ -1173,6 +1175,132 @@ func _add_torch_brazier(local_pos: Vector3, energy: float = 2.8, omni_range: flo
 		light.owner = owner_root
 
 
+# Medieval dressing on the perimeter walls: a few flickering wall torches and a
+# heraldic shield/sword banner per wall, all facing into the arena.
+func _build_wall_decorations(half: float) -> void:
+	# along = axis the wall runs along; fixed = the wall plane; nrm = inward normal.
+	var walls := [
+		{"along": Vector3(1, 0, 0), "fixed": Vector3(0, 0, -half), "nrm": Vector3(0, 0, 1)},
+		{"along": Vector3(1, 0, 0), "fixed": Vector3(0, 0, half), "nrm": Vector3(0, 0, -1)},
+		{"along": Vector3(0, 0, 1), "fixed": Vector3(half, 0, 0), "nrm": Vector3(-1, 0, 0)},
+		{"along": Vector3(0, 0, 1), "fixed": Vector3(-half, 0, 0), "nrm": Vector3(1, 0, 0)},
+	]
+	# Each torch is an always-on (shadowless) omni — keep the per-wall count modest.
+	var torch_count := clampi(int(arena_size / 24.0), 2, 3)
+	for wdef in walls:
+		var along: Vector3 = wdef["along"]
+		var fixed: Vector3 = wdef["fixed"]
+		var nrm: Vector3 = wdef["nrm"]
+		for i in torch_count:
+			var t := (float(i) + 1.0) / (float(torch_count) + 1.0)
+			var along_x := lerpf(-half + 5.0, half - 5.0, t)
+			var pos := fixed + along * along_x + nrm * 0.5 + Vector3.UP * (wall_height * 0.6)
+			_add_wall_torch(pos, nrm)
+		# One banner centred on the wall, hanging from the upper section. Offset
+		# past the wall's half-depth (0.5) so it sits in front of the inner face.
+		var bpos := fixed + nrm * 0.55 + Vector3.UP * (wall_height * 0.62)
+		_add_wall_banner(bpos, nrm, 2.3, 3.6)
+
+
+func _add_wall_torch(local_pos: Vector3, out_dir: Vector3) -> void:
+	var root := Node3D.new()
+	root.name = "WallTorch"
+	root.position = local_pos
+	add_child(root)
+	var owner_root := _editor_owner()
+	if owner_root:
+		root.owner = owner_root
+	# Bracket angles up and out from the wall; the flame sits at its tip.
+	var bdir := (out_dir + Vector3.UP * 1.5).normalized()
+	var bracket := MeshInstance3D.new()
+	var bm := CylinderMesh.new()
+	bm.top_radius = 0.05
+	bm.bottom_radius = 0.08
+	bm.height = 0.75
+	bracket.mesh = bm
+	bracket.material_override = _mat_dark
+	bracket.transform = Transform3D(_aim_y_basis(bdir), bdir * 0.34)
+	root.add_child(bracket)
+	var tip := bdir * 0.72
+	var flame := MeshInstance3D.new()
+	var fm := SphereMesh.new()
+	fm.radius = 0.2
+	fm.height = 0.46
+	flame.mesh = fm
+	flame.position = tip
+	var fmat := StandardMaterial3D.new()
+	fmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	fmat.emission_enabled = true
+	fmat.emission = Color(1.0, 0.55, 0.15)
+	fmat.emission_energy_multiplier = 3.4
+	fmat.albedo_color = Color(1.0, 0.62, 0.2)
+	flame.material_override = fmat
+	root.add_child(flame)
+	var light := OmniLight3D.new()
+	light.position = tip
+	light.light_color = Color(1.0, 0.56, 0.2)
+	light.light_energy = 2.6
+	light.omni_range = 13.0
+	light.omni_attenuation = 0.9
+	light.shadow_enabled = false
+	root.add_child(light)
+	# Gentle perpetual flicker.
+	var tw := light.create_tween().set_loops()
+	tw.tween_property(light, "light_energy", 3.1, 0.10).set_trans(Tween.TRANS_SINE)
+	tw.tween_property(light, "light_energy", 2.2, 0.13).set_trans(Tween.TRANS_SINE)
+	tw.tween_property(light, "light_energy", 2.8, 0.08).set_trans(Tween.TRANS_SINE)
+	if owner_root:
+		bracket.owner = owner_root
+		flame.owner = owner_root
+		light.owner = owner_root
+
+
+func _add_wall_banner(local_pos: Vector3, out_dir: Vector3, w: float, h: float) -> void:
+	if _banner_mat == null:
+		_banner_mat = ShaderMaterial.new()
+		_banner_mat.shader = BANNER_SHADER
+	var mi := MeshInstance3D.new()
+	mi.name = "Banner"
+	var qm := QuadMesh.new()
+	qm.size = Vector2(w, h)
+	mi.mesh = qm
+	mi.material_override = _banner_mat
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mi.transform = Transform3D(_aim_z_basis(out_dir), local_pos + out_dir * 0.07)
+	add_child(mi)
+	var owner_root := _editor_owner()
+	if owner_root:
+		mi.owner = owner_root
+
+
+# Orthonormal basis with local +Y aligned to dir (for cylinder brackets).
+func _aim_y_basis(dir: Vector3) -> Basis:
+	var y := dir.normalized()
+	var ref := Vector3.FORWARD if absf(y.dot(Vector3.FORWARD)) < 0.95 else Vector3.RIGHT
+	var x := ref.cross(y).normalized()
+	var z := x.cross(y).normalized()
+	var b := Basis()
+	b.x = x
+	b.y = y
+	b.z = z
+	return b
+
+
+# Orthonormal basis with local +Z aligned to dir, +Y world-up (for facing quads).
+func _aim_z_basis(dir: Vector3) -> Basis:
+	var z := dir.normalized()
+	var x := Vector3.UP.cross(z)
+	if x.length_squared() < 0.0001:
+		x = Vector3.RIGHT
+	x = x.normalized()
+	var y := z.cross(x).normalized()
+	var b := Basis()
+	b.x = x
+	b.y = y
+	b.z = z
+	return b
+
+
 func _build_cinematic_fort_underglow(slab_base_y: float, footprint: float) -> void:
 	var y := slab_base_y + 0.08
 	var ring := footprint * 0.46
@@ -1271,6 +1399,7 @@ func _build_walls() -> void:
 	_add_destructible_region(Vector3(half, wall_height * 0.5, 0), Vector3(1, wall_height, arena_size), _mat_wall)
 	_add_destructible_region(Vector3(-half, wall_height * 0.5, 0), Vector3(1, wall_height, arena_size), _mat_wall)
 	_build_corner_towers(half)
+	_build_wall_decorations(half)
 
 
 func _build_corner_towers(half: float) -> void:
