@@ -3345,8 +3345,8 @@ static func spawn_destruction_debris(
 				var merged_chunks: int = (
 					int(last.get("chunks_removed", 1)) + maxi(1, chunks_removed))
 				var cap: int = clampi(
-					merged_chunks * 4, (8 if tier == "cheap" else 16),
-					(24 if tier == "cheap" else 56))
+					merged_chunks * 6, (8 if tier == "cheap" else 16),
+					(24 if tier == "cheap" else 120))
 				last["chip_count"] = mini(cap, int(last.get("chip_count", 0)) + chip_count)
 				last["chunks_removed"] = merged_chunks
 				last["blast_radius"] = maxf(float(last.get("blast_radius", 0.0)), blast_radius)
@@ -3457,12 +3457,15 @@ static func _debris_chip_count_for_blast(blast_radius: float, chunks_removed: in
 
 static func _debris_fragment_longest_axis(blast_radius: float, block_size: Vector3) -> float:
 	var sev: float = clampf((blast_radius - 0.45) / 10.0, 0.0, 1.0)
-	var chunk_hint: float = clampf(block_size.length() / 4.2, 0.7, 1.25)
-	var base_lo: float = lerpf(0.3, 0.52, sev) * chunk_hint
-	var base_hi: float = lerpf(0.54, 1.08, sev) * chunk_hint
-	# Heavier blasts occasionally throw a chunky shard.
-	if randf() < lerpf(0.08, 0.3, sev):
-		return randf_range(lerpf(0.72, 1.0, sev), lerpf(1.2, 1.7, sev)) * chunk_hint
+	# Floor low so the tiny chips from per-hit flecks (small block_size) stay small —
+	# only real chunk removals (big block_size) get chunky fragments.
+	var chunk_hint: float = clampf(block_size.length() / 4.2, 0.28, 1.4)
+	var base_lo: float = lerpf(0.3, 0.78, sev) * chunk_hint
+	var base_hi: float = lerpf(0.54, 1.5, sev) * chunk_hint
+	# Blasts that flatten whole blocks in one boom throw big chunks, not just dust —
+	# the chance and size both ramp hard with severity.
+	if randf() < lerpf(0.08, 0.55, sev):
+		return randf_range(lerpf(0.9, 1.45, sev), lerpf(1.3, 2.4, sev)) * chunk_hint
 	return randf_range(base_lo, base_hi) * randf_range(0.82, 1.22)
 
 

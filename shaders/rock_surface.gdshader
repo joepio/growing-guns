@@ -58,12 +58,23 @@ vec2 dmg_atlas_uv(vec2 ruv, int region) {
 	return vec2((col + clamp(ruv.x, 0.0, 1.0)) / 3.0, (row + clamp(ruv.y, 0.0, 1.0)) / 2.0);
 }
 
+// G channel = DEFORM damage (only strong hits write it) — drives the vertex carve.
 float dmg_samp(vec3 t01, int region) {
-	return textureLod(damage_tex, dmg_atlas_uv(dmg_region_local_uv(t01, region), region), 0.0).r;
+	return textureLod(damage_tex, dmg_atlas_uv(dmg_region_local_uv(t01, region), region), 0.0).g;
 }
 
+// Fragment dark mark = the small R DECAL only (a tight bullet hole). The big G
+// deform crater shapes the geometry + its normal, but must NOT paint a big dark
+// blob — otherwise a strong hit reads as a 30cm scorch instead of a bullet hole.
 float dmg_samp_ruv(vec2 ruv, int region) {
 	return textureLod(damage_tex, dmg_atlas_uv(ruv, region), 0.0).r;
+}
+
+// max(R,G) — used for the crater NORMAL/lighting so the deform bowl is shaded,
+// while the dark colour stays driven by R alone (kept subtle).
+float dmg_samp_max_ruv(vec2 ruv, int region) {
+	vec2 rg = textureLod(damage_tex, dmg_atlas_uv(ruv, region), 0.0).rg;
+	return max(rg.r, rg.g);
 }
 
 // A fragment's dominant face → its signed region (0..5).
@@ -163,7 +174,10 @@ void vertex() {
 			vec3 lp3 = (v_dmg_t01 - vec3(0.5)) * dmg_box_size;  // body-local m
 			float jag = 0.4 + 1.2 * dmg_fbm(lp3.xy * 3.5 + lp3.z);
 			float dist = length(VERTEX);
-			float carve = smoothstep(0.05, 1.0, d * jag) * dmg_crater_depth;
+			// Curve that shows from the first hit but still deepens with accumulated
+			// damage (a weak gun erodes gradually over the ~5 hits to destruction,
+			// instead of staying invisible until the block is about to break).
+			float carve = pow(clamp(d * jag, 0.0, 1.0), 0.6) * dmg_crater_depth;
 			carve = min(carve, dist * 0.92);  // never punch past the chunk centre
 			// Erode INWARD along the faces the vertex is on: a flat face caves into a
 			// clean bowl (all verts share one inward dir, so no star); an edge folds;
@@ -238,25 +252,26 @@ void fragment() {
 		vec2 plane = region < 2 ? dmg_box_size.zy : (region < 4 ? dmg_box_size.xz : dmg_box_size.xy);
 		vec2 wc = ruv * plane;                          // world-space coords (m)
 
-		float raw = dmg_samp_ruv(ruv, region);
+		float raw = dmg_samp_ruv(ruv, region);          // R = bullet-hole decal
 		float j = dmg_fbm(wc * 6.0);
 		float c = clamp(raw * (0.4 + 1.25 * j) - 0.05, 0.0, 1.5);
-		// Isotropic world-space gradient (4cm step) — same in U and V regardless of
-		// the body's aspect or the atlas packing.
 		float ws = 0.04;
 		vec2 du = vec2(ws / max(plane.x, 0.01), 0.0);
 		vec2 dv = vec2(0.0, ws / max(plane.y, 0.01));
+		// Gradient of max(R,G): lights the deform bowl AND the bullet hole (one sample
+		// set, so no extra cost over the old single-channel path).
 		vec2 grad = vec2(
-			dmg_samp_ruv(ruv + du, region) - dmg_samp_ruv(ruv - du, region),
-			dmg_samp_ruv(ruv + dv, region) - dmg_samp_ruv(ruv - dv, region));
+			dmg_samp_max_ruv(ruv + du, region) - dmg_samp_max_ruv(ruv - du, region),
+			dmg_samp_max_ruv(ruv + dv, region) - dmg_samp_max_ruv(ruv - dv, region));
 
-		float hole = smoothstep(0.28, 0.62, c);
-		float spall = smoothstep(0.04, 0.3, c) * (1.0 - hole);
-		col = mix(col, col * 1.22, spall * 0.6);
+		// Small dark bullet hole + light spalled rim — from the R decal ONLY, so a
+		// strong hit's wide deform crater doesn't read as a giant scorch.
+		float hole = smoothstep(0.06, 0.2, c);
+		float spall = smoothstep(0.03, 0.1, c) * (1.0 - hole);
+		col = mix(col, col * 1.25, spall * 0.55);
 		col = mix(col, vec3(0.02), hole);
 
-		// Crater depth via normal perturbation (the chunk mesh is too coarse to
-		// displace a bullet-sized pit, so the dome/pit is faked in the shading).
+		// Normal perturbation lights the carved bowl (and the small hole dimple).
 		float nscale = 9.0;
 		vec3 dn = normalize(vec3(-grad.x * nscale, -grad.y * nscale, 1.0));
 		NORMAL = normalize(TANGENT * dn.x + BINORMAL * dn.y + NORMAL * dn.z);
