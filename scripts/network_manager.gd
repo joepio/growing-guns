@@ -11,6 +11,7 @@ extends Node
 
 signal player_list_changed
 signal network_status_changed(message: String, is_error: bool)
+signal iroh_host_ready(game_id: String)
 
 const START_SCENE := "res://scenes/start_screen.tscn"
 
@@ -26,11 +27,76 @@ var current_iroh_game_id: String = ""
 # SceneTree's multiplayer peer to OfflineMultiplayerPeer unless we restore it.
 var _iroh_join_client: MultiplayerPeer = null
 
+# Background iroh host — lets solo boot proceed on OfflineMultiplayerPeer while
+# the extension brings up its endpoint after the first frame(s).
+var _host_bg_active: bool = false
+var _host_bg_cancelled: bool = false
+
 
 # ── Iroh (internet P2P, no port forwarding) ────────────────────────────────
 # Uses the godot-iroh GDExtension (addons/godot_iroh). Two peers connect via
 # QUIC over iroh's relay/hole-punching network using a node-id "game ID"
 # string — no LAN-only assumption, no public IP needed.
+
+# Register the local player for solo/offline play without waiting on iroh.
+func ensure_solo_registered(player_name: String) -> void:
+	local_player_name = player_name
+	# leave_game() nulls the peer; without OfflineMultiplayerPeer Godot treats us
+	# as a client and game.gd shows "CONNECTING TO HOST…" even in solo vs bots.
+	if not is_iroh_join_in_progress() and multiplayer.multiplayer_peer == null:
+		multiplayer.multiplayer_peer = OfflineMultiplayerPeer.new()
+	if not players.has(1):
+		players[1] = player_name
+		player_list_changed.emit()
+
+
+func is_host_starting() -> bool:
+	return _host_bg_active
+
+
+func cancel_background_host() -> void:
+	_host_bg_cancelled = true
+	_host_bg_active = false
+
+
+func request_online_host(player_name: String = "") -> void:
+	if "--offline" in OS.get_cmdline_args():
+		return
+	var pname := player_name if not player_name.is_empty() else local_player_name
+	ensure_solo_registered(pname)
+	host_game_iroh_background(pname)
+
+
+# Start iroh hosting after boot paints — does not block _ready. Solo play works
+# immediately via OfflineMultiplayerPeer until this completes (or forever on failure).
+func host_game_iroh_background(player_name: String) -> void:
+	if _host_bg_active:
+		return
+	if not current_iroh_game_id.is_empty():
+		return
+	var peer := multiplayer.multiplayer_peer
+	if peer != null and not peer is OfflineMultiplayerPeer:
+		return
+	ensure_solo_registered(player_name)
+	_host_bg_active = true
+	_host_bg_cancelled = false
+	_host_game_iroh_bg()
+
+
+func _host_game_iroh_bg() -> void:
+	# Yield so the menu / first frame can appear before the extension call.
+	await get_tree().process_frame
+	if _host_bg_cancelled:
+		_host_bg_active = false
+		return
+	var game_id := host_game_iroh(local_player_name)
+	_host_bg_active = false
+	if _host_bg_cancelled:
+		return
+	if game_id.is_empty():
+		return
+	iroh_host_ready.emit(game_id)
+
 
 # Host a game over iroh. Returns the game ID (node connection string) on
 # success — share it with peers. Returns "" on failure.
@@ -40,9 +106,14 @@ func host_game_iroh(player_name: String) -> String:
 	if not ClassDB.class_exists("IrohServer"):
 		return _fail("Iroh networking failed to load. Re-extract the zip so MoreRounds.exe, MoreRounds.pck, and godot_iroh.dll are in the same folder.")
 	_emit_status("Starting online host...", false)
+	Trace.span_begin("IrohServer.start")
 	var server = ClassDB.class_call_static("IrohServer", "start")
+	Trace.span_end("IrohServer.start")
 	if server == null:
-		return _fail("Couldn't start the online host. Windows Firewall or security software most likely blocked it — allow \"Growing Guns\" through the firewall, or check your network connection.")
+		return _fail(
+				"Couldn't start the online host. Another app using iroh on this device can block it — "
+				+ "quit that app and click Host online, or run with --offline. "
+				+ "Otherwise check firewall / network.")
 	multiplayer.multiplayer_peer = server
 	_connect_host_signals_once()
 	players[1] = player_name
@@ -81,6 +152,7 @@ func join_game_iroh(game_id: String, player_name: String) -> bool:
 # Tear down whatever peer we have (host or client). Used by the pause menu's
 # Join flow before swapping to an IrohClient and reloading game.tscn.
 func leave_game() -> void:
+	cancel_background_host()
 	if multiplayer.multiplayer_peer:
 		multiplayer.multiplayer_peer.close()
 		multiplayer.multiplayer_peer = null

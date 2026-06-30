@@ -125,6 +125,7 @@ func apply_seed(s: int, size_min: float = -1.0, size_max: float = -1.0) -> void:
 		generator.arena_size_max = 95.0
 	generator.seed = s
 	generator.regenerate()
+	DestructibleManager.update_play_bounds_from_arena(self)
 
 
 func apply_cinematic_seed(s: int = 424242, size: float = 72.0) -> void:
@@ -135,6 +136,21 @@ func apply_cinematic_seed(s: int = 424242, size: float = 72.0) -> void:
 	generator.arena_size_max = size
 	generator.seed = s
 	generator.regenerate()
+	DestructibleManager.update_play_bounds_from_arena(self)
+
+
+func get_play_bounds() -> Dictionary:
+	var arena_size: float = float(generator.get("arena_size")) if generator else 80.0
+	var half_xz := arena_size * 0.5 + 3.0
+	var wh: float = float(generator.get("wall_height")) if generator else 12.0
+	var y_max := wh + 3.5 + 14.0
+	return {
+		"origin": global_position,
+		"half_xz": half_xz,
+		"y_min": -12.0,
+		"y_max": y_max,
+		"y_combat_ceiling": wh + 3.5,
+	}
 
 
 func _on_regenerated(_stats: Dictionary) -> void:

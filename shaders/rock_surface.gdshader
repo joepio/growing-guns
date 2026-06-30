@@ -19,6 +19,9 @@ uniform sampler2D noise_texture : repeat_enable, filter_linear_mipmap;
 // read back) is sampled by world-space planar projection along the body's thinnest
 // axis, producing craters + radial cracks + scorch on top of the rock look.
 uniform float damage_enabled = 0.0;
+// When 0, only the fragment bullet-hole path runs (cheap subdiv-5 decal chunks).
+// When 1, vertex carve runs too (dense subdiv deform chunks).
+uniform float dmg_vertex_deform = 1.0;
 uniform sampler2D damage_tex : filter_linear, repeat_disable;
 uniform mat4 dmg_world_to_local;      // body global_transform inverse
 uniform vec3 dmg_box_size = vec3(1.0);
@@ -102,6 +105,14 @@ float dmg_fbm(vec2 p) {
 	return v;
 }
 
+// Per-face carve depth — saturates when G stacks so bricks get ragged, not tiny.
+float dmg_carve_amt(float d, float jag, float dist) {
+	float c = pow(clamp(d * jag, 0.0, 1.0), 0.68) * dmg_crater_depth;
+	c = min(c, dist * 0.88);
+	c *= 1.0 - 0.42 * smoothstep(0.58, 0.92, d);
+	return c;
+}
+
 vec3 dominant_face_axis(vec3 lp) {
 	vec3 ap = abs(lp);
 	if (ap.x >= ap.y && ap.x >= ap.z) {
@@ -156,44 +167,78 @@ void vertex() {
 	v_dmg_t01 = vec3(0.0);
 	if (damage_enabled > 0.5) {
 		v_dmg_t01 = dmg_t01(v_world_pos);
-		// Which faces this vertex sits on — from the CHUNK-local position (~±0.5),
-		// NOT the body UV. (Using body UV meant only chunks at a body's outer edge
-		// deformed; mid-body chunks never did.) The damage value itself is still
-		// sampled in body UV so it lands where the hit was. A face-centre vertex
-		// feels one face; an edge two; a corner three — and never the opposite side.
+		if (dmg_vertex_deform > 0.5) {
+		// Erode each face independently from its own atlas sample. Using max(d)
+		// across faces made corners collapse and heavily-hit bricks shrink to a
+		// nub — only the struck faces should carve.
 		float fe = 0.32;
-		float d = 0.0;
-		vec3 fn = vec3(0.0);  // sum of unit normals of the faces this vertex sits on
-		if (VERTEX.x > fe) { d = max(d, dmg_samp(v_dmg_t01, 0)); fn.x += 1.0; }
-		if (VERTEX.x < -fe) { d = max(d, dmg_samp(v_dmg_t01, 1)); fn.x -= 1.0; }
-		if (VERTEX.y > fe) { d = max(d, dmg_samp(v_dmg_t01, 2)); fn.y += 1.0; }
-		if (VERTEX.y < -fe) { d = max(d, dmg_samp(v_dmg_t01, 3)); fn.y -= 1.0; }
-		if (VERTEX.z > fe) { d = max(d, dmg_samp(v_dmg_t01, 4)); fn.z += 1.0; }
-		if (VERTEX.z < -fe) { d = max(d, dmg_samp(v_dmg_t01, 5)); fn.z -= 1.0; }
-		if (d > 0.02) {
-			vec3 lp3 = (v_dmg_t01 - vec3(0.5)) * dmg_box_size;  // body-local m
-			float jag = 0.4 + 1.2 * dmg_fbm(lp3.xy * 3.5 + lp3.z);
-			float dist = length(VERTEX);
-			// Curve that shows from the first hit but still deepens with accumulated
-			// damage (a weak gun erodes gradually over the ~5 hits to destruction,
-			// instead of staying invisible until the block is about to break).
-			float carve = pow(clamp(d * jag, 0.0, 1.0), 0.6) * dmg_crater_depth;
-			carve = min(carve, dist * 0.92);  // never punch past the chunk centre
-			// Erode INWARD along the faces the vertex is on: a flat face caves into a
-			// clean bowl (all verts share one inward dir, so no star); an edge folds;
-			// a corner (3 faces) collapses toward the centre — keeps the dramatic
-			// corner removal while giving flat hits a real crater.
-			vec3 erode_dir = length(fn) > 0.001 ? -normalize(fn) : -VERTEX / max(dist, 1e-4);
-			vec3 jit = vec3(
-				dmg_fbm(lp3.yz * 4.0 + 3.7),
-				dmg_fbm(lp3.xz * 4.0 + 19.3),
-				dmg_fbm(lp3.xy * 4.0 + 41.1)) - vec3(0.5);
-			VERTEX += erode_dir * carve;
-			VERTEX += jit * carve * 0.45;
-			// Stay inside the original chunk volume (unit box, half-extent 0.5).
+		vec3 lp3 = (v_dmg_t01 - vec3(0.5)) * dmg_box_size;
+		float jag = 0.4 + 1.2 * dmg_fbm(lp3.xy * 3.5 + lp3.z);
+		float dist = length(VERTEX);
+		vec3 jit = vec3(
+			dmg_fbm(lp3.yz * 4.0 + 3.7),
+			dmg_fbm(lp3.xz * 4.0 + 19.3),
+			dmg_fbm(lp3.xy * 4.0 + 41.1)) - vec3(0.5);
+		bool carved = false;
+		if (VERTEX.x > fe) {
+			float d = dmg_samp(v_dmg_t01, 0);
+			float c = dmg_carve_amt(d, jag, dist);
+			if (c > 0.001) {
+				VERTEX.x -= c;
+				VERTEX += jit * c * 0.35;
+				carved = true;
+			}
+		}
+		if (VERTEX.x < -fe) {
+			float d = dmg_samp(v_dmg_t01, 1);
+			float c = dmg_carve_amt(d, jag, dist);
+			if (c > 0.001) {
+				VERTEX.x += c;
+				VERTEX += jit * c * 0.35;
+				carved = true;
+			}
+		}
+		if (VERTEX.y > fe) {
+			float d = dmg_samp(v_dmg_t01, 2);
+			float c = dmg_carve_amt(d, jag, dist);
+			if (c > 0.001) {
+				VERTEX.y -= c;
+				VERTEX += jit * c * 0.35;
+				carved = true;
+			}
+		}
+		if (VERTEX.y < -fe) {
+			float d = dmg_samp(v_dmg_t01, 3);
+			float c = dmg_carve_amt(d, jag, dist);
+			if (c > 0.001) {
+				VERTEX.y += c;
+				VERTEX += jit * c * 0.35;
+				carved = true;
+			}
+		}
+		if (VERTEX.z > fe) {
+			float d = dmg_samp(v_dmg_t01, 4);
+			float c = dmg_carve_amt(d, jag, dist);
+			if (c > 0.001) {
+				VERTEX.z -= c;
+				VERTEX += jit * c * 0.35;
+				carved = true;
+			}
+		}
+		if (VERTEX.z < -fe) {
+			float d = dmg_samp(v_dmg_t01, 5);
+			float c = dmg_carve_amt(d, jag, dist);
+			if (c > 0.001) {
+				VERTEX.z += c;
+				VERTEX += jit * c * 0.35;
+				carved = true;
+			}
+		}
+		if (carved) {
 			VERTEX = clamp(VERTEX, vec3(-0.5), vec3(0.5));
 		}
 		v_world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+		}
 	}
 }
 

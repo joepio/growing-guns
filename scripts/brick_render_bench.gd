@@ -15,13 +15,13 @@ const ArenaGenerator := preload("res://scripts/arena_generator.gd")
 
 const BRICK := 2.0           # brick world size (m)
 const INSET := 0.96
-const BASE_SUBDIV := 5       # undamaged bricks stay cheap, like the real game
+const BASE_SUBDIV := DestructibleSolid.CHUNK_MESH_SUBDIVIDE
 const WARMUP_FRAMES := 30
 const MEASURE_SEC := 3.5
 
 var total := 1500            # total bricks on screen (realistic-ish wall field)
-var dmg_frac := 0.22         # fraction that are dense + deformed (hit bricks)
-var subdiv_sweep: Array = [5, 8, 12, 16, 24]
+var dmg_frac := 0.22         # fraction on damage material (hit bricks)
+var subdiv_sweep: Array = [2, 3, 4, 5]
 
 var _cam: Camera3D
 var _base_mat: ShaderMaterial

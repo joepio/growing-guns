@@ -152,18 +152,9 @@ func _build_arena() -> void:
 
 
 func _warmup_effect_shaders() -> void:
-	# Mirror game.gd's boot warmup so the bench measures steady-state, not the
-	# one-time first-explosion effect-cache/shader population (these caches are
-	# process-wide). Without this the first blasts compile shaders / build cached
-	# meshes mid-run — the ~23ms "first time" spike.
 	if not has_node("Arena"):
 		return
-	var arena := $Arena
-	Violence.prewarm_disintegration_cache()
-	Violence.warmup_blast_materials(arena)
-	Violence.warmup_gib_render(arena)
-	if DisplayServer.get_name() != "headless":
-		RenderingServer.force_draw(true)
+	ShaderWarmup.warmup_effect_shaders($Arena)
 
 
 func _build_camera() -> void:
@@ -477,8 +468,13 @@ func _print_destruct_summary(summary: Dictionary) -> void:
 	print("Destructible volumes:   %d" % destructibles)
 	var brs: Dictionary = DestructibleManager.bench_bullet_ray_stats()
 	if int(brs.get("calls", 0)) > 0:
-		print("Bullet analytical rays: calls=%d  candidates/ray=%.1f  chunk-volumes tested=%d"
-			% [int(brs.calls), float(brs.candidates_avg), int(brs.volumes_raycast)])
+		print("Bullet analytical rays: calls=%d  grid/ray=%.1f  obb/ray=%.1f  chunk-volumes tested=%d"
+			% [
+				int(brs.calls),
+				float(brs.get("grid_candidates_avg", brs.get("candidates_avg", 0.0))),
+				float(brs.candidates_avg),
+				int(brs.volumes_raycast),
+			])
 	print("Arena chunks:           start=%d  end=%d  removed=%d  (~%d/s)"
 		% [_chunks_at_measure_start, chunks_end, chunks_removed, removals_per_sec])
 	print("Debris bursts:          premium=%d  cheap=%d" % [prem, cheap])

@@ -177,9 +177,6 @@ var _pickup_spawn_serial: int = 0
 var _air_strike_timer: float = -1.0
 var _air_strike_cancel_gen: int = 0
 var _air_strikes_armed: bool = false
-# Effect-shader (GPU pipeline) warmup runs once per session — PSOs are cached
-# process-wide once compiled, so re-warming every round is wasted work.
-var _effect_shaders_warmed: bool = false
 var _air_strike_pending: bool = false
 var _ion_cannon_timer: float = -1.0
 var _ion_cannon_cancel_gen: int = 0
@@ -312,7 +309,6 @@ var _flash_adsr_release_end_ms: int = 0
 var _phoenix_fade_overlay: ColorRect = null
 var _phoenix_fade_alpha: float = 0.0
 var _phoenix_fade_out_per_s: float = 0.0
-var _loading_overlay: ColorRect = null
 const PHOENIX_FADE_OUT_SECONDS := 0.9
 
 var _last_input_was_controller := false
@@ -327,12 +323,10 @@ var _audio_panel: AudioSettingsPanel = null
 
 func _ready() -> void:
 	Trace.mark("game._ready start (is_server=%s)" % multiplayer.is_server())
+	# Menu shader warmup may have queued blast jobs against the old arena tree.
+	Violence.discard_pending_blast_visuals()
 	ProceduralMusic.set_energy(1, true)
 	_install_controller_input_map()
-	# Show the loading overlay immediately so no garbage is visible while
-	# the arena, players, and shaders all get set up.
-	_build_loading_overlay()
-	_show_loading_overlay()
 	# Splitscreen manager: builds a CanvasLayer + per-device viewports if the
 	# NetworkManager flag is set. Inert otherwise (still a Node, but no UI).
 	_splitscreen = SPLITSCREEN_MANAGER_SCRIPT.new()
@@ -363,6 +357,8 @@ func _ready() -> void:
 	NetworkManager.player_list_changed.connect(_refresh_bot_counter)
 	if not NetworkManager.network_status_changed.is_connected(_on_network_status_changed):
 		NetworkManager.network_status_changed.connect(_on_network_status_changed)
+	if not NetworkManager.iroh_host_ready.is_connected(_on_iroh_host_ready):
+		NetworkManager.iroh_host_ready.connect(_on_iroh_host_ready)
 	banner_timer.timeout.connect(func() -> void: round_banner.visible = false)
 	round_banner.visible = false
 	scoreboard.visible = false
@@ -416,57 +412,14 @@ func _ready() -> void:
 	# Voronoi gib bakes are expensive — do them once at boot, not on first kill.
 	# Also start synthesizing one-off effect sounds while the menu is still up
 	# if the player came from start_screen (idempotent — safe to call again).
-	Trace.span_begin("prewarm_disintegration_cache")
-	Violence.prewarm_disintegration_cache()
-	Trace.span_end("prewarm_disintegration_cache")
+	SFX.warmup_specials()
 	_boot_warmup_assets()
 
-	# Pre-synthesize the heavy one-off effect sounds (ion cannon charge/burst,
-	# air strike, lava, casings, mine) once at boot so the first cast doesn't
-	# hitch synthesizing them mid-frame. Per-round shot/explosion variants are
-	# warmed separately in _warmup_round_audio. Fire-and-forget coroutine.
-	SFX.warmup_specials()
-
-	# Auto-host an iroh server unless we're already wired to a real peer
-	# (e.g. the user just clicked Join in the pause menu, which set up an
-	# IrohClient before reloading the scene). This is what makes the boot
-	# experience "open game → playing immediately, ID ready to share".
-	# Godot 4 installs a default OfflineMultiplayerPeer when no peer is set,
-	# so a plain `== null` check never fires — must also reject that.
-	# Networking auto-host. The godot_iroh extension can fail to bring up its iroh
-	# endpoint on some machines (firewall / locked-down network / no connectivity).
-	# It returns null instead of crashing, so we handle it explicitly: a peer that
-	# never registers means no player spawns and the screen stays blank — that was
-	# the "friend opens the game and sees nothing" bug. On failure we surface a
-	# loud, blocking error AND fall back to a local solo session so the game is
-	# still playable. --offline forces that same local path up front.
-	var offline := "--offline" in OS.get_cmdline_args()
+	# Solo vs bots never waits on iroh — register locally and let the player
+	# opt in via pause-menu "Host online" (or a menu hand-off that's already live).
+	NetworkManager.ensure_solo_registered(MenuHelpers.player_name)
 	if NetworkManager.is_iroh_join_in_progress():
 		NetworkManager.ensure_iroh_client_peer()
-	if not offline and not NetworkManager.is_iroh_join_in_progress() \
-			and (multiplayer.multiplayer_peer == null \
-			or multiplayer.multiplayer_peer is OfflineMultiplayerPeer):
-		var hosted_id := NetworkManager.host_game_iroh(MenuHelpers.player_name)
-		if hosted_id.is_empty():
-			var err := NetworkManager.last_network_error
-			if err.is_empty():
-				err = "Online host could not start (no reason reported by iroh)."
-			push_error("Iroh host failed: %s" % err)
-			_on_network_status_changed(err, true)
-			# Unmissable, blocking dialog — the player always learns what broke
-			# instead of staring at an empty screen.
-			OS.alert("%s\n\nStarting in OFFLINE mode (solo vs bots).\n\nLog file:\n%s" % [
-					err, OS.get_user_data_dir().path_join("logs/godot.log")],
-					"Online unavailable")
-			offline = true
-	if offline:
-		# Local-only session: register ourselves as player 1 so the is_server()
-		# branch below spawns us with a camera. OfflineMultiplayerPeer reports
-		# is_server() == true, so the rest of boot proceeds normally.
-		push_warning("Playing offline: iroh networking unavailable or skipped.")
-		NetworkManager.local_player_name = MenuHelpers.player_name
-		NetworkManager.players[1] = MenuHelpers.player_name
-		NetworkManager.player_list_changed.emit()
 
 	if multiplayer.is_server():
 		_set_game_mode.rpc(game_mode, coop_wave)
@@ -491,11 +444,6 @@ func _ready() -> void:
 			requested_count = 0
 		if bot_requested:
 			_spawn_bots(requested_count, spawn_used)
-		# Warm up GPU pipelines before the first round. Everything (arena,
-		# players, gun) is now in the scene tree, so the host warms here.
-		Trace.span_begin("shader_warmup (force_draw)")
-		await _warmup_effect_shaders_and_hide_overlay()
-		Trace.span_end("shader_warmup (force_draw)")
 		_maybe_start_match()
 
 		# Solo-vs-AI fallback: with the main menu gone, every fresh launch
@@ -1582,14 +1530,9 @@ func _do_spawn(
 			listener.owner = cam
 		if not (_splitscreen and _splitscreen.is_enabled()):
 			_ensure_render_player(id, p.local_input_device)
-		# A joining client never warmed shaders / hid the boot overlay in
-		# _ready (only the server branch does). Now that our view exists and
-		# the arena is in the tree, warm and reveal. Host already did this in
-		# _ready, so gate to clients to keep the host path untouched.
-		if not multiplayer.is_server():
-			Trace.span_begin("client shader_warmup (force_draw)")
-			_warmup_effect_shaders_and_hide_overlay()
-			Trace.span_end("client shader_warmup (force_draw)")
+		# Joining clients that skipped the menu still need the one-time session warmup.
+		if not multiplayer.is_server() and has_node("Arena"):
+			ShaderWarmup.warmup_effect_shaders($Arena)
 	if _splitscreen and _splitscreen.is_enabled() and split_local:
 		# Manager owns the device→player_id map server-side; on clients we
 		# just need the view layout refreshed so the new SubViewport appears.
@@ -2702,6 +2645,8 @@ func _swap_arena(map_index: int, map_seed: int = 0, arena_size_min: float = -1.0
 	# _pick_spawn() runs in _start_round_now().
 	if new_arena.has_method("apply_seed"):
 		new_arena.apply_seed(map_seed, arena_size_min, arena_size_max)
+	if new_arena is Node3D:
+		DestructibleManager.update_play_bounds_from_arena(new_arena as Node3D)
 	Trace.span_end("_swap_arena (instantiate+apply_seed)")
 	current_map_index = map_index
 	current_map_seed = map_seed
@@ -3843,74 +3788,17 @@ func _build_phoenix_fade_overlay() -> void:
 	fade_layer.add_child(_phoenix_fade_overlay)
 
 
-func _build_loading_overlay() -> void:
-	var load_layer := CanvasLayer.new()
-	load_layer.name = "LoadingLayer"
-	load_layer.layer = 100
-	add_child(load_layer)
-	_loading_overlay = ColorRect.new()
-	_loading_overlay.name = "LoadingOverlay"
-	_loading_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	_loading_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_loading_overlay.color = Color(0.0, 0.0, 0.0, 0.85)
-	_loading_overlay.visible = false
-	load_layer.add_child(_loading_overlay)
-	var label := Label.new()
-	label.name = "LoadingLabel"
-	label.text = "LOADING SHADERS…"
-	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	label.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	label.add_theme_color_override("font_color", Color(1.0, 1.0, 1.0, 0.9))
-	label.add_theme_font_size_override("font_size", 36)
-	label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_loading_overlay.add_child(label)
-
-
-func _show_loading_overlay() -> void:
-	Trace.mark("loading overlay SHOWN")
-	if _loading_overlay:
-		_loading_overlay.visible = true
-
-
-func _hide_loading_overlay() -> void:
-	Trace.mark("loading overlay HIDDEN")
-	if _loading_overlay:
-		_loading_overlay.visible = false
-
-
-func _warmup_effect_shaders_and_hide_overlay() -> void:
-	# Compile every effect shader's PSO while the loading overlay still hides
-	# the GPU garbage, then drop the overlay. We add warmup meshes for every
-	# effect shader, let one frame render so the overlay is visible, then force
-	# the render thread to process all pending draws synchronously via
-	# RenderingServer.force_draw() — this blocks until the GPU driver has
-	# compiled all PSOs, no guessing, no timer. Idempotent via
-	# _effect_shaders_warmed so the host (warms in _ready) and a joining client
-	# (warms in _do_spawn) never double-warm.
-	if not _effect_shaders_warmed and has_node("Arena"):
-		_effect_shaders_warmed = true
-		var arena := $Arena
-		GRENADE_SCRIPT.warmup_shaders(arena)
-		GRENADE_SCRIPT.warmup_scene(arena)
-		Violence.warmup_blast_materials(arena)
-		ION_CANNON_SCRIPT.warmup_shaders(arena)
-		PLAYER_SCRIPT.warmup_phoenix_shaders(arena)
-		Violence.warmup_gib_render(arena)
-		if arena is ArenaGenerator:
-			(arena as ArenaGenerator).warmup_gpu_materials(arena)
-		_update_render_player_layouts()
-		await get_tree().process_frame
-		RenderingServer.force_draw()
-	_hide_loading_overlay()
-
-
 func _boot_warmup_assets() -> void:
-	# Touch grenade scene + shader bytecode early. GPU PSO compile still runs
-	# in _warmup_effect_shaders_and_hide_overlay once the arena is in-tree.
+	# Menu boot normally finishes this; if the player bailed early, warm without
+	# blocking match start (no loading overlay / no await before _maybe_start_match).
+	if not has_node("Arena") or ShaderWarmup.effect_shaders_warmed:
+		return
+	call_deferred("_finish_shader_warmup")
+
+
+func _finish_shader_warmup() -> void:
 	if has_node("Arena"):
-		GRENADE_SCRIPT.warmup_shaders($Arena)
-		GRENADE_SCRIPT.warmup_scene(self)
+		ShaderWarmup.warmup_effect_shaders($Arena)
 
 
 func set_phoenix_fade(player_id: int, alpha: float) -> void:
@@ -4086,6 +3974,10 @@ func _show_kill_feed(killer_name: String, victim_name: String) -> void:
 	tween.tween_interval(KILL_FEED_LIFETIME)
 	tween.tween_property(entry, "modulate:a", 0.0, 0.35)
 	tween.tween_callback(entry.queue_free)
+
+
+func _on_iroh_host_ready(_game_id: String) -> void:
+	_pause_refresh_game_id()
 
 
 func _on_network_status_changed(message: String, is_error: bool) -> void:
@@ -4637,8 +4529,14 @@ func _build_pause_menu() -> void:
 	id_field.editable = false
 	id_field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	id_field.custom_minimum_size = Vector2(0, 32)
-	id_field.placeholder_text = "(no game ID — not hosting)"
+	id_field.placeholder_text = "(offline — not hosting)"
 	id_row.add_child(id_field)
+	var host_btn := Button.new()
+	host_btn.text = "HOST ONLINE"
+	host_btn.custom_minimum_size = Vector2(110, 32)
+	host_btn.pressed.connect(_pause_host_online)
+	id_row.add_child(host_btn)
+	_pause_host_button = host_btn
 	var copy_btn := Button.new()
 	copy_btn.text = "COPY"
 	copy_btn.custom_minimum_size = Vector2(70, 32)
@@ -4797,6 +4695,7 @@ func _build_pause_menu() -> void:
 var _pause_versus_btn: Button = null
 var _pause_wave_btn: Button = null
 var _pause_id_field: LineEdit = null
+var _pause_host_button: Button = null
 var _pause_copy_button: Button = null
 var _pause_join_input: LineEdit = null
 var _pause_join_button: Button = null
@@ -4853,6 +4752,11 @@ func _refresh_pause_seed_label() -> void:
 	_pause_seed_label.text = "%s · seed %d" % [map_name, current_map_seed]
 
 
+func _pause_host_online() -> void:
+	NetworkManager.request_online_host(MenuHelpers.player_name)
+	_pause_refresh_game_id()
+
+
 func _pause_refresh_game_id() -> void:
 	# Called whenever the pause menu opens — the iroh server might have been
 	# created after _build_pause_menu ran (or torn down because we became a
@@ -4860,8 +4764,17 @@ func _pause_refresh_game_id() -> void:
 	if _pause_id_field == null:
 		return
 	var id := NetworkManager.current_iroh_game_id
+	var starting := NetworkManager.is_host_starting()
 	_pause_id_field.text = id
 	var hosting := id != ""
+	if id.is_empty() and starting:
+		_pause_id_field.placeholder_text = "Starting host..."
+	elif id.is_empty():
+		_pause_id_field.placeholder_text = "(offline — not hosting)"
+	if _pause_host_button:
+		_pause_host_button.visible = not hosting
+		_pause_host_button.disabled = starting
+		_pause_host_button.text = "STARTING..." if starting else "HOST ONLINE"
 	_pause_copy_button.disabled = not hosting
 	_pause_id_field.editable = false  # always read-only; copying via select+keyboard or button
 

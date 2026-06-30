@@ -25,22 +25,24 @@ static func menu_panel_style() -> StyleBoxFlat:
 	sb.border_color = Color(0.35, 0.7, 1.0)
 	sb.set_border_width_all(2)
 	sb.set_corner_radius_all(8)
-	sb.content_margin_left = 18
-	sb.content_margin_right = 18
-	sb.content_margin_top = 16
-	sb.content_margin_bottom = 16
+	sb.content_margin_left = 24
+	sb.content_margin_right = 24
+	sb.content_margin_top = 22
+	sb.content_margin_bottom = 22
 	return sb
 
 # Build slider row helper
 static func build_slider_row(label_text: String, value: float, min_val: float, max_val: float, step: float, value_text: String) -> Dictionary:
 	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 12)
+	row.add_theme_constant_override("separation", 14)
+	row.custom_minimum_size = Vector2(0, 36)
 	
 	var label := Label.new()
 	label.text = label_text
-	label.custom_minimum_size = Vector2(120, 0)
+	label.custom_minimum_size = Vector2(128, 0)
 	label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	label.add_theme_color_override("font_color", Color(0.85, 0.85, 0.95))
+	label.add_theme_font_size_override("font_size", 14)
 	row.add_child(label)
 	
 	var slider := HSlider.new()
@@ -58,6 +60,7 @@ static func build_slider_row(label_text: String, value: float, min_val: float, m
 	val_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	val_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	val_lbl.add_theme_color_override("font_color", Color(0.74, 0.78, 0.9))
+	val_lbl.add_theme_font_size_override("font_size", 14)
 	row.add_child(val_lbl)
 	
 	return {"row": row, "slider": slider, "value_label": val_lbl}
@@ -179,37 +182,43 @@ static func build_settings_panel(parent: Node, close_callback: Callable, left_al
 		root.add_child(center)
 		center.add_child(panel)
 	
-	var vb := VBoxContainer.new()
-	vb.add_theme_constant_override("separation", 10)
-	vb.custom_minimum_size = Vector2(310, 0)
-	panel.add_child(vb)
+	var margin := MarginContainer.new()
+	margin.name = "SettingsMargin"
+	margin.add_theme_constant_override("margin_left", 20)
+	margin.add_theme_constant_override("margin_right", 20)
+	margin.add_theme_constant_override("margin_top", 18)
+	margin.add_theme_constant_override("margin_bottom", 18)
+	panel.add_child(margin)
 	
-	# Title (moved outside the box to the top center)
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 14)
+	vb.custom_minimum_size = Vector2(300, 0)
+	margin.add_child(vb)
+	
 	var title := Label.new()
+	title.name = "SettingsTitle"
 	title.text = "SETTINGS"
-	title.add_theme_font_size_override("font_size", 42)
+	title.add_theme_font_size_override("font_size", 28)
 	title.add_theme_color_override("font_color", Color(1, 0.9, 0.45))
 	title.add_theme_color_override("font_outline_color", Color(0.4, 0.0, 0.1))
-	title.add_theme_constant_override("outline_size", 6)
+	title.add_theme_constant_override("outline_size", 4)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.set_anchors_preset(Control.PRESET_CENTER_TOP)
-	title.anchor_left = 0.5
-	title.anchor_right = 0.5
-	title.offset_left = -250.0
-	title.offset_top = 35.0
-	title.offset_right = 250.0
-	title.offset_bottom = 95.0
-	title.grow_horizontal = Control.GROW_DIRECTION_BOTH
-	root.add_child(title)
+	vb.add_child(title)
+	
+	var title_gap := Control.new()
+	title_gap.custom_minimum_size = Vector2(0, 6)
+	vb.add_child(title_gap)
 	
 	# Player Name
 	var name_row := HBoxContainer.new()
-	name_row.add_theme_constant_override("separation", 12)
+	name_row.add_theme_constant_override("separation", 14)
+	name_row.custom_minimum_size = Vector2(0, 36)
 	var name_label := Label.new()
 	name_label.text = "Player name"
-	name_label.custom_minimum_size = Vector2(120, 0)
+	name_label.custom_minimum_size = Vector2(128, 0)
 	name_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	name_label.add_theme_color_override("font_color", Color(0.85, 0.85, 0.95))
+	name_label.add_theme_font_size_override("font_size", 14)
 	name_row.add_child(name_label)
 	
 	var name_input := LineEdit.new()
@@ -217,7 +226,7 @@ static func build_settings_panel(parent: Node, close_callback: Callable, left_al
 	name_input.placeholder_text = "Your callsign…"
 	name_input.max_length = 20
 	name_input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	name_input.custom_minimum_size = Vector2(0, 32)
+	name_input.custom_minimum_size = Vector2(0, 34)
 	name_row.add_child(name_input)
 	vb.add_child(name_row)
 	
@@ -240,6 +249,7 @@ static func build_settings_panel(parent: Node, close_callback: Callable, left_al
 	# Retro look
 	var retro_toggle := CheckButton.new()
 	retro_toggle.text = "Retro shader look"
+	retro_toggle.custom_minimum_size = Vector2(0, 34)
 	retro_toggle.button_pressed = retro_enabled
 	retro_toggle.toggled.connect(func(on: bool) -> void:
 		retro_enabled = on
@@ -280,6 +290,7 @@ static func build_settings_panel(parent: Node, close_callback: Callable, left_al
 	# Movement tilt
 	var tilt_toggle := CheckButton.new()
 	tilt_toggle.text = "Movement tilt"
+	tilt_toggle.custom_minimum_size = Vector2(0, 34)
 	tilt_toggle.button_pressed = movement_tilt_enabled
 	tilt_toggle.toggled.connect(func(on: bool) -> void:
 		movement_tilt_enabled = on
@@ -295,7 +306,7 @@ static func build_settings_panel(parent: Node, close_callback: Callable, left_al
 	
 	var back_btn := Button.new()
 	back_btn.text = "BACK"
-	back_btn.custom_minimum_size = Vector2(0, 32)
+	back_btn.custom_minimum_size = Vector2(0, 38)
 	vb.add_child(back_btn)
 	back_btn.pressed.connect(func() -> void:
 		commit_name.call()

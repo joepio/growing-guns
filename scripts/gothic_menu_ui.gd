@@ -38,6 +38,12 @@ static func apply_settings_panel(panel: PanelContainer) -> void:
 	frame.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	panel.add_child(frame)
 	panel.move_child(frame, 0)
+	var margin := panel.get_node_or_null("SettingsMargin") as MarginContainer
+	if margin:
+		margin.add_theme_constant_override("margin_left", 30)
+		margin.add_theme_constant_override("margin_right", 30)
+		margin.add_theme_constant_override("margin_top", 56)
+		margin.add_theme_constant_override("margin_bottom", 28)
 	_style_menu_tree(panel)
 
 
@@ -58,6 +64,8 @@ static func _style_menu_tree(root: Node) -> void:
 			_style_button(child as Button)
 		elif child is LineEdit:
 			_style_line_edit(child as LineEdit)
+		elif child is CheckButton:
+			_style_check_button(child as CheckButton)
 		elif child is HSeparator:
 			_style_separator(child as HSeparator)
 		if child.get_child_count() > 0:
@@ -71,7 +79,14 @@ static func _style_label(label: Label) -> void:
 		return
 	if label.name == "Notice":
 		return
-	label.add_theme_color_override("font_color", MUTED)
+	if label.name == "SettingsTitle":
+		label.add_theme_font_size_override("font_size", 26)
+		label.add_theme_color_override("font_color", Color(0.98, 0.82, 0.38))
+		label.add_theme_color_override("font_outline_color", TITLE_OUTLINE)
+		label.add_theme_constant_override("outline_size", 5)
+		return
+	label.add_theme_color_override("font_color", CREAM.lightened(0.02))
+	label.add_theme_font_size_override("font_size", 14)
 
 
 static func _style_button(button: Button) -> void:
@@ -97,6 +112,15 @@ static func _style_line_edit(field: LineEdit) -> void:
 	field.add_theme_color_override("font_color", CREAM.lightened(0.05))
 	field.add_theme_color_override("font_placeholder_color", MUTED.darkened(0.12))
 	field.add_theme_font_size_override("font_size", 13)
+	field.custom_minimum_size.y = maxf(field.custom_minimum_size.y, 34.0)
+
+
+static func _style_check_button(toggle: CheckButton) -> void:
+	toggle.add_theme_color_override("font_color", CREAM.lightened(0.02))
+	toggle.add_theme_color_override("font_hover_color", Color(1.0, 0.92, 0.72))
+	toggle.add_theme_color_override("font_pressed_color", GOLD)
+	toggle.add_theme_font_size_override("font_size", 14)
+	toggle.custom_minimum_size.y = maxf(toggle.custom_minimum_size.y, 34.0)
 
 
 static func _style_separator(sep: HSeparator) -> void:
@@ -148,8 +172,10 @@ static func _input_styleboxes() -> Dictionary:
 	normal.border_color = GOLD_DIM.darkened(0.15)
 	normal.set_border_width_all(1)
 	normal.set_corner_radius_all(2)
-	normal.content_margin_left = 8
-	normal.content_margin_right = 8
+	normal.content_margin_left = 10
+	normal.content_margin_right = 10
+	normal.content_margin_top = 6
+	normal.content_margin_bottom = 6
 
 	var focus := normal.duplicate() as StyleBoxFlat
 	focus.border_color = GOLD

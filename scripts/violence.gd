@@ -215,7 +215,9 @@ static func warmup_blast_materials(scene: Node) -> void:
 	# Run the full bullet-blast path once at sub-pixel scale so every lazily-built
 	# effect mesh/resource (billows, flame shards, embers, blast lights) is cached
 	# before the first real explosion — otherwise that first blast pays for them.
-	spawn_bullet_blast(scene, Vector3.ZERO, 0.005, Color(1.0, 0.6, 0.3), null, false)
+	# defer_heavy=false: menu warmup must not queue jobs on an arena that is freed
+	# when the player clicks Versus (flush would cast a freed scene ref).
+	spawn_bullet_blast(scene, Vector3.ZERO, 0.005, Color(1.0, 0.6, 0.3), null, false, false)
 
 
 # Like warmup_material but compiles the instanced (MultiMesh) PSO variant.
@@ -1300,6 +1302,17 @@ static var _blast_smoke_layer_pivots: Array[Node3D] = []
 static var _pending_blast_visuals: Array = []
 static var _blast_visual_process_frame: int = -1
 static var _blast_visual_process_usec: int = 0
+
+
+static func _safe_scene_from_job(job: Dictionary) -> Node:
+	var ref: Variant = job.get("scene")
+	if ref == null or not is_instance_valid(ref):
+		return null
+	return ref as Node
+
+
+static func discard_pending_blast_visuals() -> void:
+	_pending_blast_visuals.clear()
 static var _debris_process_frame: int = -1
 static var _debris_process_usec: int = 0
 
@@ -1514,8 +1527,8 @@ static func flush_pending_blast_visuals() -> void:
 		if _blast_visual_process_usec >= MAX_BLAST_HEAVY_USEC_PER_PROCESS_FRAME:
 			break
 		var job: Dictionary = _pending_blast_visuals[0]
-		var scene: Node = job.get("scene") as Node
-		if scene == null or not is_instance_valid(scene):
+		var scene: Node = _safe_scene_from_job(job)
+		if scene == null:
 			_pending_blast_visuals.pop_front()
 			continue
 		var t0 := Time.get_ticks_usec()
@@ -2371,7 +2384,15 @@ static func _spawn_cheap_blast_flare(scene: Node, pos: Vector3, radius: float, c
 # point light — stacked EXPLOSIVE ROUNDS cards should feel earth-shaking.
 # `local_player` (optional) is the local human's player; if provided, gets a
 # view-punch + is checked against the scene's exposure sidechain hook.
-static func spawn_bullet_blast(scene: Node, pos: Vector3, radius: float, color: Color, local_player: Node = null, play_audio: bool = true) -> void:
+static func spawn_bullet_blast(
+	scene: Node,
+	pos: Vector3,
+	radius: float,
+	color: Color,
+	local_player: Node = null,
+	play_audio: bool = true,
+	defer_heavy: bool = true,
+) -> void:
 	if scene == null:
 		return
 	var t0 := Time.get_ticks_usec() if BenchFlags.active else 0
@@ -2380,11 +2401,13 @@ static func spawn_bullet_blast(scene: Node, pos: Vector3, radius: float, color: 
 	if full_blast:
 		_spawn_bullet_blast_feedback(scene, pos, radius, local_player)
 		_spawn_bullet_blast_immediate_visuals(scene, pos, radius, color, play_audio)
-		_enqueue_blast_visual_job(scene, pos, radius, color, play_audio, false)
+		if defer_heavy:
+			_enqueue_blast_visual_job(scene, pos, radius, color, play_audio, false)
 	elif eligible:
 		_spawn_bullet_blast_feedback(scene, pos, radius, local_player)
 		_reserve_full_blast_slot(pos)
-		_enqueue_blast_visual_job(scene, pos, radius, color, play_audio, true)
+		if defer_heavy:
+			_enqueue_blast_visual_job(scene, pos, radius, color, play_audio, true)
 	else:
 		_bench_blast_scope("cheap_flare", func() -> void:
 			_spawn_cheap_blast_flare(scene, pos, radius, color))
@@ -3646,8 +3669,8 @@ static func _spawn_debris_job(job: Dictionary, max_chips: int) -> int:
 
 
 static func _spawn_debris_job_premium(job: Dictionary, max_chips: int) -> int:
-	var scene: Node = job.get("scene") as Node
-	if scene == null or not is_instance_valid(scene):
+	var scene: Node = _safe_scene_from_job(job)
+	if scene == null:
 		return -1
 	var block_size: Vector3 = job.get("block_size") as Vector3
 	var chip_count: int = int(job.get("chip_count", 20))
@@ -3763,8 +3786,8 @@ static func _spawn_debris_job_premium(job: Dictionary, max_chips: int) -> int:
 
 
 static func _spawn_debris_job_cheap(job: Dictionary, max_chips: int) -> int:
-	var scene: Node = job.get("scene") as Node
-	if scene == null or not is_instance_valid(scene):
+	var scene: Node = _safe_scene_from_job(job)
+	if scene == null:
 		return -1
 	var block_size: Vector3 = job.get("block_size") as Vector3
 	var chip_count: int = int(job.get("chip_count", 5))

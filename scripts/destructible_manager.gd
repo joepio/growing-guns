@@ -1,3 +1,4 @@
+class_name DestructibleManager
 extends RefCounted
 
 # Batched destruction for pre-split destructible solids. Blasts mark bodies
@@ -17,6 +18,14 @@ static var _registered_index_by_id: Dictionary = {}
 # Spatial broadphase for bullet rays — most arena tiles are separate volumes, so
 # scanning all ~400+ registrations per projectile per tick was the spike source.
 const BULLET_VOL_CELL := 12.0
+# After grid broadphase, at most this many volumes run chunk narrowphase per ray.
+const MAX_BULLET_VOLUME_RAYCASTS := 8
+# Hard cap across all bullets per physics tick — stops mag-dump sky spam from
+# running thousands of chunk raycasts in one frame.
+const MAX_BULLET_VOLUME_RAYCASTS_GLOBAL := 32
+static var _vol_ray_budget_left: int = 0
+static var _vol_ray_budget_frame: int = -1
+static var _combat_ceiling_local_y: float = 22.0
 static var _vol_grid: Dictionary = {}  # "x,y,z" -> Array[int] volume instance ids
 static var _vol_grid_cells_by_id: Dictionary = {}  # instance id -> Array[String]
 
@@ -333,6 +342,139 @@ static func debug_registered_count() -> int:
 	return _registered_ids.size()
 
 
+# Playable map AABB — bullets outside skip destructible narrowphase entirely.
+static var _play_origin: Vector3 = Vector3.ZERO
+static var _play_half_xz: float = 40.0
+static var _play_y_min: float = -15.0
+static var _play_y_max: float = 55.0
+static var _play_bounds_valid: bool = false
+
+
+static func play_bounds_enabled() -> bool:
+	return _play_bounds_valid
+
+
+static func set_play_bounds(origin: Vector3, half_xz: float, y_min: float, y_max: float, combat_ceiling_local_y: float = -1.0) -> void:
+	_play_origin = origin
+	_play_half_xz = maxf(half_xz, 1.0)
+	_play_y_min = y_min
+	_play_y_max = maxf(y_max, y_min + 1.0)
+	if combat_ceiling_local_y >= 0.0:
+		_combat_ceiling_local_y = combat_ceiling_local_y
+	else:
+		_combat_ceiling_local_y = _play_y_max - 6.0
+	_play_bounds_valid = true
+
+
+static func clear_play_bounds() -> void:
+	_play_bounds_valid = false
+
+
+static func update_play_bounds_from_arena(arena: Node3D) -> void:
+	if arena == null:
+		clear_play_bounds()
+		return
+	var bounds: Dictionary = {}
+	if arena.has_method("get_play_bounds"):
+		bounds = arena.call("get_play_bounds") as Dictionary
+	elif arena is ArenaGenerator:
+		bounds = (arena as ArenaGenerator).get_play_bounds()
+	if bounds.is_empty():
+		set_play_bounds(arena.global_position, 40.0, -15.0, 55.0)
+		return
+	set_play_bounds(
+		bounds.get("origin", arena.global_position) as Vector3,
+		float(bounds.get("half_xz", 40.0)),
+		float(bounds.get("y_min", -15.0)),
+		float(bounds.get("y_max", 55.0)),
+		float(bounds.get("y_combat_ceiling", -1.0)),
+	)
+
+
+static func point_above_combat_ceiling(world_pos: Vector3) -> bool:
+	if not _play_bounds_valid:
+		return false
+	return (world_pos - _play_origin).y > _combat_ceiling_local_y
+
+
+static func segment_needs_destruct_query(world_from: Vector3, world_to: Vector3) -> bool:
+	if not _play_bounds_valid:
+		return true
+	if not _segment_intersects_play_bounds(world_from, world_to):
+		return false
+	var local_from := world_from - _play_origin
+	var local_to := world_to - _play_origin
+	# Open sky — both endpoints above the fort roof line, no terrain to hit.
+	if local_from.y > _combat_ceiling_local_y and local_to.y > _combat_ceiling_local_y:
+		return false
+	return true
+
+
+static func _refresh_vol_ray_budget() -> void:
+	var pf := Engine.get_physics_frames()
+	if pf == _vol_ray_budget_frame:
+		return
+	_vol_ray_budget_frame = pf
+	_vol_ray_budget_left = MAX_BULLET_VOLUME_RAYCASTS_GLOBAL
+
+
+static func _take_vol_ray_budget() -> bool:
+	_refresh_vol_ray_budget()
+	if _vol_ray_budget_left <= 0:
+		return false
+	_vol_ray_budget_left -= 1
+	return true
+
+
+static func point_inside_play_bounds(world_pos: Vector3, margin: float = 0.0) -> bool:
+	if not _play_bounds_valid:
+		return true
+	var local := world_pos - _play_origin
+	var half := _play_half_xz + margin
+	return (
+		absf(local.x) <= half
+		and absf(local.z) <= half
+		and local.y >= _play_y_min - margin
+		and local.y <= _play_y_max + margin
+	)
+
+
+static func _segment_intersects_play_bounds(world_from: Vector3, world_to: Vector3) -> bool:
+	if not _play_bounds_valid:
+		return true
+	var local_from := world_from - _play_origin
+	var local_to := world_to - _play_origin
+	var dir := local_to - local_from
+	var tmin := 0.0
+	var tmax := 1.0
+	var half := _play_half_xz
+	var axes: Array = [
+		[dir.x, local_from.x, -half, half],
+		[dir.y, local_from.y, _play_y_min, _play_y_max],
+		[dir.z, local_from.z, -half, half],
+	]
+	for ax: Array in axes:
+		var d: float = float(ax[0])
+		var f: float = float(ax[1])
+		var b0: float = float(ax[2])
+		var b1: float = float(ax[3])
+		if absf(d) < 1e-8:
+			if f < b0 or f > b1:
+				return false
+			continue
+		var t0 := (b0 - f) / d
+		var t1 := (b1 - f) / d
+		if t0 > t1:
+			var swap := t0
+			t0 = t1
+			t1 = swap
+		tmin = maxf(tmin, t0)
+		tmax = minf(tmax, t1)
+		if tmin > tmax:
+			return false
+	return true
+
+
 # Bullets skip destructible chunk shapes in PhysicsServer raycasts (thousands of
 # box colliders on one layer) and resolve hits analytically per volume instead.
 # Returns { "hit": Dictionary, "terrain_near": bool } — terrain_near means the
@@ -347,23 +489,37 @@ static func query_bullet_ray(
 	var seg_len_sq := seg.length_squared()
 	if seg_len_sq < 1e-8:
 		return {"hit": {}, "terrain_near": false}
+	if not segment_needs_destruct_query(world_from, world_to):
+		return {"hit": {}, "terrain_near": false}
 	var _t := Time.get_ticks_usec()
 	_ensure_vol_grid()
 	var seg_len: float = sqrt(seg_len_sq)
 	var seg_dir: Vector3 = seg / seg_len
-	var candidates: Array[int] = _vol_grid_candidates(world_from, world_to, BULLET_VOL_CELL)
-	if candidates.is_empty():
-		candidates = _vol_grid_candidates(world_from, world_to, BULLET_VOL_CELL * 3.0)
-	var terrain_near := not candidates.is_empty()
+	var grid_candidates: Array[int] = _vol_grid_candidates(world_from, world_to, BULLET_VOL_CELL)
+	if grid_candidates.is_empty():
+		grid_candidates = _vol_grid_candidates(world_from, world_to, BULLET_VOL_CELL * 3.0)
 	if BenchFlags.active:
 		_bench_ray_calls += 1
+		_bench_grid_candidate_sum += grid_candidates.size()
+	# Grid cells over-fetch (sphere bounds). Keep only volumes whose OBB the segment
+	# actually crosses — open-air shots skip chunk narrowphase entirely.
+	var candidates: Array[int] = _filter_volume_hits(world_from, world_to, grid_candidates)
+	if BenchFlags.active:
 		_bench_candidate_sum += candidates.size()
+	if candidates.is_empty():
+		Trace.prof("bullet_destruct_ray", Time.get_ticks_usec() - _t)
+		return {"hit": {}, "terrain_near": false}
 	_sort_candidates_by_ray_t(world_from, seg_dir, candidates)
 	var best_t := INF
 	var best_hit := {}
 	var ray_to := world_to
+	var raycasts := 0
 	var i := 0
 	while i < candidates.size():
+		if raycasts >= MAX_BULLET_VOLUME_RAYCASTS:
+			break
+		if raycasts > 0 and not _take_vol_ray_budget():
+			break
 		var id: int = candidates[i]
 		i += 1
 		if not _registered_index_by_id.has(id):
@@ -371,6 +527,10 @@ static func query_bullet_ray(
 		var idx: int = int(_registered_index_by_id[id])
 		var center: Vector3 = _registered_centers[idx]
 		var bound: float = _registered_bounds[idx]
+		if best_t < INF:
+			var along: float = (center - world_from).dot(seg_dir)
+			if along - bound > best_t + 0.05:
+				break
 		if not _segment_may_hit_volume(world_from, ray_to, center, bound):
 			continue
 		var vol: Node3D = _registered_vols[idx]
@@ -379,6 +539,7 @@ static func query_bullet_ray(
 			continue
 		if not vol.has_method("raycast_chunks"):
 			continue
+		raycasts += 1
 		if BenchFlags.active:
 			_bench_volumes_raycast += 1
 		var hit: Dictionary = vol.call("raycast_chunks", world_from, ray_to, shooter_exclude)
@@ -390,16 +551,18 @@ static func query_bullet_ray(
 			best_hit = hit
 			ray_to = world_from + seg_dir * best_t
 	Trace.prof("bullet_destruct_ray", Time.get_ticks_usec() - _t)
-	return {"hit": best_hit, "terrain_near": terrain_near}
+	return {"hit": best_hit, "terrain_near": not best_hit.is_empty()}
 
 
 static var _bench_ray_calls: int = 0
+static var _bench_grid_candidate_sum: int = 0
 static var _bench_candidate_sum: int = 0
 static var _bench_volumes_raycast: int = 0
 
 
 static func reset_bench_bullet_ray_stats() -> void:
 	_bench_ray_calls = 0
+	_bench_grid_candidate_sum = 0
 	_bench_candidate_sum = 0
 	_bench_volumes_raycast = 0
 
@@ -407,9 +570,30 @@ static func reset_bench_bullet_ray_stats() -> void:
 static func bench_bullet_ray_stats() -> Dictionary:
 	return {
 		"calls": _bench_ray_calls,
+		"grid_candidates_avg": float(_bench_grid_candidate_sum) / maxf(1.0, float(_bench_ray_calls)),
 		"candidates_avg": float(_bench_candidate_sum) / maxf(1.0, float(_bench_ray_calls)),
 		"volumes_raycast": _bench_volumes_raycast,
 	}
+
+
+static func _filter_volume_hits(world_from: Vector3, world_to: Vector3, ids: Array[int]) -> Array[int]:
+	var out: Array[int] = []
+	for id: int in ids:
+		if not _registered_index_by_id.has(id):
+			continue
+		var idx: int = int(_registered_index_by_id[id])
+		var vol: Node3D = _registered_vols[idx]
+		if not is_instance_valid(vol):
+			_unregister_id(id)
+			continue
+		if vol.has_method("segment_may_hit_volume"):
+			if vol.call("segment_may_hit_volume", world_from, world_to):
+				out.append(id)
+		elif _segment_may_hit_volume(
+			world_from, world_to, _registered_centers[idx], _registered_bounds[idx]
+		):
+			out.append(id)
+	return out
 
 
 # Legacy — pierce/ghost paths only refresh shooter excludes; terrain uses query in _intersect_ray.
