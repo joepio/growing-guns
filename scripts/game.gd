@@ -388,7 +388,7 @@ func _ready() -> void:
 	# newer than the build the user is running.
 	add_child(preload("res://scripts/version_check.gd").new())
 	_build_tab_overlay()
-	# Dev panel (`.`) — cheats. Only built in debug runs (editor + debug
+	# Dev panel (F1 / `.`) — cheats. Only built in debug runs (editor + debug
 	# exports) or when --dev is on the command line. Released zips ship
 	# without it so the `.` panel + G/P/M/1-5 cheat hotkeys are dormant.
 	if _dev_tools_enabled():
@@ -751,11 +751,13 @@ func _input(event: InputEvent) -> void:
 			_hide_tab_overlay()
 		get_viewport().set_input_as_handled()
 		return
-	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_PERIOD:
-		if _dev_panel != null:
-			_dev_panel.toggle()
-			_sync_mouse_mode()
-		return
+	if event is InputEventKey and event.pressed and not event.echo:
+		if event.keycode == KEY_F1 or event.keycode == KEY_PERIOD:
+			if _dev_panel != null:
+				_dev_panel.toggle()
+				_sync_mouse_mode()
+				get_viewport().set_input_as_handled()
+			return
 
 	# Cheat hotkeys (G / P / M / L / I / 0 / 1-9 / ?) — only when dev tools are enabled.
 	if event is InputEventKey and event.pressed and not event.echo and _dev_panel != null:

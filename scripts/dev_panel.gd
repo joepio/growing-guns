@@ -117,7 +117,7 @@ func show_help() -> void:
 		"7: Big Mag  ·  Shift+7: remove\n" + \
 		"8: Precision  ·  Shift+8: remove\n" + \
 		"9: Fast Rounds  ·  Shift+9: remove\n" + \
-		".: Full Dev Panel"
+		"F1: Full Dev Panel  ·  .: same"
 	# Use smaller font size (24) for the help block
 	_game._announce.rpc(help_text, 10.0, 24)
 
@@ -129,8 +129,8 @@ func _refresh() -> void:
 		return
 	for c in _content.get_children():
 		c.queue_free()
-	_heading("DEV  ·  . to close", Color(0.5, 0.9, 1.0), 16)
-	_note("G god · P passive AI · M restart · L lava · K air strike · J ion cannon · I pickup · 0 reset · 1-9 cards (Shift removes) · ? help")
+	_heading("DEV  ·  F1 to close", Color(0.5, 0.9, 1.0), 16)
+	_note("F1 panel · G god · P passive AI · M restart · L lava · K air strike · J ion cannon · I pickup · 0 reset · 1-9 cards (Shift removes) · ? help")
 	_toggle_row("Passive AI (stationary, no shooting)", _game.bots_hold_fire, func(v: bool) -> void:
 		_game.bots_hold_fire = v
 		call_deferred("_refresh"))
