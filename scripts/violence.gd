@@ -3136,8 +3136,41 @@ static func spawn_impact(scene: Node, pos: Vector3, color: Color = Color(1.0, 0.
 		tw.tween_property(mat, "albedo_color", Color(dust_color.r, dust_color.g, dust_color.b, 0.0), 0.4)
 		tw.chain().tween_callback(dust.queue_free)
 
-# Brief high-intensity beam for hitscan bullets. Rendered for 1-2 frames
-# as a bright white streak.
+# Brief high-intensity beam for hitscan bullets — HDR additive line with bloom.
+static var _laser_line_mesh: BoxMesh = null
+static var _laser_tracer_shader: Shader = null
+static var _laser_tracer_mat_templates: Dictionary = {}
+
+
+static func _get_laser_line_mesh() -> BoxMesh:
+	if _laser_line_mesh == null:
+		_laser_line_mesh = BoxMesh.new()
+		_laser_line_mesh.size = Vector3.ONE
+	return _laser_line_mesh
+
+
+static func _get_laser_tracer_shader() -> Shader:
+	if _laser_tracer_shader == null:
+		_laser_tracer_shader = load("res://shaders/laser_tracer.gdshader") as Shader
+	return _laser_tracer_shader
+
+
+static func _create_laser_tracer_material(alpha: float) -> ShaderMaterial:
+	var key := int(clampf(alpha, 0.0, 1.0) * 32.0)
+	var template: ShaderMaterial = _laser_tracer_mat_templates.get(key)
+	if template == null:
+		template = ShaderMaterial.new()
+		template.shader = _get_laser_tracer_shader()
+		var a := float(key) / 32.0
+		template.set_shader_parameter("beam_color", Color(1.0, 0.96, 0.88, a if a > 0.01 else 1.0))
+		template.set_shader_parameter("bloom_gain", 14.0 if alpha >= 0.99 else 7.0)
+		template.set_shader_parameter("beam_radius", 0.013 if alpha >= 0.99 else 0.009)
+		_laser_tracer_mat_templates[key] = template
+	var mat := template.duplicate() as ShaderMaterial
+	mat.set_shader_parameter("alpha_scale", 1.0)
+	return mat
+
+
 static func spawn_laser_tracer(scene: Node, from: Vector3, to: Vector3, alpha: float = 1.0) -> void:
 	if scene == null:
 		return
@@ -3147,52 +3180,41 @@ static func spawn_laser_tracer(scene: Node, from: Vector3, to: Vector3, alpha: f
 	alpha = clampf(alpha, 0.0, 1.0)
 
 	var line := MeshInstance3D.new()
-	var mesh := BoxMesh.new()
-	# Laser beam thickness. Long axis is Z.
-	mesh.size = Vector3(0.025, 0.025, dist)
-	line.mesh = mesh
-
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	if alpha < 1.0:
-		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
-		mat.no_depth_test = true
-	mat.albedo_color = Color(1.0, 1.0, 1.0, alpha)
-	mat.emission_enabled = true
-	mat.emission = Color.WHITE
-	mat.emission_energy_multiplier = 22.0 * (0.35 if alpha < 1.0 else 1.0)
+	line.mesh = _get_laser_line_mesh()
+	var mat := _create_laser_tracer_material(alpha)
+	mat.set_shader_parameter("head_world", from)
+	mat.set_shader_parameter("tail_world", to)
 	line.material_override = mat
 
-	# Add to scene FIRST so global_transform / look_at work in world space.
-	# Then set position and orientation.
 	scene.add_child(line)
+	var thickness := 0.026 if alpha >= 1.0 else 0.016
+	line.scale = Vector3(thickness, thickness, dist)
 	line.global_position = from.lerp(to, 0.5)
 
-	var dir := (to - from).normalized()
-	# If pointing straight up/down, use a different up vector for look_at.
-	if absf(dir.dot(Vector3.UP)) > 0.99:
+	if absf((to - from).normalized().dot(Vector3.UP)) > 0.99:
 		line.look_at(to, Vector3.RIGHT)
 	else:
 		line.look_at(to, Vector3.UP)
 
-	# Bright white-hot flash at the muzzle
 	var light: OmniLight3D = null
 	if alpha >= 1.0:
 		light = OmniLight3D.new()
-		light.light_color = Color.WHITE
-		light.light_energy = 15.0
-		light.omni_range = 5.0
+		light.light_color = Color(1.0, 0.95, 0.85)
+		light.light_energy = 10.0
+		light.omni_range = 4.0
 		scene.add_child(light)
 		light.global_position = from
 
 	var tw := line.create_tween()
-	tw.tween_interval(0.04) # roughly 2-3 frames
+	tw.tween_interval(0.03)
+	tw.tween_method(
+		func(v: float) -> void: mat.set_shader_parameter("alpha_scale", v),
+		1.0, 0.0, 0.055)
 	tw.tween_callback(line.queue_free)
 
 	if light:
 		var ltw := light.create_tween()
-		ltw.tween_property(light, "light_energy", 0.0, 0.1)
+		ltw.tween_property(light, "light_energy", 0.0, 0.08)
 		ltw.tween_callback(light.queue_free)
 
 static var _impact_chip_meshes: Array[Mesh] = []
