@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://bf3esj3661dg6"]
+
+[ext_resource type="Script" path="res://scripts/brick_render_bench.gd" id="1_brickbench"]
+
+[node name="BrickRenderBench" type="Node3D"]
+script = ExtResource("1_brickbench")

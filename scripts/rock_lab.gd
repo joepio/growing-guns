@@ -194,25 +194,11 @@ func _build_damage_showcase(parent: Node3D) -> void:
 	for i: int in DAMAGE_TIERS.size():
 		var x := x0 + float(i) * SHOWCASE_SPACING
 		var dmg: float = DAMAGE_TIERS[i]
-		# Top row: intact mesh + shader cracks only.
+		# Intact mesh with per-brick variation (in-game damage is now GPU-side).
 		intact_blocks.append({
 			"pos": Vector3(x, 3.0, SHOWCASE_Z), "damage": dmg, "cell": Vector3i(i, 0, 0),
 		})
-		# Bottom row: the actual shattered mesh level this damage maps to in game.
-		var level := _showcase_level_for(dmg)
-		var mesh: Mesh = intact_mesh if level <= 0 else DestructibleSolid.get_damage_mesh(level)
-		_add_damage_batch(root, mesh, mat, [{
-			"pos": Vector3(x, 0.2, SHOWCASE_Z), "damage": dmg, "cell": Vector3i(i, 1, 0),
-		}])
 	_add_damage_batch(root, intact_mesh, mat, intact_blocks)
-
-
-func _showcase_level_for(dmg: float) -> int:
-	var lvl := 0
-	for t in DestructibleSolid.DAMAGE_LEVEL_T:
-		if dmg >= float(t):
-			lvl += 1
-	return lvl
 
 
 func _add_damage_batch(parent: Node3D, mesh: Mesh, mat: Material, blocks: Array) -> void:
@@ -234,13 +220,8 @@ func _add_damage_batch(parent: Node3D, mesh: Mesh, mat: Material, blocks: Array)
 	parent.add_child(mmi)
 
 
-func _damage_custom(cell: Vector3i, damage: float) -> Color:
-	var c := _lab_custom_data(cell)
-	# Crack channel (g) encodes damage for the shader: pristine keeps its per-brick
-	# value (<= ~1.57), damage drives it up to 6.0 (see rock_surface.gdshader).
-	if damage > 0.001:
-		c.g = DestructibleSolid.damage_to_crack_channel(damage)
-	return c
+func _damage_custom(cell: Vector3i, _damage: float) -> Color:
+	return _lab_custom_data(cell)
 
 
 # Real destructible wall with a blast punched through the middle, so the crater +

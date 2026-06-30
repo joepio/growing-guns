@@ -16,16 +16,11 @@ const MAX_CHUNKS_PER_AXIS := 6
 const EDGE_JITTER := 0.38
 const MAX_JAGGEDIZE_PER_CARVE := 18
 const MAX_EXPOSURE_JOBS_PER_FRAME := 1
-# Below this VFX quality, exposed chunks stay in the intact MultiMesh (zero extra
-# draws). Existing exposed batches are collapsed back when quality sags.
-const EXPOSURE_SHED_QS := 0.55
-# Surviving chunks swap to progressively more shattered meshes as damage rises.
-# DAMAGE_LEVEL_T[i] is the damage fraction at which mesh level i+1 kicks in; below
-# the first threshold the chunk keeps the intact mesh (shader cracks only).
-const DAMAGE_MESH_LEVELS := 3
-const DAMAGE_LEVEL_T := [0.22, 0.46, 0.72]
 
 const CHUNK_MESH_SUBDIVIDE := 5
+# Hit bodies swap to this denser mesh so the GPU damage carves real jagged
+# geometry; undamaged bodies keep the cheap base mesh (only what you shoot pays).
+const DEFORM_SUBDIVIDE := 12
 # Visual inset — hairline shadow between bricks; keep tight so walls read solid.
 const VISUAL_CHUNK_INSET := 0.992
 
@@ -34,15 +29,24 @@ var _pending_carves: Array[Dictionary] = []
 var _pending_exposure_carves: Array[Dictionary] = []
 var _body_seed: int = 0
 var _mat: Material = null
+# GPU damage: lazily-allocated per-body damage accumulation buffer (VRAM, never
+# read back). Created on first hit; the body swaps to a unique damage material.
+var _dmg_viewport: SubViewport = null
+var _dmg_splatter: Node2D = null
+var _dmg_mat: ShaderMaterial = null
+var _dmg_axis: int = 2
+var _dmg_plane_size: Vector2 = Vector2.ONE
+static var _dmg_brush_tex: Texture2D = null
 var _chunk_cols: Array[CollisionShape3D] = []
-var _chunk_meshes: Dictionary = {}  # chunk id -> Vector2i(damage level 1..3, instance idx)
-var _dmg_mmi: Array[MultiMeshInstance3D] = [null, null, null]
-var _dmg_mm: Array[MultiMesh] = [null, null, null]
-var _dmg_free: Array = [[], [], []]  # free instance indices per level
-var _exposure_shed: bool = false
 var _chunk_grid: Array[CollisionShape3D] = []
 var _intact_mmi: MultiMeshInstance3D = null
 var _intact_mm: MultiMesh = null
+# Damaged-but-alive chunks migrate here: a dense mesh + the damage material, so the
+# GPU carves real geometry on ONLY the chunks actually hit (not whole bodies).
+var _deform_mmi: MultiMeshInstance3D = null
+var _deform_mm: MultiMesh = null
+var _deform_slots: Dictionary = {}  # chunk instance_id -> deform MM index
+var _deform_free: Array[int] = []
 var _grid := Vector3i.ONE
 var _x_edges := PackedFloat32Array()
 var _y_edges := PackedFloat32Array()
@@ -100,6 +104,10 @@ func queue_blast_damage(
 	if radius <= 0.0 or damage <= 0.0:
 		return
 	var local_pos := to_local(world_pos)
+	var local_normal := Vector3.ZERO
+	if hit_normal.length_squared() > 0.0001:
+		local_normal = (global_basis.inverse() * hit_normal).normalized()
+	_splat_damage(local_pos, radius, damage, local_normal)
 	if not _pending_carves.is_empty():
 		var last: Dictionary = _pending_carves[-1]
 		var last_pos: Vector3 = last["pos"] as Vector3
@@ -108,9 +116,6 @@ func queue_blast_damage(
 			last["radius"] = maxf(float(last["radius"]), radius)
 			DestructibleManager.mark_dirty(self)
 			return
-	var local_normal := Vector3.ZERO
-	if hit_normal.length_squared() > 0.0001:
-		local_normal = (global_basis.inverse() * hit_normal).normalized()
 	_pending_carves.append({
 		"pos": local_pos,
 		"radius": radius,
@@ -129,17 +134,171 @@ func queue_carve_world(
 ) -> void:
 	if radius <= 0.0:
 		return
+	var local_pos := to_local(world_pos)
 	var local_normal := Vector3.ZERO
 	if hit_normal.length_squared() > 0.0001:
 		local_normal = (global_basis.inverse() * hit_normal).normalized()
+	_splat_damage(local_pos, radius, 800.0, local_normal)
 	_pending_carves.append({
-		"pos": to_local(world_pos),
+		"pos": local_pos,
 		"radius": radius,
 		"damage": 800.0,
 		"normal": local_normal,
 		"max_depth": max_depth,
 	})
 	DestructibleManager.mark_dirty(self)
+
+
+# 2D canvas drawn into the damage SubViewport; stamps queued splats additively.
+class _DmgSplatter:
+	extends Node2D
+	var pending: Array = []
+	var brush: Texture2D
+	var res: float = 512.0
+
+	func _draw() -> void:
+		for s: Dictionary in pending:
+			var c: Vector2 = (s["uv"] as Vector2) * res
+			var ru: float = float(s["ru"]) * res
+			var rv: float = float(s["rv"]) * res
+			var st: float = float(s["strength"])
+			draw_texture_rect(
+				brush, Rect2(c - Vector2(ru, rv), Vector2(ru * 2.0, rv * 2.0)),
+				false, Color(st, st, st, 1.0))
+		pending.clear()
+
+
+static func _get_dmg_brush() -> Texture2D:
+	if _dmg_brush_tex == null:
+		var n := 128
+		var img := Image.create(n, n, false, Image.FORMAT_RGBA8)
+		for y in n:
+			for x in n:
+				var p := Vector2(float(x) / float(n - 1) - 0.5, float(y) / float(n - 1) - 0.5)
+				var d := p.length() * 2.0
+				var core := clampf(1.0 - d * 0.72, 0.0, 1.0)
+				core = core * core
+				var halo := clampf(1.0 - d, 0.0, 1.0)
+				halo = halo * halo * 0.22
+				img.set_pixel(x, y, Color(1.0, 1.0, 1.0, maxf(core, halo)))
+		_dmg_brush_tex = ImageTexture.create_from_image(img)
+	return _dmg_brush_tex
+
+
+# Lazily build the per-body damage buffer and swap to a unique damage material.
+func _ensure_damage_buffer() -> void:
+	if _dmg_viewport != null or _mat == null:
+		return
+	var s := box_size
+	_dmg_axis = 0
+	if s.y <= s.x and s.y <= s.z:
+		_dmg_axis = 1
+	elif s.z <= s.x and s.z <= s.y:
+		_dmg_axis = 2
+	if _dmg_axis == 0:
+		_dmg_plane_size = Vector2(s.z, s.y)
+	elif _dmg_axis == 1:
+		_dmg_plane_size = Vector2(s.x, s.z)
+	else:
+		_dmg_plane_size = Vector2(s.x, s.y)
+	var res := clampi(int(maxf(_dmg_plane_size.x, _dmg_plane_size.y) * 28.0), 384, 1280)
+
+	_dmg_viewport = SubViewport.new()
+	_dmg_viewport.size = Vector2i(res, res)
+	_dmg_viewport.transparent_bg = false
+	_dmg_viewport.render_target_clear_mode = SubViewport.CLEAR_MODE_ONCE
+	_dmg_viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
+	add_child(_dmg_viewport)
+	var splatter := _DmgSplatter.new()
+	splatter.brush = _get_dmg_brush()
+	splatter.res = float(res)
+	var cmat := CanvasItemMaterial.new()
+	cmat.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
+	splatter.material = cmat
+	_dmg_viewport.add_child(splatter)
+	_dmg_splatter = splatter
+
+	_dmg_mat = (_mat as ShaderMaterial).duplicate() as ShaderMaterial
+	_dmg_mat.set_shader_parameter("damage_enabled", 1.0)
+	_dmg_mat.set_shader_parameter("damage_tex", _dmg_viewport.get_texture())
+	_dmg_mat.set_shader_parameter("dmg_world_to_local", global_transform.affine_inverse())
+	_dmg_mat.set_shader_parameter("dmg_box_size", box_size)
+	_dmg_mat.set_shader_parameter("dmg_tex_size", float(res))
+	_dmg_mat.set_shader_parameter("dmg_crater_depth", 0.85)
+	# NB: the intact (undamaged) chunks keep the cheap base mesh + base material.
+	# Damage is shown only on chunks that migrate into the dense deform batch.
+
+
+# Signed atlas region for a hit: 0=+X 1=-X 2=+Y 3=-Y 4=+Z 5=-Z (matches the shader).
+# Blasts arrive without a normal — splat onto a broad face (the body's thin axis, +).
+func _dmg_region_for_normal(n: Vector3) -> int:
+	if n.length_squared() < 0.01:
+		return _dmg_axis * 2
+	var a := n.abs()
+	if a.x >= a.y and a.x >= a.z:
+		return 0 if n.x > 0.0 else 1
+	if a.y >= a.x and a.y >= a.z:
+		return 2 if n.y > 0.0 else 3
+	return 4 if n.z > 0.0 else 5
+
+
+func _dmg_region_plane(region: int) -> Vector2:
+	if region < 2:
+		return Vector2(box_size.z, box_size.y)
+	if region < 4:
+		return Vector2(box_size.x, box_size.z)
+	return Vector2(box_size.x, box_size.y)
+
+
+func _dmg_region_ruv(l: Vector3, region: int) -> Vector2:
+	var t := Vector3(l.x / box_size.x, l.y / box_size.y, l.z / box_size.z) + Vector3(0.5, 0.5, 0.5)
+	if region < 2:
+		return Vector2(t.z, t.y)
+	if region < 4:
+		return Vector2(t.x, t.z)
+	return Vector2(t.x, t.y)
+
+
+# Queue a damage splat at a body-local hit point (sparse CPU event; the GPU buffer
+# accumulates, never read back). Written into the hit face's signed atlas region
+# (3x2 grid), kept round in world space. Also migrates the chunks the splat covers
+# into the deform batch so damage shows consistently wherever you hit.
+func _splat_damage(local_pos: Vector3, world_radius: float, damage: float, local_normal: Vector3) -> void:
+	_ensure_damage_buffer()
+	if _dmg_splatter == null:
+		return
+	var region := _dmg_region_for_normal(local_normal)
+	var ruv := _dmg_region_ruv(local_pos, region)
+	var plane := _dmg_region_plane(region)
+	# Atlas: 3x2 grid, U compressed by 3, V by 2.
+	var col := region % 3
+	var row := region / 3
+	var atlas_uv := Vector2((float(col) + ruv.x) / 3.0, (float(row) + ruv.y) / 2.0)
+	# Crater is a bit larger than the carve radius so the deformation reads clearly
+	# (a bullet's 0.7m carve makes only a few-pixel splat on a big wall otherwise).
+	var crater := world_radius * 1.4 + 0.25
+	var ru := (crater / maxf(plane.x, 0.01)) / 3.0
+	var rv := (crater / maxf(plane.y, 0.01)) / 2.0
+	# Erosion accumulates with damage so a weak gun wears a chunk down gradually
+	# (roughly tracking its HP), instead of every hit landing a near-full crater.
+	var strength := clampf(damage * 0.013, 0.08, 0.9)
+	_dmg_splatter.pending.append({"uv": atlas_uv, "ru": ru, "rv": rv, "strength": strength})
+	_dmg_splatter.queue_redraw()
+	_dmg_viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
+	for c: CollisionShape3D in _candidate_cols(local_pos, crater * 0.5, 0.0):
+		if is_instance_valid(c) and not bool(c.get_meta("destroyed", false)):
+			_move_chunk_to_deform(c)
+	# A few chips fly off at EVERY hit (not just removal), scaled by damage — a weak
+	# shot flicks a couple of flecks, a heavy round throws a real spray. The debris
+	# FIFO caps keep sustained fire from spamming.
+	var scene := _fx_scene()
+	if scene != null:
+		var wp := to_global(local_pos)
+		var chip_count := clampf(0.12 + damage * 0.013, 0.12, 1.2)
+		var chip_size := TARGET_CELL * (0.3 + minf(damage, 80.0) * 0.005)
+		Violence.spawn_destruction_debris(
+			scene, wp, global_basis, Vector3.ONE * chip_size,
+			_material_base_color(), wp, world_radius, 1, chip_count)
 
 
 func apply_pending_carves() -> bool:
@@ -189,8 +348,10 @@ func apply_pending_carves() -> bool:
 	var damaged: Array[Dictionary] = []  # survivors: {col, dmg_t}
 	for col: CollisionShape3D in touched:
 		var amount: float = float(accum[col])
-		if amount < MIN_ACCUMULATE_DAMAGE:
+		if amount <= 0.0:
 			continue
+		# Persist even small hits into chunk_hp (don't drop sub-threshold damage), so
+		# sustained weak fire eventually breaks a tough chunk instead of being ignored.
 		var chunk_size: Vector3 = col.get_meta("chunk_size") as Vector3
 		var maxhp: float = _chunk_max_health(chunk_size)
 		var old_hp: float = float(col.get_meta("chunk_hp", maxhp))
@@ -202,10 +363,10 @@ func apply_pending_carves() -> bool:
 			var dmg_t: float = clampf(1.0 - new_hp / maxhp, 0.0, 1.0)
 			if dmg_t > 0.08:
 				damaged.append({"col": col, "dmg_t": dmg_t})
-	# Surviving chunks show progressive cracks (and battered geometry past a
-	# threshold) before they're ever removed.
+	# Damaged-but-surviving chunks migrate into the dense deform batch so the GPU
+	# carves real geometry on just the chunks that were hit.
 	for d: Dictionary in damaged:
-		_apply_chunk_damage_visual(d["col"] as CollisionShape3D, float(d["dmg_t"]))
+		_move_chunk_to_deform(d["col"] as CollisionShape3D)
 	if to_remove_cols.is_empty():
 		return not damaged.is_empty()
 
@@ -217,7 +378,7 @@ func apply_pending_carves() -> bool:
 	var max_blood_cleanup_r := 0.0
 	for col: CollisionShape3D in to_remove_cols:
 		_hide_intact_instance(col)
-		_hide_exposed_chunk(col)
+		_remove_chunk_from_deform(col)
 		burst_center += col.global_position
 		burst_size += col.get_meta("chunk_size") as Vector3
 		exposure_center += col.get_meta("chunk_center_local") as Vector3
@@ -347,7 +508,6 @@ func _add_chunk(center: Vector3, chunk_size: Vector3, cell: Vector3i) -> void:
 	col.set_meta("chunk_cell", cell)
 	col.set_meta("chunk_half_diag", chunk_size.length() * 0.5)
 	col.set_meta("chunk_hp", _chunk_max_health(chunk_size))
-	col.set_meta("dmg_level", 0)
 	col.set_meta("multimesh_index", _chunk_cols.size())
 	col.set_meta("chunk_custom", _chunk_custom_data(cell))
 	add_child(col)
@@ -401,169 +561,89 @@ func _hide_intact_instance(col: CollisionShape3D) -> void:
 	_intact_mm.set_instance_transform(idx, Transform3D(Basis.IDENTITY.scaled(Vector3.ZERO), center))
 
 
-func _restore_intact_instance(col: CollisionShape3D) -> void:
-	if _intact_mm == null:
+func _ensure_deform_mm() -> void:
+	if _deform_mmi != null:
 		return
-	var idx: int = int(col.get_meta("multimesh_index", -1))
-	if idx < 0 or idx >= _intact_mm.instance_count:
+	_ensure_damage_buffer()
+	if _dmg_mat == null:
 		return
-	var center: Vector3 = col.get_meta("chunk_center_local") as Vector3
-	var chunk_size: Vector3 = col.get_meta("chunk_size") as Vector3
-	_intact_mm.set_instance_transform(
-		idx, _chunk_visual_transform(center, chunk_size, col.get_meta("chunk_cell") as Vector3i))
+	_deform_mmi = MultiMeshInstance3D.new()
+	_deform_mmi.name = "DeformChunks"
+	_deform_mmi.material_override = _dmg_mat
+	_deform_mm = MultiMesh.new()
+	_deform_mm.transform_format = MultiMesh.TRANSFORM_3D
+	_deform_mm.use_custom_data = true
+	_deform_mm.mesh = get_deform_chunk_mesh()
+	_deform_mm.instance_count = 0
+	_deform_mmi.multimesh = _deform_mm
+	_deform_mmi.custom_aabb = AABB(-box_size * 0.5, box_size)
+	add_child(_deform_mmi)
 
 
-func _ensure_dmg_mm(level: int) -> MultiMesh:
-	var li: int = level - 1
-	if _dmg_mm[li] != null:
-		return _dmg_mm[li]
-	var mmi := MultiMeshInstance3D.new()
-	mmi.name = "DamageChunksL%d" % level
-	mmi.material_override = _mat
-	var mm := MultiMesh.new()
-	mm.transform_format = MultiMesh.TRANSFORM_3D
-	mm.use_custom_data = true
-	mm.mesh = get_damage_mesh(level)
-	mm.instance_count = 0
-	mmi.multimesh = mm
-	mmi.custom_aabb = AABB(-box_size * 0.5, box_size)
-	mmi.add_to_group("destructible_exposed_mm")
-	add_child(mmi)
-	_dmg_mmi[li] = mmi
-	_dmg_mm[li] = mm
-	return mm
-
-
-func _dmg_level_for(dmg_t: float) -> int:
-	var lvl := 0
-	for t in DAMAGE_LEVEL_T:
-		if dmg_t >= float(t):
-			lvl += 1
-	return lvl
-
-
-func _update_exposure_lod() -> void:
-	var qs: float = Violence.vfx_quality_scale()
-	var should_shed := qs <= EXPOSURE_SHED_QS
-	if should_shed and not _exposure_shed:
-		_pending_exposure_carves.clear()
-		_shed_all_exposed_visuals()
-		_exposure_shed = true
-	elif not should_shed and _exposure_shed:
-		_exposure_shed = false
-
-
-func _shed_all_exposed_visuals() -> void:
-	var shed := 0
-	for col: CollisionShape3D in _chunk_cols:
-		if not is_instance_valid(col) or bool(col.get_meta("destroyed", false)):
-			continue
-		if int(col.get_meta("dmg_level", 0)) <= 0:
-			continue
-		_restore_intact_instance(col)
-		col.set_meta("dmg_level", 0)
-		shed += 1
-	if shed > 0:
-		DestructibleManager.note_exposed_chunk(-shed)
-	_chunk_meshes.clear()
-	for li: int in DAMAGE_MESH_LEVELS:
-		(_dmg_free[li] as Array).clear()
-		if _dmg_mm[li] != null:
-			_dmg_mm[li].instance_count = 0
-
-
-# Move a surviving chunk to the mesh batch for `level` (0 = intact mesh, 1..3 =
-# progressively shattered). Carries the chunk's current crack custom data along.
-func _set_chunk_dmg_level(col: CollisionShape3D, level: int) -> void:
-	var cur: int = int(col.get_meta("dmg_level", 0))
-	if level == cur:
+# Move a damaged-but-alive chunk out of the cheap intact batch into the dense
+# deform batch (idempotent). Only chunks that actually took a hit pay the verts.
+func _move_chunk_to_deform(col: CollisionShape3D) -> void:
+	var id: int = col.get_instance_id()
+	if _deform_slots.has(id):
 		return
-	if level > cur:
-		_spawn_chip_debris(col)  # a few flecks fly off each time it fractures further
-	if level > 0 and Violence.vfx_quality_scale() <= EXPOSURE_SHED_QS:
-		return  # low quality: stay in the intact batch, no extra draws
-	if cur > 0:
-		_remove_from_dmg_mm(col)
-	if level <= 0:
-		_restore_intact_instance(col)
-		col.set_meta("dmg_level", 0)
-		if cur > 0:
-			DestructibleManager.note_exposed_chunk(-1)
+	_ensure_deform_mm()
+	if _deform_mm == null:
 		return
-	_hide_intact_instance(col)
-	var mm := _ensure_dmg_mm(level)
-	var free: Array = _dmg_free[level - 1]
 	var idx: int
-	if not free.is_empty():
-		idx = int(free.pop_back())
+	var grew := false
+	if not _deform_free.is_empty():
+		idx = int(_deform_free.pop_back())
 	else:
-		idx = mm.instance_count
-		mm.instance_count = idx + 1
-	mm.set_instance_transform(
-		idx, _chunk_visual_transform(
-			col.get_meta("chunk_center_local") as Vector3,
-			col.get_meta("chunk_size") as Vector3,
-			col.get_meta("chunk_cell") as Vector3i))
-	mm.set_instance_custom_data(idx, col.get_meta("chunk_custom") as Color)
-	_chunk_meshes[col.get_instance_id()] = Vector2i(level, idx)
-	col.set_meta("dmg_level", level)
-	if cur == 0:
-		DestructibleManager.note_exposed_chunk(1)
+		idx = _deform_mm.instance_count
+		_deform_mm.instance_count = idx + 1
+		grew = true
+	_deform_slots[id] = idx
+	# Growing instance_count can wipe the existing instance buffer in Godot, which
+	# would silently blank out previously-migrated chunks (visible-but-alive bug).
+	# So after a grow, re-apply EVERY slot; otherwise just set the reused slot.
+	if grew:
+		_refresh_all_deform_instances()
+	else:
+		_set_deform_instance(idx, col)
+	_hide_intact_instance(col)
 
 
-func _spawn_chip_debris(col: CollisionShape3D) -> void:
-	var scene := _fx_scene()
-	if scene == null:
-		return
-	var world_pos: Vector3 = to_global(col.get_meta("chunk_center_local") as Vector3)
-	# Small chip puff at the fracture — count-scaled down to a few flecks, not a
-	# full removal burst. Merges with concurrent bursts and obeys the debris caps.
-	Violence.spawn_destruction_debris(
-		scene, world_pos, global_basis, (col.get_meta("chunk_size") as Vector3) * 0.5,
-		_material_base_color(), world_pos, 0.5, 1, 0.4)
+func _set_deform_instance(idx: int, col: CollisionShape3D) -> void:
+	_deform_mm.set_instance_transform(idx, _chunk_visual_transform(
+		col.get_meta("chunk_center_local") as Vector3,
+		col.get_meta("chunk_size") as Vector3,
+		col.get_meta("chunk_cell") as Vector3i))
+	_deform_mm.set_instance_custom_data(idx, col.get_meta("chunk_custom") as Color)
 
 
-func _remove_from_dmg_mm(col: CollisionShape3D) -> void:
+# Re-apply all instance data (active slots from their chunk, all others zeroed) —
+# defends against MultiMesh.instance_count resizes clearing the buffer.
+func _refresh_all_deform_instances() -> void:
+	var active: Dictionary = {}
+	for sid: int in _deform_slots:
+		var c: Object = instance_from_id(sid)
+		if is_instance_valid(c) and c is CollisionShape3D:
+			active[int(_deform_slots[sid])] = c
+	for i: int in _deform_mm.instance_count:
+		if active.has(i):
+			_set_deform_instance(i, active[i] as CollisionShape3D)
+		else:
+			_deform_mm.set_instance_transform(
+				i, Transform3D(Basis.IDENTITY.scaled(Vector3.ZERO), Vector3.ZERO))
+
+
+func _remove_chunk_from_deform(col: CollisionShape3D) -> void:
 	var id: int = col.get_instance_id()
-	if not _chunk_meshes.has(id):
+	if not _deform_slots.has(id):
 		return
-	var lv_idx: Vector2i = _chunk_meshes[id]
-	_chunk_meshes.erase(id)
-	var mm: MultiMesh = _dmg_mm[lv_idx.x - 1]
-	if mm != null and lv_idx.y >= 0 and lv_idx.y < mm.instance_count:
-		mm.set_instance_transform(
-			lv_idx.y, Transform3D(Basis.IDENTITY.scaled(Vector3.ZERO),
-				col.get_meta("chunk_center_local") as Vector3))
-		(_dmg_free[lv_idx.x - 1] as Array).append(lv_idx.y)
+	var idx: int = _deform_slots[id]
+	_deform_slots.erase(id)
+	if _deform_mm != null and idx >= 0 and idx < _deform_mm.instance_count:
+		_deform_mm.set_instance_transform(idx, Transform3D(
+			Basis.IDENTITY.scaled(Vector3.ZERO), col.get_meta("chunk_center_local") as Vector3))
+		_deform_free.append(idx)
 
 
-# Progressive damage on a surviving chunk: write the damage level into the crack
-# channel (g) of its INSTANCE_CUSTOM and swap it to the matching shattered mesh.
-# Keeps the intact batch's custom data current so LOD shed/restore preserves it.
-func _apply_chunk_damage_visual(col: CollisionShape3D, dmg_t: float) -> void:
-	var c: Color = col.get_meta("chunk_custom") as Color
-	c.g = damage_to_crack_channel(dmg_t)
-	col.set_meta("chunk_custom", c)
-	var level: int = _dmg_level_for(dmg_t)
-	if level != int(col.get_meta("dmg_level", 0)):
-		_set_chunk_dmg_level(col, level)
-	var midx: int = int(col.get_meta("multimesh_index", -1))
-	if _intact_mm != null and midx >= 0 and midx < _intact_mm.instance_count:
-		_intact_mm.set_instance_custom_data(midx, c)
-	var id: int = col.get_instance_id()
-	if _chunk_meshes.has(id):
-		var lv_idx: Vector2i = _chunk_meshes[id]
-		var mm: MultiMesh = _dmg_mm[lv_idx.x - 1]
-		if mm != null and lv_idx.y >= 0 and lv_idx.y < mm.instance_count:
-			mm.set_instance_custom_data(lv_idx.y, c)
-
-
-func _hide_exposed_chunk(col: CollisionShape3D) -> void:
-	if int(col.get_meta("dmg_level", 0)) <= 0:
-		return
-	_remove_from_dmg_mm(col)
-	col.set_meta("dmg_level", 0)
-	DestructibleManager.note_exposed_chunk(-1)
 
 
 func _count_chunks() -> int:
@@ -630,8 +710,6 @@ func _fx_scene() -> Node:
 
 
 func _jaggedize_exposed_chunks(local_center: Vector3, radius: float) -> void:
-	if Violence.vfx_quality_scale() <= EXPOSURE_SHED_QS:
-		return
 	var jag_cap := MAX_JAGGEDIZE_PER_CARVE
 	if PerfGovernor and PerfGovernor.quality_scale < 0.75:
 		jag_cap = maxi(6, MAX_JAGGEDIZE_PER_CARVE / 3)
@@ -639,11 +717,7 @@ func _jaggedize_exposed_chunks(local_center: Vector3, radius: float) -> void:
 	for col: CollisionShape3D in _candidate_cols(local_center, radius, TARGET_CELL * 0.75):
 		if jaggedized >= jag_cap:
 			return
-		if (
-				not is_instance_valid(col)
-				or bool(col.get_meta("destroyed", false))
-				or int(col.get_meta("dmg_level", 0)) >= DAMAGE_MESH_LEVELS
-			):
+		if not is_instance_valid(col) or bool(col.get_meta("destroyed", false)):
 			continue
 		var center: Vector3 = col.get_meta("chunk_center_local") as Vector3
 		var half_diag: float = float(col.get_meta("chunk_half_diag"))
@@ -659,9 +733,6 @@ func _jaggedize_exposed_chunks(local_center: Vector3, radius: float) -> void:
 		var maxhp: float = _chunk_max_health(chunk_size)
 		var cur_hp: float = float(col.get_meta("chunk_hp", maxhp))
 		col.set_meta("chunk_hp", minf(cur_hp, maxhp * (1.0 - halo_dmg)))
-		var eff_dmg: float = clampf(
-			1.0 - float(col.get_meta("chunk_hp")) / maxhp, 0.0, 1.0)
-		_apply_chunk_damage_visual(col, eff_dmg)
 		jaggedized += 1
 
 
@@ -677,74 +748,15 @@ static func get_stone_block_mesh() -> Mesh:
 	return _chunk_unit_mesh()
 
 
-static var _cached_dmg_meshes: Array = [null, null, null, null]  # index 1..3 used
+static var _cached_deform_mesh: Mesh = null
 
 
-# Progressively shattered variants of the hand-hewn block (level 1..3), same unit
-# bounds. Struck stone spalls along flat fracture planes — angular chips, not a
-# smooth dent — with more and deeper cuts (plus surface roughening) per level.
-static func get_damage_mesh(level: int) -> Mesh:
-	level = clampi(level, 1, DAMAGE_MESH_LEVELS)
-	if _cached_dmg_meshes[level] == null:
-		_cached_dmg_meshes[level] = _build_damage_mesh(level)
-	return _cached_dmg_meshes[level]
-
-
-static func get_battered_stone_mesh() -> Mesh:
-	return get_damage_mesh(DAMAGE_MESH_LEVELS)
-
-
-# Maps a 0..1 damage fraction to the INSTANCE_CUSTOM.g crack channel the rock
-# shader reads: pristine bricks sit at <= ~1.57, damage drives g up to 6.0.
-static func damage_to_crack_channel(damage: float) -> float:
-	return 1.6 + clampf(damage, 0.0, 1.0) * 4.4
-
-
-static func _build_damage_mesh(level: int) -> ArrayMesh:
-	var box := BoxMesh.new()
-	box.size = Vector3.ONE
-	box.subdivide_width = CHUNK_MESH_SUBDIVIDE
-	box.subdivide_height = CHUNK_MESH_SUBDIVIDE
-	box.subdivide_depth = CHUNK_MESH_SUBDIVIDE
-	var st := SurfaceTool.new()
-	st.create_from(box, 0)
-	var mdt := MeshDataTool.new()
-	mdt.create_from_surface(st.commit(), 0)
-	var rng := RandomNumberGenerator.new()
-	rng.seed = hash(["damage_mesh_v1", level])
-	var lt: float = float(level - 1) / float(maxi(1, DAMAGE_MESH_LEVELS - 1))  # 0..1
-	var cuts: int = level * 2                       # L1=2, L2=4, L3=6 fracture planes
-	var depth_lo: float = lerpf(0.52, 0.3, lt)      # deeper cuts = bigger chunks gone
-	var depth_hi: float = lerpf(0.64, 0.46, lt)
-	var rough: float = lerpf(0.012, 0.042, lt)      # inward facet roughening
-	var planes: Array[Dictionary] = []
-	for _i: int in cuts:
-		# Bias toward edges/corners: zero one axis ~⅓ of the time for edge shears.
-		var corner := Vector3(
-			signf(rng.randf() - 0.5), signf(rng.randf() - 0.5), signf(rng.randf() - 0.5))
-		if rng.randf() < 0.33:
-			corner[rng.randi() % 3] = 0.0
-		var nrm := (corner + Vector3(
-			rng.randf_range(-0.4, 0.4),
-			rng.randf_range(-0.4, 0.4),
-			rng.randf_range(-0.4, 0.4))).normalized()
-		planes.append({"n": nrm, "d": rng.randf_range(depth_lo, depth_hi)})
-	for i: int in mdt.get_vertex_count():
-		var p := _sculpt_hand_hewn_vertex(mdt.get_vertex(i))
-		for plane: Dictionary in planes:
-			var nrm: Vector3 = plane["n"]
-			var over: float = p.dot(nrm) - float(plane["d"])
-			if over > 0.0:
-				p -= nrm * over  # clamp onto the fracture plane → flat angular chip
-		# Inward-only roughening so facets read as broken stone, not clean-cut.
-		p -= p.normalized() * (rng.randf() * rough)
-		mdt.set_vertex(i, p)
-	var sculpted := ArrayMesh.new()
-	mdt.commit_to_surface(sculpted)
-	var regen := SurfaceTool.new()
-	regen.create_from(sculpted, 0)
-	regen.generate_normals()
-	return regen.commit()
+# Denser hand-hewn mesh used only by bodies that have been hit, so the GPU damage
+# vertex displacement has enough vertices to carve jagged geometry.
+static func get_deform_chunk_mesh() -> Mesh:
+	if _cached_deform_mesh == null:
+		_cached_deform_mesh = _build_hand_hewn_stone_mesh(DEFORM_SUBDIVIDE)
+	return _cached_deform_mesh
 
 
 func _running_bond_shift(cell: Vector3i) -> Vector3:
@@ -783,12 +795,12 @@ static func _chunk_unit_mesh() -> Mesh:
 	return _cached_chunk_mesh
 
 
-static func _build_hand_hewn_stone_mesh() -> ArrayMesh:
+static func _build_hand_hewn_stone_mesh(subdiv: int = CHUNK_MESH_SUBDIVIDE) -> ArrayMesh:
 	var box := BoxMesh.new()
 	box.size = Vector3.ONE
-	box.subdivide_width = CHUNK_MESH_SUBDIVIDE
-	box.subdivide_height = CHUNK_MESH_SUBDIVIDE
-	box.subdivide_depth = CHUNK_MESH_SUBDIVIDE
+	box.subdivide_width = subdiv
+	box.subdivide_height = subdiv
+	box.subdivide_depth = subdiv
 	var st := SurfaceTool.new()
 	st.create_from(box, 0)
 	var base_mesh: ArrayMesh = st.commit()
@@ -802,6 +814,7 @@ static func _build_hand_hewn_stone_mesh() -> ArrayMesh:
 	var regen := SurfaceTool.new()
 	regen.create_from(sculpted, 0)
 	regen.generate_normals()
+	regen.generate_tangents()  # needed for GPU-damage crater normal perturbation
 	return regen.commit()
 
 

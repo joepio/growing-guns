@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://bgpudestructlab01"]
+
+[ext_resource type="Script" path="res://scripts/gpu_destruction_lab.gd" id="1_gpudestruct"]
+
+[node name="GpuDestructionLab" type="Node3D"]
+script = ExtResource("1_gpudestruct")
