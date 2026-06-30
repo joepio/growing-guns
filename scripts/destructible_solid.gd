@@ -1104,10 +1104,4 @@ static func _sculpt_hand_hewn_vertex(p: Vector3) -> Vector3:
 
 
 func _material_base_color() -> Color:
-	if _mat is StandardMaterial3D:
-		return (_mat as StandardMaterial3D).albedo_color
-	if _mat is ShaderMaterial:
-		var bc = (_mat as ShaderMaterial).get_shader_parameter("base_color")
-		if bc is Color:
-			return bc
-	return Color(0.45, 0.44, 0.42)
+	return ArenaGenerator.rock_debris_color(_mat)

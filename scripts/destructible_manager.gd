@@ -18,6 +18,11 @@ static var _registered_index_by_id: Dictionary = {}
 # Spatial broadphase for bullet rays — most arena tiles are separate volumes, so
 # scanning all ~400+ registrations per projectile per tick was the spike source.
 const BULLET_VOL_CELL := 12.0
+const RIFLE_CHIP_DAMAGE_BASE := 9.0
+const RIFLE_CHIP_DAMAGE_PER_RATIO := 7.0
+const RIFLE_CHIP_RADIUS_BASE := 0.7
+const RIFLE_CHIP_RADIUS_PER_RATIO := 0.045
+const RIFLE_CHIP_RADIUS_MAX := 2.2
 # After grid broadphase, at most this many volumes run chunk narrowphase per ray.
 const MAX_BULLET_VOLUME_RAYCASTS := 8
 # Hard cap across all bullets per physics tick — stops mag-dump sky spam from
@@ -99,10 +104,17 @@ static func carve_from_hit(
 	if BenchFlags.active and BenchFlags.no_destruction:
 		return
 	if explosive_radius <= 0.0:
-		# Rifle hits chip HP locally so crack wear shows before fracture.
+		# Rifle hits chip chunk HP locally. dmg_ratio is bullet_damage / BASE_DAMAGE
+		# (uncapped) — high damage cards should one-shot a brick when chip_dmg
+		# exceeds ~CHUNK_BASE_HEALTH + volume scaling (~50–120 typical).
 		if _collider_is_destructible(collider):
-			var chip_dmg: float = clampf(9.0 + dmg_ratio * 7.0, 9.0, 24.0)
-			apply_blast(world_pos, 0.7, chip_dmg, hit_normal)
+			var chip_dmg: float = RIFLE_CHIP_DAMAGE_BASE + dmg_ratio * RIFLE_CHIP_DAMAGE_PER_RATIO
+			var chip_r: float = clampf(
+				RIFLE_CHIP_RADIUS_BASE + dmg_ratio * RIFLE_CHIP_RADIUS_PER_RATIO,
+				RIFLE_CHIP_RADIUS_BASE,
+				RIFLE_CHIP_RADIUS_MAX,
+			)
+			apply_blast(world_pos, chip_r, chip_dmg, hit_normal)
 		return
 	var dmg: float = explosive_damage if explosive_damage > 0.0 else 30.0
 	var blast_r: float = explosive_radius * 0.52

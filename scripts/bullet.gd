@@ -450,7 +450,7 @@ func _handle_collision(result: Dictionary) -> void:
 	var bullet_damage := _current_damage()
 	var raw_dmg_ratio: float = bullet_damage / Weapon.BASE_DAMAGE
 	var dmg_ratio: float = clampf(raw_dmg_ratio, 0.5, 5.0)
-	var impact_dmg_ratio: float = clampf(raw_dmg_ratio, 0.2, 24.0)
+	var impact_dmg_ratio: float = maxf(raw_dmg_ratio, 0.2)
 
 	# Corpse hits run cosmetic-only on every peer (no networked health change).
 	# The corpse accumulates damage and disintegrates at CORPSE_DISINTEGRATE_DMG.
