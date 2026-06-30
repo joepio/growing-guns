@@ -1,6 +1,7 @@
-[gd_scene load_steps=17 format=3 uid="uid://b0player01"]
+[gd_scene load_steps=18 format=3 uid="uid://b0player01"]
 
 [ext_resource type="Script" path="res://scripts/player.gd" id="1_player"]
+[ext_resource type="Script" path="res://scripts/character_visual.gd" id="2_character_visual"]
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_1"]
 radius = 0.4
@@ -90,6 +91,9 @@ script = ExtResource("1_player")
 shape = SubResource("CapsuleShape3D_1")
 
 [node name="BodyModel" type="Node3D" parent="."]
+
+[node name="CharacterVisual" type="Node3D" parent="BodyModel"]
+script = ExtResource("2_character_visual")
 
 [node name="BlobRig" type="Node3D" parent="BodyModel"]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.05, 0)

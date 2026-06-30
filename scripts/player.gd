@@ -96,6 +96,7 @@ const GHOST_ALPHA := 0.06
 @onready var camera: Camera3D = $Camera
 @onready var muzzle: Node3D = $Camera/Muzzle
 @onready var body_model: Node3D = $BodyModel
+@onready var character_visual: CharacterVisual = $BodyModel/CharacterVisual
 @onready var blob_rig: Node3D = $BodyModel/BlobRig
 @onready var blob_core: MeshInstance3D = $BodyModel/BlobRig/BlobCore
 @onready var head_blob: MeshInstance3D = $BodyModel/BlobRig/HeadBlob
@@ -111,6 +112,7 @@ const GHOST_ALPHA := 0.06
 @onready var head_hitbox: Area3D = $HeadHitbox
 
 var _third_person_gun: Node3D = null
+var _third_person_procedural_gun: Node3D = null
 var _third_person_gun_rest_pos: Vector3 = Vector3.ZERO
 var _third_person_gun_rest_rot: Vector3 = Vector3.ZERO
 var _flashlight: SpotLight3D = null
@@ -289,6 +291,7 @@ var _head_blob_rest_scale: Vector3 = Vector3.ONE
 var _hand_anchor_rest_pos: Vector3 = Vector3.ZERO
 var _blob_phase: float = 0.0
 var _visual_prev_pos: Vector3 = Vector3.INF
+var _knight_was_grounded: bool = true
 var _hit_face_timer: float = 0.0
 const HIT_FACE_DURATION := 0.22
 
@@ -394,33 +397,60 @@ func _ready() -> void:
 	_visual_prev_pos = global_position
 	_set_hit_face_state(false)
 	_setup_third_person_gun()
+	_sync_weapon_visibility()
 	add_to_group("players")
 	# Pre-bake gib chunk meshes off-thread so the first kill doesn't hitch.
 	Violence.gib_warm_tree(body_model, Violence.GIB_CHUNK_COUNT)
 
-# Attach a gun mesh to the blob's hand anchor so third-person viewers see
-# roughly where the weapon lives. The local player keeps their first-person
-# Camera/Muzzle gun.
+# Attach the third-person gun to the hand anchor (knight or blob) so other
+# players see the same procedural rifle + mount tuning as character_lab.
 func _setup_third_person_gun() -> void:
-	if hand_anchor == null:
+	if _third_person_gun != null:
 		return
-	var gun_root := Node3D.new()
-	gun_root.name = "ThirdPersonGun"
-	hand_anchor.add_child(gun_root)
+	if character_visual != null and not character_visual.is_active():
+		call_deferred("_setup_third_person_gun")
+		return
 
-	# Simple gun stand-in — a dark metallic box hovering beside the blob body.
-	var gun := MeshInstance3D.new()
-	var body_mesh := BoxMesh.new()
-	body_mesh.size = Vector3(0.14, 0.14, 0.44)
-	gun.mesh = body_mesh
-	var mat := _make_mat(Color(0.18, 0.18, 0.22), 1.0, 0.0)
-	gun.material_override = mat
-	gun.position = Vector3(0.0, -0.03, -0.18)
-	gun_root.rotation_degrees = Vector3(10.0, 0.0, 0.0)
-	gun_root.add_child(gun)
+	var gun_root: Node3D = null
+	if character_visual and character_visual.is_active():
+		_third_person_procedural_gun = preload("res://scripts/procedural_gun.gd").new()
+		_third_person_procedural_gun.name = "ThirdPersonProceduralGun"
+		gun_root = character_visual.mount_third_person_weapon(_third_person_procedural_gun)
+		if gun_root == null:
+			_third_person_procedural_gun.queue_free()
+			_third_person_procedural_gun = null
+	elif hand_anchor and (character_visual == null or not character_visual.enabled):
+		var gun := MeshInstance3D.new()
+		var body_mesh := BoxMesh.new()
+		body_mesh.size = Vector3(0.14, 0.14, 0.44)
+		gun.mesh = body_mesh
+		var mat := _make_mat(Color(0.18, 0.18, 0.22), 1.0, 0.0)
+		gun.material_override = mat
+		gun_root = Node3D.new()
+		gun_root.name = "ThirdPersonGun"
+		gun_root.rotation_degrees = Vector3(10.0, 0.0, 0.0)
+		hand_anchor.add_child(gun_root)
+		gun.position = Vector3(0.0, -0.03, -0.18)
+		gun_root.add_child(gun)
+	else:
+		return
+
 	_third_person_gun = gun_root
 	_third_person_gun_rest_pos = gun_root.position
 	_third_person_gun_rest_rot = gun_root.rotation
+	_update_third_person_gun_visuals()
+	_sync_weapon_visibility()
+
+
+func _third_person_shot_anchor() -> Node3D:
+	if _third_person_procedural_gun:
+		return _third_person_procedural_gun
+	return _third_person_gun
+
+
+func _update_third_person_gun_visuals() -> void:
+	if _third_person_procedural_gun and _third_person_procedural_gun.has_method("apply_weapon_stats"):
+		_third_person_procedural_gun.apply_weapon_stats(weapon)
 
 
 # Per-player flashlight. Childed to the body (inherits yaw) at head height; its
@@ -489,6 +519,8 @@ func _flashlight_aim_basis() -> Basis:
 # pitch for remote players viewed on another peer.
 func _aim_pitch() -> float:
 	if is_bot:
+		if character_visual != null and character_visual.is_active():
+			return look_pitch
 		return blob_rig.rotation.x
 	if is_multiplayer_authority():
 		return look_pitch
@@ -709,6 +741,7 @@ func _process(delta: float) -> void:
 		if not _phoenix_ascending and not _coop_phoenix_held and not _hell_emerging:
 			_interpolate_remote_state(delta)
 	_update_blob_motion(delta)
+	_update_third_person_aim_pitch(delta)
 	_update_flashlight_aim(delta)
 	if _hit_face_timer > 0.0:
 		_hit_face_timer = maxf(0.0, _hit_face_timer - delta)
@@ -755,8 +788,10 @@ func _interpolate_remote_state(delta: float) -> void:
 		global_position = _remote_target_pos
 	if absf(angle_difference(rotation.y, _remote_target_yaw)) < 0.001:
 		rotation.y = _remote_target_yaw
-	# Interpolate pitch for third-person gun/body visual.
-	blob_rig.rotation.x = lerp_angle(blob_rig.rotation.x, _remote_target_pitch, clampf(delta * 12.0, 0.0, 1.0))
+	# Interpolate pitch for third-person blob body tilt only (knight uses gun mount).
+	var use_knight := character_visual != null and character_visual.is_active()
+	if not use_knight and blob_rig:
+		blob_rig.rotation.x = lerp_angle(blob_rig.rotation.x, _remote_target_pitch, clampf(delta * 12.0, 0.0, 1.0))
 
 func _refresh_authority_view() -> void:
 	if is_bot:
@@ -764,6 +799,7 @@ func _refresh_authority_view() -> void:
 		camera.clear_current()
 		body_model.visible = true
 		name_label.visible = health > 0
+		_sync_weapon_visibility()
 		return
 	if is_multiplayer_authority():
 		if split_screen_local:
@@ -800,8 +836,17 @@ func _body_meshes() -> Array[MeshInstance3D]:
 	Violence.collect_meshes(body_model, out)
 	return out
 
+func _play_knight_jump() -> void:
+	if character_visual != null and character_visual.is_active():
+		character_visual.play_jump()
+
 func _update_blob_motion(delta: float) -> void:
-	if body_model == null or blob_rig == null or blob_core == null:
+	if body_model == null or blob_rig == null:
+		return
+	var use_knight := character_visual != null and character_visual.is_active()
+	if use_knight and blob_rig:
+		blob_rig.visible = false
+	if not use_knight and blob_core == null:
 		return
 	if _hell_emerging:
 		return
@@ -824,6 +869,27 @@ func _update_blob_motion(delta: float) -> void:
 	var airborne := (not is_on_floor()) if (is_multiplayer_authority() or is_bot) else absf(vertical_speed) > 1.5
 	var dash_boost := 1.0 if dash_timer > 0.0 else 0.0
 
+	if use_knight:
+		var grounded := not airborne
+		if grounded:
+			character_visual.notify_landed()
+		elif not _knight_was_grounded and vertical_speed > 1.5:
+			if not is_multiplayer_authority() and not is_bot:
+				character_visual.play_jump()
+		_knight_was_grounded = grounded
+		if is_bot and _bot_target != null and is_instance_valid(_bot_target):
+			var from_y := global_position.y + 0.7
+			var to_y := _bot_target.global_position.y + 0.4
+			var aim_h := global_position.distance_to(_bot_target.global_position)
+			look_pitch = -atan2(to_y - from_y, aim_h)
+		character_visual.rotation = Vector3.ZERO
+		character_visual.update_locomotion(speed, WALK_SPEED * weapon.move_speed_mult)
+		return
+
+	if blob_rig:
+		blob_rig.visible = true
+
+	var body_tilt: Node3D = blob_rig
 	_blob_phase = wrapf(_blob_phase + delta * lerpf(1.8, 8.0, minf(speed_ratio, 1.0)), 0.0, TAU)
 	var bob := sin(_blob_phase) * (0.02 + 0.04 * speed_ratio) + 0.04
 	if airborne:
@@ -835,21 +901,17 @@ func _update_blob_motion(delta: float) -> void:
 
 	var local_vel := global_transform.basis.inverse() * planar_velocity
 	var target_roll := deg_to_rad(clampf(-local_vel.x * 1.3, -10.0, 10.0))
-	# Pitch: for bots, derive from their actual aim target (not movement tilt);
-	# for local authority humans, derive from movement (they see first-person);
-	# for remote players, keep what _interpolate_remote_state set.
 	if is_bot and _bot_target != null and is_instance_valid(_bot_target):
 		var from_y := global_position.y + 0.7
 		var to_y := _bot_target.global_position.y + 0.4
 		var aim_h := global_position.distance_to(_bot_target.global_position)
 		var bot_pitch := -atan2(to_y - from_y, aim_h)
-		blob_rig.rotation.x = lerp_angle(blob_rig.rotation.x, bot_pitch, clampf(delta * 12.0, 0.0, 1.0))
+		body_tilt.rotation.x = lerp_angle(body_tilt.rotation.x, bot_pitch, clampf(delta * 12.0, 0.0, 1.0))
 		look_pitch = blob_rig.rotation.x
 	elif is_multiplayer_authority():
 		var target_pitch := deg_to_rad(clampf(-local_vel.z * 0.7 - vertical_speed * 1.6, -14.0, 14.0))
-		blob_rig.rotation.x = lerp_angle(blob_rig.rotation.x, target_pitch, clampf(delta * 8.0, 0.0, 1.0))
-	# else: remote player pitch is driven by _interpolate_remote_state — don't overwrite.
-	blob_rig.rotation.z = lerp_angle(blob_rig.rotation.z, target_roll, clampf(delta * 8.0, 0.0, 1.0))
+		body_tilt.rotation.x = lerp_angle(body_tilt.rotation.x, target_pitch, clampf(delta * 8.0, 0.0, 1.0))
+	body_tilt.rotation.z = lerp_angle(body_tilt.rotation.z, target_roll, clampf(delta * 8.0, 0.0, 1.0))
 
 	var floor_squash := 0.12 * minf(speed_ratio, 1.0) + 0.16 * dash_boost
 	var air_stretch := 0.12 if airborne else 0.0
@@ -879,6 +941,32 @@ func _update_blob_motion(delta: float) -> void:
 		var hand_target := _hand_anchor_rest_pos + Vector3(0.05 * speed_ratio, sway, -0.02 * dash_boost)
 		hand_anchor.position = hand_anchor.position.lerp(hand_target, clampf(delta * 10.0, 0.0, 1.0))
 
+func _show_first_person_gun() -> bool:
+	return is_multiplayer_authority() and not is_bot and not split_screen_local
+
+
+func _sync_weapon_visibility() -> void:
+	var blocked := ghost_mode or coop_downed or _coop_phoenix_held \
+		or _phoenix_ascending or _hell_emerging or health <= 0
+	var show_fp := _show_first_person_gun() and not blocked
+	var show_tp := not show_fp and not blocked
+	if muzzle:
+		muzzle.visible = show_fp
+	if _procedural_gun:
+		_procedural_gun.visible = show_fp
+	if _third_person_gun:
+		_third_person_gun.visible = show_tp
+
+
+func _update_third_person_aim_pitch(delta: float) -> void:
+	if _third_person_gun == null or _show_first_person_gun():
+		return
+	var pitch := _aim_pitch()
+	var want_x := _third_person_gun_rest_rot.x + pitch
+	_third_person_gun.rotation.x = lerp_angle(
+		_third_person_gun.rotation.x, want_x, clampf(delta * 12.0, 0.0, 1.0))
+
+
 func _apply_ghost_visuals() -> void:
 	if body_model == null:
 		return
@@ -899,12 +987,7 @@ func _apply_ghost_visuals() -> void:
 		show_body = false
 	body_model.visible = show_body
 	name_label.visible = health > 0 and not ghost_mode and (is_bot or (not split_screen_local and not is_multiplayer_authority()))
-	# Hide both first-person muzzle gun and third-person gun while ghosting —
-	# spectators shouldn't see their weapon, and other players shouldn't see
-	# a gun floating in a translucent ghost.
-	muzzle.visible = not ghost_mode
-	if _third_person_gun:
-		_third_person_gun.visible = not ghost_mode
+	_sync_weapon_visibility()
 
 	var gun_meshes: Array[MeshInstance3D] = []
 	if gun_body: gun_meshes.append(gun_body)
@@ -1248,12 +1331,7 @@ func _apply_coop_downed_visuals() -> void:
 func _restore_weapon_visuals() -> void:
 	if is_bot or ghost_mode or coop_downed or _coop_phoenix_held or _phoenix_ascending or _hell_emerging or health <= 0:
 		return
-	if is_multiplayer_authority() and not split_screen_local:
-		muzzle.visible = true
-		if _procedural_gun:
-			_procedural_gun.visible = true
-	elif _third_person_gun:
-		_third_person_gun.visible = true
+	_sync_weapon_visibility()
 	_update_gun_visuals()
 
 
@@ -1839,6 +1917,7 @@ func _update_jump_and_dash() -> void:
 			velocity.y = JUMP_VELOCITY
 			jumps_left = 1 + weapon.extra_jumps
 			_gun_jump_bump = GUN_JUMP_BUMP
+			_play_knight_jump()
 			if not ghost_mode: SFX.jump(global_position)
 		elif is_on_wall() and wall_jump_cooldown <= 0.0:
 			var n := get_wall_normal()
@@ -1848,11 +1927,13 @@ func _update_jump_and_dash() -> void:
 			wall_jump_cooldown = WALL_JUMP_COOLDOWN
 			jumps_left = 1 + weapon.extra_jumps  # wall-jump refreshes all air-jumps
 			_gun_jump_bump = GUN_JUMP_BUMP
+			_play_knight_jump()
 			if not ghost_mode: SFX.jump(global_position)
 		elif jumps_left > 0:
 			velocity.y = DOUBLE_JUMP_VELOCITY
 			jumps_left -= 1
 			_gun_jump_bump = GUN_JUMP_BUMP * 0.7
+			_play_knight_jump()
 			if not ghost_mode: SFX.jump(global_position)
 
 	# --- Dash ---
@@ -2241,8 +2322,13 @@ func _rifle_fired(
 
 	# Muzzle flash scales with bullet size — get_bullet_scale already folds
 	# in damage_mult, so no extra sqrt(dmg_ratio) factor here.
-	var local_first_person := shooter_id == multiplayer.get_unique_id() and is_multiplayer_authority() and not is_bot
-	var visual_anchor := muzzle if local_first_person else _third_person_gun
+	var local_first_person := (
+		shooter_id == multiplayer.get_unique_id()
+		and is_multiplayer_authority()
+		and not is_bot
+		and not split_screen_local
+	)
+	var visual_anchor := muzzle if local_first_person else _third_person_shot_anchor()
 	if visual_anchor == null:
 		visual_anchor = muzzle
 	if spawn_shot_fx and not silenced and not (BenchFlags.active and BenchFlags.no_muzzle_flash):
@@ -2250,6 +2336,11 @@ func _rifle_fired(
 		var flash_brightness := clampf(pow(dmg_ratio, 0.88) * 1.5, 0.85, 8.0)
 		_spawn_muzzle_flash(w.bullet_color, w.get_bullet_scale_for_shot(last_in_mag), visual_anchor, local_first_person, flash_brightness)
 	if spawn_shot_fx and not local_first_person:
+		if _third_person_procedural_gun:
+			if _third_person_procedural_gun.has_method("cycle_bolt"):
+				_third_person_procedural_gun.cycle_bolt(w.get_fire_interval())
+			if _third_person_procedural_gun.has_method("add_heat"):
+				_third_person_procedural_gun.add_heat(w.damage_mult)
 		_spawn_third_person_casing(w)
 
 func _play_bolt_click() -> void:
@@ -2632,8 +2723,15 @@ func _spawn_third_person_casing(w: Weapon) -> void:
 	cs.rotation = Vector3(PI * 0.5, 0.0, 0.0)
 	rb.add_child(cs)
 
-	var basis := _third_person_gun.global_transform.basis
-	var spawn_pos := _third_person_gun.global_position + basis.x * 0.16 + basis.y * 0.08 + basis.z * -0.08
+	var basis: Basis
+	var spawn_pos: Vector3
+	if _third_person_procedural_gun and _third_person_procedural_gun.has_method("get_muzzle_exit_local"):
+		var gt := _third_person_procedural_gun.global_transform
+		basis = gt.basis
+		spawn_pos = gt * _third_person_procedural_gun.get_muzzle_exit_local()
+	else:
+		basis = _third_person_gun.global_transform.basis
+		spawn_pos = _third_person_gun.global_position + basis.x * 0.16 + basis.y * 0.08 + basis.z * -0.08
 	rb.transform = Transform3D(basis, spawn_pos)
 	scene.add_child(rb)
 
@@ -2887,6 +2985,10 @@ func _reset_weapon_combat_state() -> void:
 		if _procedural_gun.has_method("apply_weapon_stats"):
 			# Reload tweens can leave the magazine mid-drop; snap parts back.
 			_procedural_gun.apply_weapon_stats(weapon)
+	if _third_person_procedural_gun:
+		if _third_person_procedural_gun.has_method("reset_heat"):
+			_third_person_procedural_gun.reset_heat()
+		_update_third_person_gun_visuals()
 	_stop_reload_audio()
 	if is_multiplayer_authority():
 		cooldowns_changed.emit()
@@ -4415,6 +4517,7 @@ func _update_gun_visuals() -> void:
 		var bl: float = float(_procedural_gun.get("barrel_length"))
 		var pull: float = clampf((bl - 0.5) * 0.3, 0.0, 0.3)
 		_gun_pull_back = Vector3(0.0, 0.0, pull)
+	_update_third_person_gun_visuals()
 
 func _update_body_scale() -> void:
 	# BodyModel holds the visual mesh parts; hitboxes are siblings under the
@@ -4528,11 +4631,6 @@ func _bot_physics(delta: float) -> void:
 	var flat := Vector3(to_target.x, 0.0, to_target.z)
 	var dist := flat.length()
 
-	# Yaw toward target (convention derived so local -Z aligns with flat).
-	if dist > 0.05:
-		var target_yaw := atan2(-flat.x, -flat.z)
-		rotation.y = lerp_angle(rotation.y, target_yaw, delta * BOT_ROT_SPEED)
-
 	# Re-roll the movement intent every so often so the bot weaves instead of
 	# marching in a straight line. Values are blended with a forced
 	# approach/retreat if it drifts way off the follow distance.
@@ -4618,6 +4716,18 @@ func _bot_physics(delta: float) -> void:
 		dash_dir = wish.normalized()
 		_start_dash(wish)
 		_bot_dash_cooldown = randf_range(2.5, 5.5)
+
+	# Face the target so strafing doesn't spin the body every reroll.
+	var face_dir := Vector3.ZERO
+	if dash_timer > 0.0 and dash_dir.length_squared() > 0.01:
+		face_dir = dash_dir
+	elif dist > 0.05:
+		face_dir = flat
+	elif move_dir.length_squared() > 0.02:
+		face_dir = move_dir
+	if face_dir.length_squared() > 0.0001:
+		var want_yaw := atan2(-face_dir.x, -face_dir.z)
+		rotation.y = lerp_angle(rotation.y, want_yaw, delta * BOT_ROT_SPEED)
 
 	# --- Movement ---
 	var target_vel := move_dir * BOT_MOVE_SPEED * weapon.move_speed_mult * _slow_mult
