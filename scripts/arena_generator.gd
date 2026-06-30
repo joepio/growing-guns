@@ -845,6 +845,32 @@ static func material_surface_color(mat: Material, fallback: Color = Color(0.45, 
 	return fallback
 
 
+# Average lit stone tone from rock_surface.gdshader — debris chips use flat
+# StandardMaterial3D, so raw base_color reads too bright vs the textured wall.
+static func rock_debris_color(mat: Material, fallback: Color = Color(0.45, 0.44, 0.42)) -> Color:
+	if mat is StandardMaterial3D:
+		return (mat as StandardMaterial3D).albedo_color
+	if mat is ShaderMaterial:
+		var sm := mat as ShaderMaterial
+		var bc = sm.get_shader_parameter("base_color")
+		if bc is Color:
+			var cv: float = 0.28
+			var cv_v = sm.get_shader_parameter("color_variation")
+			if cv_v != null:
+				cv = float(cv_v)
+			# Shader: base_color * tint * (0.76 + combined * color_variation); combined ~0.5 mid.
+			var stone: Color = (bc as Color) * (0.76 + 0.5 * cv)
+			var moss = sm.get_shader_parameter("moss_color")
+			var ma: float = 0.38
+			var ma_v = sm.get_shader_parameter("moss_amount")
+			if ma_v != null:
+				ma = float(ma_v)
+			if moss is Color:
+				stone = stone.lerp(moss as Color, ma * 0.12)
+			return stone
+	return fallback
+
+
 func get_play_bounds() -> Dictionary:
 	var half_xz := arena_size * 0.5 + 3.0
 	var roof := wall_height + CASTLE_TOWER_LIFT + 3.5

@@ -3320,26 +3320,31 @@ static func _debris_spawn_scale() -> float:
 
 
 static func _surface_color_from_collider(collider: Node, fallback: Color) -> Color:
-	var mesh_owner: MeshInstance3D = null
-	if collider is MeshInstance3D:
-		mesh_owner = collider as MeshInstance3D
-	elif collider:
-		for child in collider.get_children():
-			if child is MeshInstance3D:
-				mesh_owner = child as MeshInstance3D
-				break
-	if mesh_owner == null:
-		return fallback.lerp(Color(0.72, 0.66, 0.55), 0.65)
-	var mat: Material = mesh_owner.get_active_material(0)
-	if mat == null:
-		mat = mesh_owner.material_override
-	if mat is StandardMaterial3D:
-		return (mat as StandardMaterial3D).albedo_color
-	if mat is ShaderMaterial:
-		var bc = (mat as ShaderMaterial).get_shader_parameter("base_color")
-		if bc is Color:
-			return bc
-	return fallback.lerp(Color(0.72, 0.66, 0.55), 0.65)
+	if collider == null:
+		return ArenaGenerator.rock_debris_color(null, fallback)
+	if collider.has_method("_material_base_color"):
+		return collider.call("_material_base_color")
+	var mat: Material = _surface_material_from_node(collider)
+	if mat != null:
+		return ArenaGenerator.rock_debris_color(mat, fallback)
+	return fallback
+
+
+static func _surface_material_from_node(node: Node) -> Material:
+	if node is MeshInstance3D:
+		var mi := node as MeshInstance3D
+		var mat := mi.get_active_material(0)
+		if mat != null:
+			return mat
+		return mi.material_override
+	if node is MultiMeshInstance3D:
+		return (node as MultiMeshInstance3D).material_override
+	for child in node.get_children():
+		if child is MultiMeshInstance3D or child is MeshInstance3D:
+			var mat := _surface_material_from_node(child)
+			if mat != null:
+				return mat
+	return null
 
 
 static func _animate_impact_chip(
