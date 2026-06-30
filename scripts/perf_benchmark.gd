@@ -240,6 +240,7 @@ func _top_up_bots() -> void:
 
 
 func _process(_delta: float) -> void:
+	Violence.flush_pending_blast_visuals()
 	var t := Time.get_ticks_msec() / 1000.0 - _start_t
 	match _phase:
 		"warmup":
@@ -247,6 +248,7 @@ func _process(_delta: float) -> void:
 				Violence.reset_bench_blast_prof()
 				DestructibleManager.reset_bench_destruct_prof()
 				DestructibleManager.reset_chunk_removals()
+				DestructibleManager.reset_bench_bullet_ray_stats()
 				Violence.reset_debris_bench_counters()
 				_chunks_at_measure_start = _count_arena_chunks()
 				_debris_nodes.clear()
@@ -473,6 +475,10 @@ func _print_destruct_summary(summary: Dictionary) -> void:
 	print("\n--- level destruction (measure window) ---")
 	print("Enabled:                %s" % ("yes" if not BenchFlags.no_destruction else "no (mode=no_destruction)"))
 	print("Destructible volumes:   %d" % destructibles)
+	var brs: Dictionary = DestructibleManager.bench_bullet_ray_stats()
+	if int(brs.get("calls", 0)) > 0:
+		print("Bullet analytical rays: calls=%d  candidates/ray=%.1f  chunk-volumes tested=%d"
+			% [int(brs.calls), float(brs.candidates_avg), int(brs.volumes_raycast)])
 	print("Arena chunks:           start=%d  end=%d  removed=%d  (~%d/s)"
 		% [_chunks_at_measure_start, chunks_end, chunks_removed, removals_per_sec])
 	print("Debris bursts:          premium=%d  cheap=%d" % [prem, cheap])

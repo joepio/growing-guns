@@ -685,6 +685,7 @@ func _trace_game_process(t0: int) -> void:
 
 func _process(delta: float) -> void:
 	var _pt := Time.get_ticks_usec() if Trace.enabled else 0
+	Violence.flush_pending_blast_visuals()
 	_update_explosion_sidechain(delta)
 	_update_phoenix_fade(delta)
 	_sync_mouse_mode()

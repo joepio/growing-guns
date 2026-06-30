@@ -53,6 +53,12 @@ var _deform_mmi: MultiMeshInstance3D = null
 var _deform_mm: MultiMesh = null
 var _deform_slots: Dictionary = {}  # chunk instance_id -> deform MM index
 var _deform_free: Array[int] = []
+# Decal-only chunks: cheap subdiv-5 mesh + damage material (R-channel bullet
+# holes). Undamaged chunks stay on the base material in the intact batch.
+var _decal_mmi: MultiMeshInstance3D = null
+var _decal_mm: MultiMesh = null
+var _decal_slots: Dictionary = {}  # chunk instance_id -> decal MM index
+var _decal_free: Array[int] = []
 var _grid := Vector3i.ONE
 var _x_edges := PackedFloat32Array()
 var _y_edges := PackedFloat32Array()
@@ -236,12 +242,8 @@ func _ensure_damage_buffer() -> void:
 	_dmg_mat.set_shader_parameter("dmg_box_size", box_size)
 	_dmg_mat.set_shader_parameter("dmg_tex_size", float(res))
 	_dmg_mat.set_shader_parameter("dmg_crater_depth", 0.85)
-	# The whole hit body switches to the damage material on its CHEAP base mesh, so
-	# decals (bullet holes / cracks, the R channel) show anywhere it's hit — even by
-	# weak guns. Only chunks hit hard enough migrate to the dense mesh to actually
-	# deform (the G channel), so weak bullets mark the rock without reshaping it.
-	if _intact_mmi != null:
-		_intact_mmi.material_override = _dmg_mat
+	# Intact chunks keep the base material; only splat-covered chunks migrate into
+	# the decal or deform batches (see _move_chunk_to_decal / _move_chunk_to_deform).
 
 
 # Signed atlas region for a hit: 0=+X 1=-X 2=+Y 3=-Y 4=+Z 5=-Z (matches the shader).
@@ -276,8 +278,8 @@ func _dmg_region_ruv(l: Vector3, region: int) -> Vector2:
 
 # Queue a damage splat at a body-local hit point (sparse CPU event; the GPU buffer
 # accumulates, never read back). Written into the hit face's signed atlas region
-# (3x2 grid), kept round in world space. Also migrates the chunks the splat covers
-# into the deform batch so damage shows consistently wherever you hit.
+# (3x2 grid), kept round in world space. Chunks under the splat migrate into the
+# decal batch (weak hits) or the dense deform batch (strong hits).
 func _splat_damage(local_pos: Vector3, world_radius: float, damage: float, local_normal: Vector3) -> void:
 	_ensure_damage_buffer()
 	if _dmg_splatter == null:
@@ -308,12 +310,14 @@ func _splat_damage(local_pos: Vector3, world_radius: float, damage: float, local
 			"ru": (crater / maxf(plane.x, 0.01)) / 3.0, "rv": (crater / maxf(plane.y, 0.01)) / 2.0})
 	_dmg_splatter.queue_redraw()
 	_dmg_viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
-	# Only strong hits migrate a chunk to the dense mesh (to physically deform it);
-	# weak hits just leave a decal on the cheap base mesh.
 	if strong:
 		for c: CollisionShape3D in _candidate_cols(local_pos, crater * 0.5, 0.0):
 			if is_instance_valid(c) and not bool(c.get_meta("destroyed", false)):
 				_move_chunk_to_deform(c)
+	else:
+		for c: CollisionShape3D in _candidate_cols(local_pos, dec_r + TARGET_CELL * 0.12):
+			if is_instance_valid(c) and not bool(c.get_meta("destroyed", false)):
+				_move_chunk_to_decal(c)
 	# A few chips fly off at EVERY hit (not just removal), scaled by damage — a weak
 	# shot flicks a couple of flecks, a heavy round throws a real spray. The debris
 	# FIFO caps keep sustained fire from spamming.
@@ -407,6 +411,7 @@ func apply_pending_carves() -> bool:
 	var max_blood_cleanup_r := 0.0
 	for col: CollisionShape3D in to_remove_cols:
 		_hide_intact_instance(col)
+		_remove_chunk_from_decal(col)
 		_remove_chunk_from_deform(col)
 		burst_center += col.global_position
 		burst_size += col.get_meta("chunk_size") as Vector3
@@ -611,12 +616,90 @@ func _ensure_deform_mm() -> void:
 	add_child(_deform_mmi)
 
 
+# Move a splatted chunk onto the cheap damage-material batch (subdiv-5). Idempotent.
+func _move_chunk_to_decal(col: CollisionShape3D) -> void:
+	var id: int = col.get_instance_id()
+	if _deform_slots.has(id) or _decal_slots.has(id):
+		return
+	_ensure_decal_mm()
+	if _decal_mm == null:
+		return
+	var idx: int
+	var grew := false
+	if not _decal_free.is_empty():
+		idx = int(_decal_free.pop_back())
+	else:
+		idx = _decal_mm.instance_count
+		_decal_mm.instance_count = idx + 1
+		grew = true
+	_decal_slots[id] = idx
+	if grew:
+		_refresh_all_decal_instances()
+	else:
+		_set_decal_instance(idx, col)
+	_hide_intact_instance(col)
+
+
+func _ensure_decal_mm() -> void:
+	if _decal_mmi != null:
+		return
+	_ensure_damage_buffer()
+	if _dmg_mat == null:
+		return
+	_decal_mmi = MultiMeshInstance3D.new()
+	_decal_mmi.name = "DecalChunks"
+	_decal_mmi.material_override = _dmg_mat
+	_decal_mm = MultiMesh.new()
+	_decal_mm.transform_format = MultiMesh.TRANSFORM_3D
+	_decal_mm.use_custom_data = true
+	_decal_mm.mesh = _chunk_unit_mesh()
+	_decal_mm.instance_count = 0
+	_decal_mmi.multimesh = _decal_mm
+	_decal_mmi.custom_aabb = AABB(-box_size * 0.5, box_size)
+	add_child(_decal_mmi)
+
+
+func _set_decal_instance(idx: int, col: CollisionShape3D) -> void:
+	_decal_mm.set_instance_transform(idx, _chunk_visual_transform(
+		col.get_meta("chunk_center_local") as Vector3,
+		col.get_meta("chunk_size") as Vector3,
+		col.get_meta("chunk_cell") as Vector3i))
+	_decal_mm.set_instance_custom_data(idx, col.get_meta("chunk_custom") as Color)
+
+
+func _refresh_all_decal_instances() -> void:
+	var active: Dictionary = {}
+	for sid: int in _decal_slots:
+		var c: Object = instance_from_id(sid)
+		if is_instance_valid(c) and c is CollisionShape3D:
+			active[int(_decal_slots[sid])] = c
+	for i: int in _decal_mm.instance_count:
+		if active.has(i):
+			_set_decal_instance(i, active[i] as CollisionShape3D)
+		else:
+			_decal_mm.set_instance_transform(
+				i, Transform3D(Basis.IDENTITY.scaled(Vector3.ZERO), Vector3.ZERO))
+
+
+func _remove_chunk_from_decal(col: CollisionShape3D) -> void:
+	var id: int = col.get_instance_id()
+	if not _decal_slots.has(id):
+		return
+	var idx: int = _decal_slots[id]
+	_decal_slots.erase(id)
+	if _decal_mm != null and idx >= 0 and idx < _decal_mm.instance_count:
+		_decal_mm.set_instance_transform(idx, Transform3D(
+			Basis.IDENTITY.scaled(Vector3.ZERO), col.get_meta("chunk_center_local") as Vector3))
+		_decal_free.append(idx)
+
+
 # Move a damaged-but-alive chunk out of the cheap intact batch into the dense
 # deform batch (idempotent). Only chunks that actually took a hit pay the verts.
 func _move_chunk_to_deform(col: CollisionShape3D) -> void:
 	var id: int = col.get_instance_id()
 	if _deform_slots.has(id):
 		return
+	_remove_chunk_from_decal(col)
 	_ensure_deform_mm()
 	if _deform_mm == null:
 		return
@@ -729,6 +812,145 @@ func _candidate_cols(local_center: Vector3, radius: float, extra: float = 0.0) -
 				if col != null:
 					cols.append(col)
 	return cols
+
+
+func raycast_chunks(world_from: Vector3, world_to: Vector3, exclude_rids: Array[RID] = []) -> Dictionary:
+	if _chunk_cols.is_empty():
+		return {}
+	var body_rid := get_rid()
+	if DestructibleManager._rid_in(body_rid, exclude_rids):
+		return {}
+	var inv_basis := global_basis.inverse()
+	var local_from := inv_basis * (world_from - global_position)
+	var local_delta := inv_basis * (world_to - world_from)
+	var seg_len := local_delta.length()
+	if seg_len < 1e-5:
+		return {}
+	var local_dir := local_delta / seg_len
+	var half_box := box_size * 0.5
+	var vol_t := _ray_segment_aabb_enter_t(local_from, local_dir, seg_len, -half_box, half_box)
+	if vol_t < 0.0:
+		return {}
+	if _chunk_cols.size() == 1:
+		var only: CollisionShape3D = _chunk_cols[0]
+		if not is_instance_valid(only) or only.disabled or bool(only.get_meta("destroyed", false)):
+			return {}
+		var chunk_center: Vector3 = only.get_meta("chunk_center_local") as Vector3
+		var chunk_half: Vector3 = (only.get_meta("chunk_size") as Vector3) * 0.5
+		var t_enter := _ray_segment_aabb_enter_t(
+			local_from, local_dir, seg_len, chunk_center - chunk_half, chunk_center + chunk_half)
+		if t_enter < 0.0:
+			return {}
+		var hit_local := local_from + local_dir * t_enter
+		return {
+			"position": to_global(hit_local),
+			"normal": (global_basis * _aabb_face_normal(hit_local, chunk_center, chunk_half)).normalized(),
+			"collider": only,
+			"rid": body_rid,
+		}
+	var local_to := local_from + local_delta
+	var min_v := local_from.min(local_to) - Vector3.ONE * (TARGET_CELL * 0.05)
+	var max_v := local_from.max(local_to) + Vector3.ONE * (TARGET_CELL * 0.05)
+	var xr := _axis_overlap_range(_x_edges, _grid.x, min_v.x, max_v.x)
+	var yr := _axis_overlap_range(_y_edges, _grid.y, min_v.y, max_v.y)
+	var zr := _axis_overlap_range(_z_edges, _grid.z, min_v.z, max_v.z)
+	if xr.y < xr.x or yr.y < yr.x or zr.y < zr.x:
+		return {}
+	var best_t := INF
+	var best_col: CollisionShape3D = null
+	var best_hit_local := Vector3.ZERO
+	var best_normal := Vector3.UP
+	for z: int in range(zr.x, zr.y + 1):
+		for y: int in range(yr.x, yr.y + 1):
+			for x: int in range(xr.x, xr.y + 1):
+				var col: CollisionShape3D = _chunk_grid[_flat_index(x, y, z)]
+				if col == null:
+					continue
+				if not is_instance_valid(col) or col.disabled:
+					continue
+				if bool(col.get_meta("destroyed", false)):
+					continue
+				var center: Vector3 = col.get_meta("chunk_center_local") as Vector3
+				var size: Vector3 = col.get_meta("chunk_size") as Vector3
+				var half := size * 0.5
+				var t_enter := _ray_segment_aabb_enter_t(
+					local_from, local_dir, seg_len, center - half, center + half)
+				if t_enter < 0.0 or t_enter >= best_t:
+					continue
+				best_t = t_enter
+				best_col = col
+				best_hit_local = local_from + local_dir * t_enter
+				best_normal = _aabb_face_normal(best_hit_local, center, half)
+	if best_col == null:
+		return {}
+	return {
+		"position": to_global(best_hit_local),
+		"normal": (global_basis * best_normal).normalized(),
+		"collider": best_col,
+		"rid": body_rid,
+	}
+
+
+func _candidate_cols_segment(local_from: Vector3, local_to: Vector3, extra: float = 0.0) -> Array[CollisionShape3D]:
+	var min_v := local_from.min(local_to) - Vector3.ONE * extra
+	var max_v := local_from.max(local_to) + Vector3.ONE * extra
+	var xr := _axis_overlap_range(_x_edges, _grid.x, min_v.x, max_v.x)
+	var yr := _axis_overlap_range(_y_edges, _grid.y, min_v.y, max_v.y)
+	var zr := _axis_overlap_range(_z_edges, _grid.z, min_v.z, max_v.z)
+	var cols: Array[CollisionShape3D] = []
+	if xr.y < xr.x or yr.y < yr.x or zr.y < zr.x:
+		return cols
+	for z: int in range(zr.x, zr.y + 1):
+		for y: int in range(yr.x, yr.y + 1):
+			for x: int in range(xr.x, xr.y + 1):
+				var col: CollisionShape3D = _chunk_grid[_flat_index(x, y, z)]
+				if col != null:
+					cols.append(col)
+	return cols
+
+
+static func _ray_segment_aabb_enter_t(
+	origin: Vector3,
+	dir: Vector3,
+	seg_len: float,
+	bmin: Vector3,
+	bmax: Vector3,
+) -> float:
+	var t_enter := 0.0
+	var t_exit := seg_len
+	for axis: int in 3:
+		var o: float = origin[axis]
+		var d: float = dir[axis]
+		if absf(d) < 1e-8:
+			if o < bmin[axis] or o > bmax[axis]:
+				return -1.0
+			continue
+		var inv := 1.0 / d
+		var t0: float = (bmin[axis] - o) * inv
+		var t1: float = (bmax[axis] - o) * inv
+		if t0 > t1:
+			var tmp := t0
+			t0 = t1
+			t1 = tmp
+		t_enter = maxf(t_enter, t0)
+		t_exit = minf(t_exit, t1)
+		if t_exit < t_enter:
+			return -1.0
+	if t_exit < 0.0 or t_enter > seg_len:
+		return -1.0
+	return maxf(t_enter, 0.0)
+
+
+static func _aabb_face_normal(hit: Vector3, center: Vector3, half: Vector3) -> Vector3:
+	var rel := hit - center
+	var ax := absf(rel.x / maxf(half.x, 0.0001))
+	var ay := absf(rel.y / maxf(half.y, 0.0001))
+	var az := absf(rel.z / maxf(half.z, 0.0001))
+	if ax >= ay and ax >= az:
+		return Vector3(signf(rel.x if rel.x != 0.0 else 1.0), 0.0, 0.0)
+	if ay >= az:
+		return Vector3(0.0, signf(rel.y if rel.y != 0.0 else 1.0), 0.0)
+	return Vector3(0.0, 0.0, signf(rel.z if rel.z != 0.0 else 1.0))
 
 
 func _fx_scene() -> Node:
