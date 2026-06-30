@@ -23,10 +23,9 @@ const EDGE_JITTER := 0.38
 const MAX_JAGGEDIZE_PER_CARVE := 18
 const MAX_EXPOSURE_JOBS_PER_FRAME := 1
 
-const CHUNK_MESH_SUBDIVIDE := 5
-# Hit bodies swap to this denser mesh so the GPU damage carves real jagged
-# geometry; undamaged bodies keep the cheap base mesh (only what you shoot pays).
-const DEFORM_SUBDIVIDE := 12
+const CHUNK_MESH_SUBDIVIDE := 4
+# One hand-hewn unit brick for intact, decal, and deform batches (~216 verts at subdiv 4).
+# Deform is shader-driven; subdiv 3 was too coarse for edge/corner carves on multi-chunk walls.
 # Visual inset — hairline shadow between bricks; keep tight so walls read solid.
 const VISUAL_CHUNK_INSET := 0.992
 
@@ -39,7 +38,8 @@ var _mat: Material = null
 # read back). Created on first hit; the body swaps to a unique damage material.
 var _dmg_viewport: SubViewport = null
 var _dmg_splatter: Node2D = null
-var _dmg_mat: ShaderMaterial = null
+var _decal_mat: ShaderMaterial = null  # fragment-only damage (bullet holes)
+var _dmg_mat: ShaderMaterial = null  # full vertex+fragment deform carve
 var _dmg_axis: int = 2
 var _dmg_plane_size: Vector2 = Vector2.ONE
 static var _dmg_brush_tex: Texture2D = null
@@ -47,14 +47,12 @@ var _chunk_cols: Array[CollisionShape3D] = []
 var _chunk_grid: Array[CollisionShape3D] = []
 var _intact_mmi: MultiMeshInstance3D = null
 var _intact_mm: MultiMesh = null
-# Damaged-but-alive chunks migrate here: a dense mesh + the damage material, so the
-# GPU carves real geometry on ONLY the chunks actually hit (not whole bodies).
+# Damaged-but-alive chunks migrate here: same unit brick + full deform material.
 var _deform_mmi: MultiMeshInstance3D = null
 var _deform_mm: MultiMesh = null
 var _deform_slots: Dictionary = {}  # chunk instance_id -> deform MM index
 var _deform_free: Array[int] = []
-# Decal-only chunks: cheap subdiv-5 mesh + damage material (R-channel bullet
-# holes). Undamaged chunks stay on the base material in the intact batch.
+# Decal-only chunks: same unit brick + damage material (R-channel bullet holes).
 var _decal_mmi: MultiMeshInstance3D = null
 var _decal_mm: MultiMesh = null
 var _decal_slots: Dictionary = {}  # chunk instance_id -> decal MM index
@@ -235,13 +233,19 @@ func _ensure_damage_buffer() -> void:
 	_dmg_viewport.add_child(splatter)
 	_dmg_splatter = splatter
 
-	_dmg_mat = (_mat as ShaderMaterial).duplicate() as ShaderMaterial
-	_dmg_mat.set_shader_parameter("damage_enabled", 1.0)
-	_dmg_mat.set_shader_parameter("damage_tex", _dmg_viewport.get_texture())
-	_dmg_mat.set_shader_parameter("dmg_world_to_local", global_transform.affine_inverse())
-	_dmg_mat.set_shader_parameter("dmg_box_size", box_size)
-	_dmg_mat.set_shader_parameter("dmg_tex_size", float(res))
-	_dmg_mat.set_shader_parameter("dmg_crater_depth", 0.85)
+	var dmg_tex := _dmg_viewport.get_texture()
+	var world_to_local := global_transform.affine_inverse()
+	_decal_mat = (_mat as ShaderMaterial).duplicate() as ShaderMaterial
+	_decal_mat.set_shader_parameter("damage_enabled", 1.0)
+	_decal_mat.set_shader_parameter("dmg_vertex_deform", 0.0)
+	_decal_mat.set_shader_parameter("damage_tex", dmg_tex)
+	_decal_mat.set_shader_parameter("dmg_world_to_local", world_to_local)
+	_decal_mat.set_shader_parameter("dmg_box_size", box_size)
+	_decal_mat.set_shader_parameter("dmg_tex_size", float(res))
+	_decal_mat.set_shader_parameter("dmg_crater_depth", 0.72)
+
+	_dmg_mat = _decal_mat.duplicate() as ShaderMaterial
+	_dmg_mat.set_shader_parameter("dmg_vertex_deform", 1.0)
 	# Intact chunks keep the base material; only splat-covered chunks migrate into
 	# the decal or deform batches (see _move_chunk_to_decal / _move_chunk_to_deform).
 
@@ -304,7 +308,7 @@ func _splat_damage(local_pos: Vector3, world_radius: float, damage: float, local
 	# DEFORM (G): only strong hits, with the larger crater radius so the geometry
 	# carve reads clearly. Accumulates so a strong gun wears the chunk down gradually.
 	if strong:
-		var deform := clampf(damage * 0.013, 0.08, 0.9)
+		var deform := clampf(damage * 0.013, 0.08, 0.72)
 		_dmg_splatter.pending.append({
 			"uv": atlas_uv, "decal": 0.0, "deform": deform,
 			"ru": (crater / maxf(plane.x, 0.01)) / 3.0, "rv": (crater / maxf(plane.y, 0.01)) / 2.0})
@@ -616,7 +620,7 @@ func _ensure_deform_mm() -> void:
 	add_child(_deform_mmi)
 
 
-# Move a splatted chunk onto the cheap damage-material batch (subdiv-5). Idempotent.
+# Move a splatted chunk onto the decal damage-material batch. Idempotent.
 func _move_chunk_to_decal(col: CollisionShape3D) -> void:
 	var id: int = col.get_instance_id()
 	if _deform_slots.has(id) or _decal_slots.has(id):
@@ -644,11 +648,11 @@ func _ensure_decal_mm() -> void:
 	if _decal_mmi != null:
 		return
 	_ensure_damage_buffer()
-	if _dmg_mat == null:
+	if _decal_mat == null:
 		return
 	_decal_mmi = MultiMeshInstance3D.new()
 	_decal_mmi.name = "DecalChunks"
-	_decal_mmi.material_override = _dmg_mat
+	_decal_mmi.material_override = _decal_mat
 	_decal_mm = MultiMesh.new()
 	_decal_mm.transform_format = MultiMesh.TRANSFORM_3D
 	_decal_mm.use_custom_data = true
@@ -693,8 +697,7 @@ func _remove_chunk_from_decal(col: CollisionShape3D) -> void:
 		_decal_free.append(idx)
 
 
-# Move a damaged-but-alive chunk out of the cheap intact batch into the dense
-# deform batch (idempotent). Only chunks that actually took a hit pay the verts.
+# Move a damaged-but-alive chunk into the deform material batch (idempotent).
 func _move_chunk_to_deform(col: CollisionShape3D) -> void:
 	var id: int = col.get_instance_id()
 	if _deform_slots.has(id):
@@ -812,6 +815,22 @@ func _candidate_cols(local_center: Vector3, radius: float, extra: float = 0.0) -
 				if col != null:
 					cols.append(col)
 	return cols
+
+
+# Cheap OBB test — grid broadphase over-fetches nearby volumes; skip chunk narrowphase
+# when the segment misses this body's box entirely (open-air fast path).
+func segment_may_hit_volume(world_from: Vector3, world_to: Vector3) -> bool:
+	if _chunk_cols.is_empty():
+		return false
+	var inv_basis := global_basis.inverse()
+	var local_from := inv_basis * (world_from - global_position)
+	var local_delta := inv_basis * (world_to - world_from)
+	var seg_len := local_delta.length()
+	if seg_len < 1e-5:
+		return false
+	var local_dir := local_delta / seg_len
+	var half_box := box_size * 0.5
+	return _ray_segment_aabb_enter_t(local_from, local_dir, seg_len, -half_box, half_box) >= 0.0
 
 
 func raycast_chunks(world_from: Vector3, world_to: Vector3, exclude_rids: Array[RID] = []) -> Dictionary:
@@ -1001,15 +1020,9 @@ static func get_stone_block_mesh() -> Mesh:
 	return _chunk_unit_mesh()
 
 
-static var _cached_deform_mesh: Mesh = null
-
-
-# Denser hand-hewn mesh used only by bodies that have been hit, so the GPU damage
-# vertex displacement has enough vertices to carve jagged geometry.
+# Same low-poly unit brick as intact/decal — deform is shader-driven, not extra geometry.
 static func get_deform_chunk_mesh() -> Mesh:
-	if _cached_deform_mesh == null:
-		_cached_deform_mesh = _build_hand_hewn_stone_mesh(DEFORM_SUBDIVIDE)
-	return _cached_deform_mesh
+	return _chunk_unit_mesh()
 
 
 func _running_bond_shift(cell: Vector3i) -> Vector3:

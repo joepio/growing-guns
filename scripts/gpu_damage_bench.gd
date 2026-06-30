@@ -6,7 +6,7 @@ extends Node3D
 #   - base material (pre-damage intact path)
 #   - whole-body damage material (pre-fix worst case — every brick runs the path)
 #   - scoped decals (post-fix — only hit_frac of bricks on the damage material)
-#   - dense subdiv-12 deform mesh (vertex cost of hit chunks)
+#   - scoped decals / deform (same subdiv-3 unit brick; material differs)
 #
 #   godot --path . res://scenes/gpu_damage_bench.tscn
 #   godot --path . res://scenes/gpu_damage_bench.tscn -- count=3000 hit_frac=0.05
@@ -46,23 +46,23 @@ func _ready() -> void:
 	_build_world()
 	_build_mats()
 	_layout()
+	var brick_subdiv := DestructibleSolid.CHUNK_MESH_SUBDIVIDE
 	_configs = [
-		{"label": "base mat, subdiv-5   (intact)", "mode": "single", "mat": _base_mat, "subdiv": 5},
-		{"label": "damage mat, subdiv-5  (whole-body)", "mode": "single", "mat": _dmg_mat, "subdiv": 5},
+		{"label": "base mat, subdiv-%d (intact)" % brick_subdiv, "mode": "single", "mat": _base_mat, "subdiv": brick_subdiv},
+		{"label": "damage mat, subdiv-%d (whole-body)" % brick_subdiv, "mode": "single", "mat": _dmg_mat, "subdiv": brick_subdiv},
 		{
-			"label": "scoped decals, subdiv-5 (%.0f%% hit)" % (hit_frac * 100.0),
+			"label": "scoped decals, subdiv-%d (%.0f%% hit)" % [brick_subdiv, hit_frac * 100.0],
 			"mode": "scoped",
 			"mat": _base_mat,
 			"hit_mat": _dmg_mat,
-			"subdiv": 5,
+			"subdiv": brick_subdiv,
 		},
 		{
-			"label": "scoped deform, subdiv-12 (%.0f%% hit)" % (hit_frac * 100.0),
+			"label": "scoped deform mat, subdiv-%d (%.0f%% hit)" % [brick_subdiv, hit_frac * 100.0],
 			"mode": "scoped",
 			"mat": _base_mat,
 			"hit_mat": _dmg_mat,
-			"subdiv": 5,
-			"hit_subdiv": 12,
+			"subdiv": brick_subdiv,
 		},
 	]
 	_start_config()
@@ -308,6 +308,6 @@ func _report() -> void:
 	if _results.size() >= 4:
 		var scoped_ms: float = _results[2]["ms"]
 		var deform: float = _results[3]["ms"]
-		print("scoped subdiv-12 deform (hit only) vs scoped: %+.2f ms/frame (%.0f%% vs scoped decals)"
+		print("scoped deform mat vs scoped decals: %+.2f ms/frame (%.0f%% vs scoped decals)"
 			% [deform - scoped_ms, (deform / maxf(scoped_ms, 0.01) - 1.0) * 100.0])
 	print("===================================================\n")

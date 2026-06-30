@@ -27,6 +27,7 @@ var _capture_mode := false
 # Multiplayer and settings UI elements
 var _players_root: Node3D
 var _share_field: LineEdit
+var _host_online_button: Button
 var _copy_button: Button
 var _join_input: LineEdit
 var _join_button: Button
@@ -83,17 +84,13 @@ func _ready() -> void:
 	_build_retro_filter()
 	_apply_settings()
 	
-	# Auto-host online iroh room immediately so the match ID is ready
-	if not _capture_mode:
-		if NetworkManager.multiplayer.multiplayer_peer == null or NetworkManager.multiplayer.multiplayer_peer is OfflineMultiplayerPeer:
-			NetworkManager.host_game_iroh(MenuHelpers.player_name)
-		
-	if _share_field:
-		_share_field.text = NetworkManager.current_iroh_game_id
-		
+	NetworkManager.ensure_solo_registered(MenuHelpers.player_name)
+
 	if not NetworkManager.network_status_changed.is_connected(_on_network_status_changed):
 		NetworkManager.network_status_changed.connect(_on_network_status_changed)
-		
+	if not NetworkManager.iroh_host_ready.is_connected(_refresh_online_host_ui):
+		NetworkManager.iroh_host_ready.connect(func(_id: String) -> void: _refresh_online_host_ui())
+	_refresh_online_host_ui()
 	_show_network_notice()
 	if not _capture_mode:
 		_versus_button.grab_focus()
@@ -106,13 +103,10 @@ func _ready() -> void:
 
 
 func _warmup_menu_assets() -> void:
-	# Spread first-match hitches across menu idle time instead of the first
-	# grenade throw / rocket spawn / gib disintegration.
-	Violence.prewarm_disintegration_cache()
 	SFX.warmup_specials()
 	if _arena and is_instance_valid(_arena):
-		GRENADE_SCRIPT.warmup_shaders(_arena)
-		GRENADE_SCRIPT.warmup_scene(_arena)
+		await get_tree().process_frame
+		ShaderWarmup.warmup_effect_shaders(_arena)
 
 
 func _process(delta: float) -> void:
@@ -193,7 +187,10 @@ func _start_wave_survival() -> void:
 
 
 func _start_game(mode: String) -> void:
-	# If we are hosting, keep the same connection! Otherwise, clean up and host fresh in game.tscn
+	# Never let an in-flight iroh bring-up race game.tscn shader warmup.
+	NetworkManager.cancel_background_host()
+	Violence.discard_pending_blast_visuals()
+	# Keep an already-live host; otherwise play offline until the player opts in.
 	if NetworkManager.current_iroh_game_id.is_empty():
 		NetworkManager.leave_game()
 	NetworkManager.set_meta("game_mode", mode)
@@ -298,8 +295,14 @@ func _build_start_screen_multiplayer_ui() -> void:
 	_share_field.editable = false
 	_share_field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_share_field.custom_minimum_size = Vector2(0, 32)
-	_share_field.placeholder_text = "Starting host..."
+	_share_field.placeholder_text = "Offline — click Host online"
 	share_row.add_child(_share_field)
+
+	_host_online_button = Button.new()
+	_host_online_button.text = "HOST ONLINE"
+	_host_online_button.custom_minimum_size = Vector2(110, 32)
+	_host_online_button.pressed.connect(_on_host_online_pressed)
+	share_row.add_child(_host_online_button)
 	
 	_copy_button = Button.new()
 	_copy_button.text = "COPY"
@@ -340,6 +343,29 @@ func _build_start_screen_multiplayer_ui() -> void:
 	# Force the menu panel to resize to its new minimum size including the dynamic controls
 	menu_panel.size = Vector2.ZERO
 	GothicMenuUi.apply_start_screen($UI)
+	_refresh_online_host_ui()
+
+
+func _on_host_online_pressed() -> void:
+	NetworkManager.request_online_host(MenuHelpers.player_name)
+	_refresh_online_host_ui()
+
+
+func _refresh_online_host_ui() -> void:
+	var id := NetworkManager.current_iroh_game_id
+	var starting := NetworkManager.is_host_starting()
+	if _share_field:
+		_share_field.text = id
+		if id.is_empty() and starting:
+			_share_field.placeholder_text = "Starting host..."
+		elif id.is_empty():
+			_share_field.placeholder_text = "Offline — click Host online"
+	if _host_online_button:
+		_host_online_button.visible = id.is_empty()
+		_host_online_button.disabled = starting
+		_host_online_button.text = "STARTING..." if starting else "HOST ONLINE"
+	if _copy_button:
+		_copy_button.disabled = id.is_empty()
 
 
 func _on_copy_pressed() -> void:
@@ -386,8 +412,7 @@ func _on_join_input_changed(text: String) -> void:
 
 func _on_network_status_changed(message: String, is_error: bool) -> void:
 	_show_status(message, is_error)
-	if not is_error and _share_field:
-		_share_field.text = NetworkManager.current_iroh_game_id
+	_refresh_online_host_ui()
 
 
 func _show_status(message: String, is_error: bool) -> void:
@@ -410,6 +435,7 @@ func _open_settings_menu() -> void:
 			GothicMenuUi.apply_settings_panel(child as PanelContainer)
 			break
 	$UI/MenuPanel.visible = false
+	$UI/Title.visible = false
 	_settings_panel.visible = true
 	MenuHelpers.grab_first_menu_focus(_settings_panel)
 
@@ -419,6 +445,7 @@ func _close_settings_menu() -> void:
 		_settings_panel.queue_free()
 		_settings_panel = null
 	$UI/MenuPanel.visible = true
+	$UI/Title.visible = true
 	MenuHelpers.grab_first_menu_focus($UI/MenuPanel)
 
 
@@ -435,9 +462,9 @@ func _apply_settings() -> void:
 
 
 func _on_player_name_committed(new_name: String) -> void:
-	NetworkManager.host_game_iroh(new_name)
-	if _share_field:
-		_share_field.text = NetworkManager.current_iroh_game_id
+	NetworkManager.leave_game()
+	NetworkManager.ensure_solo_registered(new_name)
+	_refresh_online_host_ui()
 
 
 func _build_retro_filter() -> void:

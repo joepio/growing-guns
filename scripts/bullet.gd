@@ -35,48 +35,109 @@ const ZIP_RADIUS_SQ := 144.0  # 12 m — must match the gate in SFX.bullet_zip
 var _zipped: bool = false
 var _prev_listener_dist_sq: float = INF
 
-# Visuals — head dot + a tracer trail that stretches as the bullet flies.
-# Fast bullets cover more distance per frame, so the trail naturally reads
-# as a long streak; slow bullets stay short and chunky.
+# Visuals — brass body + nose, plus a stretching tracer streak behind.
+var _body_len: float = 0.05
+var _nose_len: float = 0.024
 var _trail_inst: MeshInstance3D = null
+var _trail_mat: ShaderMaterial = null
 var _max_trail_length: float = 2.0
 var _trail_thickness: float = 0.04
 
-# Shared visual resources. Each bullet used to allocate two BoxMeshes and a
-# StandardMaterial3D in setup() — at hundreds of bullets per mag-dump frame
-# (minigun + uzi stacks) that alloc + GPU upload churn was a frame-time spike.
-# A single unit cube (sized per-bullet via instance scale) and a small dedup
-# cache of immutable tracer materials remove nearly all of it.
-static var _bullet_box_mesh: BoxMesh = null
-static var _tracer_mat_cache: Dictionary = {}
+# Shared visual resources — one mesh + material set for all in-flight bullets.
+static var _bullet_body_mesh: CylinderMesh = null
+static var _bullet_nose_mesh: CylinderMesh = null
+static var _trail_box_mesh: BoxMesh = null
+static var _trail_shader: Shader = null
+static var _bullet_metal_mat: StandardMaterial3D = null
+static var _bullet_tip_mat_cache: Dictionary = {}
+static var _trail_mat_templates: Dictionary = {}
 
-static func _get_bullet_box_mesh() -> BoxMesh:
-	if _bullet_box_mesh == null:
-		_bullet_box_mesh = BoxMesh.new()
-		_bullet_box_mesh.size = Vector3.ONE
-	return _bullet_box_mesh
+const BULLET_BODY_RADIUS := 0.016
+const BULLET_BODY_LENGTH := 0.05
+const BULLET_NOSE_LENGTH := 0.024
+const BULLET_MESH_ROT_X := PI * 0.5  # CylinderMesh is Y-up; align length to local Z.
 
-# Tracer materials are never mutated after creation, so identical visuals can
-# share one instance. Key on quantized colour/alpha/emission so a weapon's
-# stream collapses to ~1-2 materials instead of one per bullet.
-static func _get_tracer_material(color: Color, alpha: float, emission_energy: float, additive: bool) -> StandardMaterial3D:
+
+static func _get_bullet_body_mesh() -> CylinderMesh:
+	if _bullet_body_mesh == null:
+		_bullet_body_mesh = CylinderMesh.new()
+		_bullet_body_mesh.top_radius = BULLET_BODY_RADIUS
+		_bullet_body_mesh.bottom_radius = BULLET_BODY_RADIUS * 1.04
+		_bullet_body_mesh.height = BULLET_BODY_LENGTH
+		_bullet_body_mesh.radial_segments = 8
+		_bullet_body_mesh.rings = 1
+	return _bullet_body_mesh
+
+
+static func _get_bullet_nose_mesh() -> CylinderMesh:
+	if _bullet_nose_mesh == null:
+		_bullet_nose_mesh = CylinderMesh.new()
+		_bullet_nose_mesh.top_radius = 0.0
+		_bullet_nose_mesh.bottom_radius = BULLET_BODY_RADIUS
+		_bullet_nose_mesh.height = BULLET_NOSE_LENGTH
+		_bullet_nose_mesh.radial_segments = 8
+		_bullet_nose_mesh.rings = 1
+	return _bullet_nose_mesh
+
+
+static func _get_bullet_metal_material() -> StandardMaterial3D:
+	if _bullet_metal_mat == null:
+		_bullet_metal_mat = StandardMaterial3D.new()
+		_bullet_metal_mat.albedo_color = Color(0.84, 0.70, 0.24)
+		_bullet_metal_mat.metallic = 0.88
+		_bullet_metal_mat.roughness = 0.32
+	return _bullet_metal_mat
+
+
+static func _get_bullet_tip_material(color: Color, alpha: float, emission_energy: float, additive: bool) -> StandardMaterial3D:
 	var key := "%d_%d_%d_%d_%d_%d" % [
 		int(color.r * 64.0), int(color.g * 64.0), int(color.b * 64.0),
 		int(alpha * 32.0), int(emission_energy * 8.0), 1 if additive else 0]
-	var cached: StandardMaterial3D = _tracer_mat_cache.get(key)
+	var cached: StandardMaterial3D = _bullet_tip_mat_cache.get(key)
 	if cached != null:
 		return cached
 	var mat := StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.albedo_color = Color(0.78, 0.80, 0.84, alpha).lerp(color, 0.28)
+	mat.metallic = 0.82
+	mat.roughness = 0.24
+	mat.emission_enabled = true
+	mat.emission = color
+	mat.emission_energy_multiplier = emission_energy * 0.45
 	if additive:
 		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 		mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
 		mat.no_depth_test = true
-	mat.albedo_color = Color(color.r, color.g, color.b, alpha)
-	mat.emission_enabled = true
-	mat.emission = color
-	mat.emission_energy_multiplier = emission_energy
-	_tracer_mat_cache[key] = mat
+	_bullet_tip_mat_cache[key] = mat
+	return mat
+
+
+static func _get_trail_box_mesh() -> BoxMesh:
+	if _trail_box_mesh == null:
+		_trail_box_mesh = BoxMesh.new()
+		_trail_box_mesh.size = Vector3.ONE
+	return _trail_box_mesh
+
+
+static func _get_trail_shader() -> Shader:
+	if _trail_shader == null:
+		_trail_shader = load("res://shaders/bullet_trail.gdshader") as Shader
+	return _trail_shader
+
+
+static func _create_trail_material(color: Color, alpha: float, emission_energy: float) -> ShaderMaterial:
+	var key := "%d_%d_%d_%d" % [
+		int(color.r * 64.0), int(color.g * 64.0), int(color.b * 64.0),
+		int(alpha * 32.0)]
+	var template: ShaderMaterial = _trail_mat_templates.get(key)
+	if template == null:
+		template = ShaderMaterial.new()
+		template.shader = _get_trail_shader()
+		template.set_shader_parameter("trail_color", Color(color.r, color.g, color.b, alpha))
+		template.set_shader_parameter("length_falloff", 2.0)
+		template.set_shader_parameter("bloom_gain", 10.0 if alpha >= 0.99 else 5.0)
+		_trail_mat_templates[key] = template
+	var mat := template.duplicate() as ShaderMaterial
+	mat.set_shader_parameter("head_strength", emission_energy)
 	return mat
 
 const HITSCAN_THRESHOLD := 550.0  # m/s — faster than this, ray once in setup and despawn
@@ -123,32 +184,43 @@ func setup(origin: Vector3, dir: Vector3, shooter: int, w: Weapon, p_last_in_mag
 	var s: float = weapon_stats.get_bullet_scale_for_shot(last_in_mag)
 	var tracer_color := weapon_stats.bullet_color.lerp(Color.WHITE, 0.18)
 	var tracer_alpha := SILENCED_OWNER_TRACER_ALPHA if silenced else 1.0
-	var emission_energy := clampf(1.6 * s, 1.2, 4.5) * (0.45 if silenced else 1.0)
-	# Shared/cached material + one shared unit cube (sized via instance scale).
-	var mat := _get_tracer_material(tracer_color, tracer_alpha, emission_energy, tracer_alpha < 1.0)
-	var cube := _get_bullet_box_mesh()
+	var tip_emission := clampf(1.4 * s, 1.0, 4.0) * (0.45 if silenced else 1.0)
+	var trail_emission := clampf(3.2 * s, 2.4, 9.0) * (0.45 if silenced else 1.0)
+	var additive_tracer := tracer_alpha < 1.0
+	_body_len = BULLET_BODY_LENGTH * s
+	_nose_len = BULLET_NOSE_LENGTH * s
 
-	# Head — a small bright dot that always sits at the bullet's tip.
-	var head_inst := MeshInstance3D.new()
-	head_inst.mesh = cube
-	head_inst.material_override = mat
-	head_inst.scale = Vector3(0.08 * s, 0.08 * s, 0.14 * s)
-	add_child(head_inst)
+	var body_inst := MeshInstance3D.new()
+	body_inst.mesh = _get_bullet_body_mesh()
+	body_inst.material_override = _get_bullet_metal_material()
+	body_inst.rotation.x = BULLET_MESH_ROT_X
+	body_inst.position = Vector3(0.0, 0.0, _body_len * 0.5)
+	body_inst.scale = Vector3.ONE * s
+	add_child(body_inst)
 
-	# Trail — unit cube anchored so its FRONT face touches the head and extends
-	# backwards along travel direction (+local Z, since look_at puts our forward
-	# at -Z). x/y carry the bullet thickness; each physics tick sets z to match
-	# how far we've come, capped to keep the streak from stretching across the map.
+	var nose_inst := MeshInstance3D.new()
+	nose_inst.mesh = _get_bullet_nose_mesh()
+	nose_inst.material_override = _get_bullet_tip_material(
+		tracer_color, tracer_alpha, tip_emission, additive_tracer)
+	nose_inst.rotation.x = BULLET_MESH_ROT_X
+	nose_inst.position = Vector3(0.0, 0.0, -_nose_len * 0.5)
+	nose_inst.scale = Vector3.ONE * s
+	add_child(nose_inst)
+
 	_trail_thickness = 0.04 * s
 	_trail_inst = MeshInstance3D.new()
-	_trail_inst.mesh = cube
-	_trail_inst.material_override = mat
-	_trail_inst.scale = Vector3(_trail_thickness, _trail_thickness, 0.001)  # invisible until first tick
+	_trail_inst.mesh = _get_trail_box_mesh()
+	_trail_mat = _create_trail_material(tracer_color, tracer_alpha, trail_emission)
+	_trail_mat.set_shader_parameter("trail_radius", _trail_thickness * 0.5)
+	_trail_mat.set_shader_parameter("head_world", global_position)
+	_trail_mat.set_shader_parameter("tail_world", global_position + global_transform.basis.z * 0.01)
+	_trail_inst.material_override = _trail_mat
+	_trail_inst.scale = Vector3(_trail_thickness, _trail_thickness, 0.001)
 	add_child(_trail_inst)
 
-	# Faster rounds get longer max streaks. SNIPER (×2.5) → ~8 m; HITSCAN
-	# (×4) → ~12 m; BAZOOKA (×0.1) keeps a stubby tail.
-	_max_trail_length = clampf(weapon_stats.bullet_speed_mult * 3.0 + 0.5, 0.5, 14.0)
+	# Faster rounds get longer max streaks. SNIPER (×2.5) → ~16 m; HITSCAN
+	# (×4) → ~24 m; BAZOOKA (×0.1) keeps a stubby tail.
+	_max_trail_length = clampf(weapon_stats.bullet_speed_mult * 6.0 + 1.0, 1.0, 28.0)
 
 func _physics_process(delta: float) -> void:
 	if weapon_stats == null:
@@ -197,12 +269,15 @@ func _physics_process(delta: float) -> void:
 	else:
 		_handle_collision(result)
 
-	if _trail_inst:
+	if _trail_inst and _trail_mat:
 		var trail_len: float = clampf(distance_traveled, 0.001, _max_trail_length)
 		_trail_inst.scale = Vector3(_trail_thickness, _trail_thickness, trail_len)
-		# Front face of the unit-Z box sits at the bullet origin; centre is
-		# half a length back along +Z (which is "behind" since forward is -Z).
 		_trail_inst.position = Vector3(0.0, 0.0, trail_len * 0.5)
+		var head_world := global_position
+		var tail_world := global_position + global_transform.basis.z * trail_len
+		_trail_mat.set_shader_parameter("head_world", head_world)
+		_trail_mat.set_shader_parameter("tail_world", tail_world)
+		_trail_mat.set_shader_parameter("trail_radius", _trail_thickness * 0.5)
 
 	_maybe_zip_by()
 
@@ -229,7 +304,11 @@ func _intersect_ray(from: Vector3, to: Vector3) -> Dictionary:
 	_ray_query.to = to
 	_ray_query.exclude = excluded_rids
 	var _t0 := Time.get_ticks_usec() if Trace.enabled else 0
-	var terrain_q: Dictionary = DestructibleManager.query_bullet_ray(from, to, excluded_rids)
+	var terrain_q: Dictionary
+	if DestructibleManager.segment_needs_destruct_query(from, to):
+		terrain_q = DestructibleManager.query_bullet_ray(from, to, excluded_rids)
+	else:
+		terrain_q = {"hit": {}, "terrain_near": false}
 	var destruct_hit: Dictionary = terrain_q.get("hit", {})
 	var terrain_near: bool = bool(terrain_q.get("terrain_near", false))
 	if Trace.enabled:

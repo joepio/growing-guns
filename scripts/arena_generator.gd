@@ -845,6 +845,18 @@ static func material_surface_color(mat: Material, fallback: Color = Color(0.45, 
 	return fallback
 
 
+func get_play_bounds() -> Dictionary:
+	var half_xz := arena_size * 0.5 + 3.0
+	var roof := wall_height + CASTLE_TOWER_LIFT + 3.5
+	return {
+		"origin": global_position,
+		"half_xz": half_xz,
+		"y_min": LAVA_POOL_Y - 4.0,
+		"y_max": roof + 14.0,
+		"y_combat_ceiling": roof,
+	}
+
+
 func warmup_gpu_materials(scene: Node) -> void:
 	if scene == null:
 		return

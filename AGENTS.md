@@ -37,6 +37,9 @@ Multiplayer FPS in Godot 4.6. Last-man-standing rounds; round losers pick stacki
 - `scenes/gun_lab.tscn` + `gun_preview.tscn` — preview procedural gun visually, tweak exports.
 - `scenes/audio_lab.tscn` — SFX mix / synth iteration.
 - `scenes/lava_death_lab.tscn` — lava-shader body + sink death; live-tune sink timing and SFX.
+- `scenes/deform_wall_test.tscn` — 20×6 wall, one body UV, weak decals top / strong deform bottom (matches in-game chunk batching). Auto-captures PNG with `-- capture=/tmp/wall.png`.
+- `scenes/deform_inspect.tscn` — four single bricks (weak decal vs strong deform on centre/corner/side). `-- capture=/tmp/inspect.png`.
+- `scenes/gpu_damage_bench.tscn` / `scenes/brick_render_bench.tscn` — GPU damage A/B and subdiv sweep for stone render cost.
 - `scenes/perf_benchmark.tscn` — see below.
 
 Run any of them with:
@@ -134,13 +137,35 @@ On spike frames with **~100–150 projectiles** in flight:
 When `BenchFlags.active`, the bench prints:
 
 ```
-Bullet analytical rays: calls=N  candidates/ray=X  full-fallback=Y  chunk-volumes tested=Z
+Bullet analytical rays: calls=N  grid/ray=X  obb/ray=Y  chunk-volumes tested=Z
 ```
 
-- **full-fallback** — grid returned zero cells → scanned all registered volumes (worst case, very expensive).
-- **candidates/ray** — avg volumes considered after spatial grid broadphase.
+- **grid/ray** — avg volumes in spatial cells along the segment (broadphase, over-fetches).
+- **obb/ray** — avg volumes after OBB filter (actually intersect the segment).
+- **chunk-volumes tested** — `raycast_chunks` invocations (capped at 14/ray).
 
 With `GG_TRACE=1`, `_intersect_ray` sub-buckets: `bullet_sync_exclude`, `bullet_phys_ray`, `bullet_analytical`, `bullet_phys_fallback`, plus parent `bullet`.
+
+### Stone / destructible **render** cost (GPU — looking at damaged walls)
+
+Separate from bullet-ray `physics_ms`. Cost scales with **visible chunk instances × verts/chunk × shader tier**.
+
+**One unit brick mesh** (`CHUNK_MESH_SUBDIVIDE=3`, ~150 verts) shared by intact, decal, and deform MultiMesh batches — only the **material** differs:
+
+| Batch | When | Shader |
+|---|---|---|
+| Intact | never hit | base rock (`damage_enabled=0`) |
+| Decal | any bullet hit | damage fragment only (`dmg_vertex_deform=0`) |
+| Deform | strong hit / carve | damage vertex carve (`dmg_vertex_deform=1`) |
+
+Undamaged chunks never touch the damage path. Hit chunks add draw instances, not extra geometry density — deform used to use subdiv 12 (~864 verts) on the same bricks; that was removed.
+
+**Measure render regressions** (must be windowed — headless reports 0 draws):
+
+```bash
+godot --path /Users/joep/dev/growing-guns res://scenes/gpu_damage_bench.tscn
+godot --path /Users/joep/dev/growing-guns res://scenes/brick_render_bench.tscn -- frac=0.3
+```
 
 ### Other recent perf work (for context)
 
@@ -150,10 +175,12 @@ With `GG_TRACE=1`, `_intersect_ray` sub-buckets: `bullet_sync_exclude`, `bullet_
 
 ### Open perf work (if heavy combat regresses again)
 
-1. **Cap `raycast_chunks` work** — avg ~26 grid candidates/ray is OK; if it climbs, tighten cell size or cap narrowphase tests per tick.
-2. **Open-air fast path** — when `terrain_near` is false, skip analytical entirely (one physics ray only).
+1. **Cap `raycast_chunks` work** — `MAX_BULLET_VOLUME_RAYCASTS=14` + OBB filter before narrowphase (Mar 2026).
+2. **Open-air fast path** — `terrain_near` is false when the segment misses every volume OBB; one physics ray only, no analytical pass.
 3. **Per-volume shell collider** — one box shape per volume for physics-only fallback instead of thousands of chunk shapes (bigger change).
 4. **`_handle_collision` on hit frames** — still inside the `bullet` Trace bucket; keep blast VFX deferred.
+5. **Render draws (~5k)** — many visible MultiMesh bodies; fewer verts/chunk + scoped damage materials help; further wins = draw merging / fewer bodies visible.
+6. **`max_physics_steps_per_frame=6`** — caps catch-up spiral (`psteps` was hitting 8); slight slow-mo under extreme load beats 6 fps freeze.
 
 Always A/B with headless bench + `GG_TRACE=1`. Bench prints `Bullet analytical rays: calls=… candidates/ray=…`.
 
