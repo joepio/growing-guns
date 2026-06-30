@@ -40,9 +40,8 @@ class Splat2D:
 			var c: Vector2 = (s["uv"] as Vector2) * res
 			var ru: float = float(s["ru"]) * res
 			var rv: float = float(s["rv"]) * res
-			var st: float = float(s["strength"])
 			draw_texture_rect(brush, Rect2(c - Vector2(ru, rv), Vector2(ru * 2.0, rv * 2.0)),
-				false, Color(st, st, st, 1.0))
+				false, Color(float(s["decal"]), float(s["deform"]), 0.0, 1.0))
 		pending.clear()
 
 
@@ -55,11 +54,14 @@ func _ready() -> void:
 	_build_wall()
 	# LEFT: a hit dead-centre on ONE brick's face. RIGHT: a hit on the boundary
 	# where 4 bricks meet. (Brick centres are at multiples of CELL offset by 0.5.)
-	var brick_centre := Vector3(-6.0, 1.2, THICK * 0.5)              # dead-centre of brick (7,3)
-	var brick_corner := Vector3(7.2, 0.0, THICK * 0.5)              # boundary of 4 bricks
-	_splat(brick_centre, Vector3(0, 0, 1), 18.0)
-	_splat(brick_corner, Vector3(0, 0, 1), 18.0)
-	print("[walltest] LEFT=brick-centre hit   RIGHT=4-brick-boundary hit")
+	# TOP brick: weak gun hit 5x → checks (a) decals stay small not a huge circle,
+	# (b) the decal lands on the TOP brick (not offset down → ViewportTexture flip).
+	for k in 5:
+		_splat(Vector3(-1.2, 6.0, THICK * 0.5), Vector3(0, 0, 1), 16.0)
+	# BOTTOM brick: strong gun 4x → deform, for reference.
+	for k in 4:
+		_splat(Vector3(3.6, -6.0, THICK * 0.5), Vector3(0, 0, 1), 20.0)
+	print("[walltest] TOP=weak 5x (decal)  BOTTOM=strong 4x (deform)")
 	_run_capture()
 
 
@@ -115,9 +117,10 @@ func _build_wall() -> void:
 			_chunk_xform.append(Transform3D(Basis.IDENTITY.scaled(Vector3(CELL, CELL, THICK) * 0.99), pos))
 			_chunk_custom.append(Color(fposmod(float(_chunk_xform.size()) * 0.618, 1.0), 1.0, 1.0, 0.65))
 
-	# Base batch (cheap mesh, no damage) — like the real game.
+	# Base batch (cheap mesh) — now uses the DAMAGE material so decals show on it even
+	# without deforming (matches the real game's intact MM after first hit).
 	var base_mmi := MultiMeshInstance3D.new()
-	base_mmi.material_override = base_mat
+	base_mmi.material_override = dmat
 	_base_mm = MultiMesh.new()
 	_base_mm.transform_format = MultiMesh.TRANSFORM_3D
 	_base_mm.use_custom_data = true
@@ -180,15 +183,19 @@ func _splat(local_pos: Vector3, n: Vector3, dmg: float) -> void:
 	var col := region % 3
 	var row := region / 3
 	var crater := 0.7 * 1.4 + 0.25  # carve radius → larger crater (matches game)
+	var strong := dmg >= 17.0       # MIN_DESTRUCTION_DAMAGE
+	var dec_r := 0.18
+	var uv := Vector2((float(col) + ruv.x) / 3.0, (float(row) + ruv.y) / 2.0)
 	_splatter.pending.append({
-		"uv": Vector2((float(col) + ruv.x) / 3.0, (float(row) + ruv.y) / 2.0),
-		"ru": (crater / plane.x) / 3.0,
-		"rv": (crater / plane.y) / 2.0,
-		"strength": clampf(0.55 + dmg * 0.03, 0.5, 1.4),
-	})
+		"uv": uv, "ru": (dec_r / plane.x) / 3.0, "rv": (dec_r / plane.y) / 2.0,
+		"decal": clampf(0.12 + dmg * 0.004, 0.12, 0.32), "deform": 0.0})
+	if strong:
+		_splatter.pending.append({
+			"uv": uv, "ru": (crater / plane.x) / 3.0, "rv": (crater / plane.y) / 2.0,
+			"decal": 0.0, "deform": clampf(dmg * 0.013, 0.08, 0.9)})
 	_splatter.queue_redraw()
-	_migrate_near(local_pos, crater * 0.5)
-	print("[walltest] hit at %v → migrated %d chunks total" % [local_pos, _migrated.size()])
+	if strong:
+		_migrate_near(local_pos, crater * 0.5)
 
 
 func _region(n: Vector3) -> int:
@@ -226,8 +233,8 @@ func _run_capture() -> void:
 	var size := Vector2i(1400, 760)
 	DisplayServer.window_set_size(size)
 	get_viewport().size = size
-	_cam.position = Vector3(-6.0, 1.6, 9.0)   # close, near head-on to the brick-centre hit
-	_cam.look_at(Vector3(-6.0, 1.2, 0.0), Vector3.UP)
+	_cam.position = Vector3(0.0, 0.0, 32.0)   # whole wall, to check decal Y position
+	_cam.look_at(Vector3.ZERO, Vector3.UP)
 	for _i in 30:
 		await get_tree().process_frame
 	RenderingServer.force_draw(true)

@@ -9,6 +9,12 @@ const Violence = preload("res://scripts/violence.gd")
 
 const MIN_REMOVE_DAMAGE := 12.0
 const MIN_ACCUMULATE_DAMAGE := 8.0
+# A hit must deal at least this much damage to affect a block AT ALL — below it the
+# gun neither deforms nor damages it (weak guns just ping off). Above it, a hit both
+# deforms and chips HP, so "can't dent it" always means "can't destroy it".
+# The base default gun deals 16 to a block (impact_dmg_ratio 1.0 → 9 + 1.0*7), so 17
+# leaves it just shy of denting anything — you need a stronger gun or an explosion.
+const MIN_DESTRUCTION_DAMAGE := 17.0
 const CHUNK_BASE_HEALTH := 42.0
 const CHUNK_VOLUME_HEALTH := 4.0
 const TARGET_CELL := 2.4
@@ -107,7 +113,12 @@ func queue_blast_damage(
 	var local_normal := Vector3.ZERO
 	if hit_normal.length_squared() > 0.0001:
 		local_normal = (global_basis.inverse() * hit_normal).normalized()
+	# Every hit leaves a decal + chips (handled in _splat_damage). But only hits at or
+	# above the threshold queue a CARVE that costs HP / deforms — weaker guns mark the
+	# rock without whittling it down (and can't destroy what they can't dent).
 	_splat_damage(local_pos, radius, damage, local_normal)
+	if damage < MIN_DESTRUCTION_DAMAGE:
+		return
 	if not _pending_carves.is_empty():
 		var last: Dictionary = _pending_carves[-1]
 		var last_pos: Vector3 = last["pos"] as Vector3
@@ -161,10 +172,10 @@ class _DmgSplatter:
 			var c: Vector2 = (s["uv"] as Vector2) * res
 			var ru: float = float(s["ru"]) * res
 			var rv: float = float(s["rv"]) * res
-			var st: float = float(s["strength"])
+			# R = decal strength (every hit), G = deform strength (strong hits only).
 			draw_texture_rect(
 				brush, Rect2(c - Vector2(ru, rv), Vector2(ru * 2.0, rv * 2.0)),
-				false, Color(st, st, st, 1.0))
+				false, Color(float(s["decal"]), float(s["deform"]), 0.0, 1.0))
 		pending.clear()
 
 
@@ -225,8 +236,12 @@ func _ensure_damage_buffer() -> void:
 	_dmg_mat.set_shader_parameter("dmg_box_size", box_size)
 	_dmg_mat.set_shader_parameter("dmg_tex_size", float(res))
 	_dmg_mat.set_shader_parameter("dmg_crater_depth", 0.85)
-	# NB: the intact (undamaged) chunks keep the cheap base mesh + base material.
-	# Damage is shown only on chunks that migrate into the dense deform batch.
+	# The whole hit body switches to the damage material on its CHEAP base mesh, so
+	# decals (bullet holes / cracks, the R channel) show anywhere it's hit — even by
+	# weak guns. Only chunks hit hard enough migrate to the dense mesh to actually
+	# deform (the G channel), so weak bullets mark the rock without reshaping it.
+	if _intact_mmi != null:
+		_intact_mmi.material_override = _dmg_mat
 
 
 # Signed atlas region for a hit: 0=+X 1=-X 2=+Y 3=-Y 4=+Z 5=-Z (matches the shader).
@@ -274,28 +289,39 @@ func _splat_damage(local_pos: Vector3, world_radius: float, damage: float, local
 	var col := region % 3
 	var row := region / 3
 	var atlas_uv := Vector2((float(col) + ruv.x) / 3.0, (float(row) + ruv.y) / 2.0)
-	# Crater is a bit larger than the carve radius so the deformation reads clearly
-	# (a bullet's 0.7m carve makes only a few-pixel splat on a big wall otherwise).
+	var strong := damage >= MIN_DESTRUCTION_DAMAGE
 	var crater := world_radius * 1.4 + 0.25
-	var ru := (crater / maxf(plane.x, 0.01)) / 3.0
-	var rv := (crater / maxf(plane.y, 0.01)) / 2.0
-	# Erosion accumulates with damage so a weak gun wears a chunk down gradually
-	# (roughly tracking its HP), instead of every hit landing a near-full crater.
-	var strength := clampf(damage * 0.013, 0.08, 0.9)
-	_dmg_splatter.pending.append({"uv": atlas_uv, "ru": ru, "rv": rv, "strength": strength})
+	# DECAL (R): a SMALL, low-strength bullet hole written by every hit. Keeping it
+	# small + faint means same-spot shots stay a tight cluster of holes rather than
+	# accumulating into one ever-growing dark circle.
+	var dec_r := 0.18
+	var decal := clampf(0.12 + damage * 0.004, 0.12, 0.32)
+	_dmg_splatter.pending.append({
+		"uv": atlas_uv, "decal": decal, "deform": 0.0,
+		"ru": (dec_r / maxf(plane.x, 0.01)) / 3.0, "rv": (dec_r / maxf(plane.y, 0.01)) / 2.0})
+	# DEFORM (G): only strong hits, with the larger crater radius so the geometry
+	# carve reads clearly. Accumulates so a strong gun wears the chunk down gradually.
+	if strong:
+		var deform := clampf(damage * 0.013, 0.08, 0.9)
+		_dmg_splatter.pending.append({
+			"uv": atlas_uv, "decal": 0.0, "deform": deform,
+			"ru": (crater / maxf(plane.x, 0.01)) / 3.0, "rv": (crater / maxf(plane.y, 0.01)) / 2.0})
 	_dmg_splatter.queue_redraw()
 	_dmg_viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
-	for c: CollisionShape3D in _candidate_cols(local_pos, crater * 0.5, 0.0):
-		if is_instance_valid(c) and not bool(c.get_meta("destroyed", false)):
-			_move_chunk_to_deform(c)
+	# Only strong hits migrate a chunk to the dense mesh (to physically deform it);
+	# weak hits just leave a decal on the cheap base mesh.
+	if strong:
+		for c: CollisionShape3D in _candidate_cols(local_pos, crater * 0.5, 0.0):
+			if is_instance_valid(c) and not bool(c.get_meta("destroyed", false)):
+				_move_chunk_to_deform(c)
 	# A few chips fly off at EVERY hit (not just removal), scaled by damage — a weak
 	# shot flicks a couple of flecks, a heavy round throws a real spray. The debris
 	# FIFO caps keep sustained fire from spamming.
 	var scene := _fx_scene()
 	if scene != null:
 		var wp := to_global(local_pos)
-		var chip_count := clampf(0.12 + damage * 0.013, 0.12, 1.2)
-		var chip_size := TARGET_CELL * (0.3 + minf(damage, 80.0) * 0.005)
+		var chip_count := clampf(0.06 + damage * 0.008, 0.06, 1.0)
+		var chip_size := TARGET_CELL * clampf(0.05 + damage * 0.0022, 0.05, 0.35)
 		Violence.spawn_destruction_debris(
 			scene, wp, global_basis, Vector3.ONE * chip_size,
 			_material_base_color(), wp, world_radius, 1, chip_count)
@@ -313,9 +339,12 @@ func apply_pending_carves() -> bool:
 	var accum: Dictionary = {}                  # CollisionShape3D -> damage
 	var touched: Array[CollisionShape3D] = []
 	var max_radius := 0.0
+	var blast_center_local := Vector3.ZERO  # the dominant carve's centre = the boom origin
 	for carve: Dictionary in _pending_carves:
 		var local_center: Vector3 = carve["pos"] as Vector3
 		var radius: float = float(carve["radius"])
+		if radius > max_radius:
+			blast_center_local = local_center
 		max_radius = maxf(max_radius, radius)
 		var damage: float = float(carve.get("damage", 800.0))
 		var inward: Vector3 = carve["normal"] as Vector3
@@ -397,9 +426,11 @@ func apply_pending_carves() -> bool:
 		if tracker != null and is_instance_valid(tracker) and tracker.has_method("notify_chunks_removed"):
 			tracker.call("notify_chunks_removed", self, to_remove_cols)
 	var base_color := _material_base_color()
+	# Debris radiates from the BLAST origin, not each block's own centre, so a big
+	# boom throws everything outward instead of each block puffing on the spot.
 	Violence.spawn_destruction_debris(
 		scene, burst_center / n, global_basis, burst_size / n, base_color,
-		burst_center / n, max_radius, to_remove_cols.size())
+		to_global(blast_center_local), max_radius, to_remove_cols.size())
 	exposure_center /= n
 	var exposure_radius := 0.0
 	for col: CollisionShape3D in to_remove_cols:
