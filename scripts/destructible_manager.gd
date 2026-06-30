@@ -275,11 +275,6 @@ static func reset_chunk_removals() -> void:
 
 
 static var _exposed_chunk_count: int = 0
-static var _exposure_lod_shed: bool = false
-
-
-static func note_exposed_chunk(delta: int) -> void:
-	_exposed_chunk_count = maxi(0, _exposed_chunk_count + delta)
 
 
 static func debug_exposed_chunk_count() -> int:
@@ -288,23 +283,6 @@ static func debug_exposed_chunk_count() -> int:
 
 static func reset_exposed_chunk_count() -> void:
 	_exposed_chunk_count = 0
-
-
-static func update_exposure_lod() -> void:
-	var should_shed := (PerfGovernor.quality_scale if PerfGovernor else 1.0) <= 0.55
-	if should_shed == _exposure_lod_shed:
-		return
-	_exposure_lod_shed = should_shed
-	var i := 0
-	while i < _registered_ids.size():
-		var id: int = _registered_ids[i]
-		var node: Object = instance_from_id(id)
-		if not is_instance_valid(node):
-			_unregister_id(id)
-			continue
-		if node.has_method("_update_exposure_lod"):
-			node.call("_update_exposure_lod")
-		i += 1
 
 
 static var _bench_destruct_usec: Dictionary = {}

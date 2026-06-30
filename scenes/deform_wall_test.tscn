@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://cousnjw20ww76"]
+
+[ext_resource type="Script" path="res://scripts/deform_wall_test.gd" id="1_dwt"]
+
+[node name="DeformWallTest" type="Node3D"]
+script = ExtResource("1_dwt")
