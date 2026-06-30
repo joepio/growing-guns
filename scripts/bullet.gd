@@ -5,21 +5,23 @@ const DestructibleManager = preload("res://scripts/destructible_manager.gd")
 
 var speed: float = 150.0
 var direction: Vector3 = Vector3.FORWARD
-# velocity carries the actual world-space motion so we can apply gravity
-# (bullet_drop) and homing without recomputing direction/speed manually.
+# Actual flight vector — updated for gravity (bullet_drop) and homing; direction/
+# speed are kept in sync each tick for code that still reads them directly.
 var velocity: Vector3 = Vector3.ZERO
 var shooter_id: int = 0
 var weapon_stats: Weapon = null
 var max_range: float = 200.0
 var distance_traveled: float = 0.0
 
-var ricochet_left: int = 0
-var world_pierce_left: int = 0
-var ricochet_hits: int = 0
-var body_ricochets_done: int = 0
-var last_in_mag: bool = false
+var ricochet_left: int = 0          # wall ricochets remaining (Ricochet card)
+var world_pierce_left: int = 0      # surfaces the bullet can drill through (Drill card)
+var ricochet_hits: int = 0          # how many times we've already bounced (damage scaling)
+var body_ricochets_done: int = 0    # body bounces used this flight (Bouncy Castle card)
+var last_in_mag: bool = false       # last round in mag — some cards key off this shot
 var silenced: bool = false
-var visible_to_shooter: bool = false
+var visible_to_shooter: bool = false  # silenced tracers: only the shooter may see them
+# Colliders this bullet must not re-hit — shooter hitboxes, pierced chunk/body RIDs,
+# ghosts passed through, etc. Grows over the projectile's lifetime.
 var excluded_rids: Array[RID] = []
 
 # Per-bullet ray query — allocated once in setup() and re-used every physics
@@ -77,8 +79,10 @@ static func _get_tracer_material(color: Color, alpha: float, emission_energy: fl
 	_tracer_mat_cache[key] = mat
 	return mat
 
-const HITSCAN_THRESHOLD := 550.0
+const HITSCAN_THRESHOLD := 550.0  # m/s — faster than this, ray once in setup and despawn
 const SILENCED_OWNER_TRACER_ALPHA := 0.12
+const RAY_MASK_ALL := 1 | 2 | 4  # terrain + players + projectiles
+const RAY_MASK_NO_TERRAIN := 2 | 4  # players + projectiles — terrain via analytical query
 
 func setup(origin: Vector3, dir: Vector3, shooter: int, w: Weapon, p_last_in_mag: bool = false, p_visible_to_shooter: bool = false) -> void:
 	global_position = origin
@@ -99,7 +103,7 @@ func setup(origin: Vector3, dir: Vector3, shooter: int, w: Weapon, p_last_in_mag
 		excluded_rids = shooter_node.call("get_hitbox_rids")
 
 	_ray_query = PhysicsRayQueryParameters3D.new()
-	_ray_query.collision_mask = 1 | 2 | 4  # world + players + projectiles
+	_ray_query.collision_mask = RAY_MASK_ALL
 	_ray_query.exclude = excluded_rids
 	_ray_query.collide_with_areas = true
 
@@ -184,12 +188,9 @@ func _physics_process(delta: float) -> void:
 	var step: Vector3 = velocity * delta
 	var step_len: float = step.length()
 
-	var space: PhysicsDirectSpaceState3D = get_world_3d().direct_space_state
 	# Mutate the cached query — only from/to change tick-to-tick. exclude is
 	# kept in sync at setup + in the ghost-passthrough branch of _handle_collision.
-	_ray_query.from = global_position
-	_ray_query.to = global_position + step
-	var result: Dictionary = space.intersect_ray(_ray_query)
+	var result: Dictionary = _intersect_ray(global_position, global_position + step)
 	if result.is_empty():
 		global_position += step
 		distance_traveled += step_len
@@ -211,18 +212,59 @@ func _physics_process(delta: float) -> void:
 	if Trace.enabled:
 		Trace.prof("bullet", Time.get_ticks_usec() - _pt)
 
+func _sync_ray_excludes(_from: Vector3, _to: Vector3) -> void:
+	if _ray_query == null:
+		return
+	_ray_query.exclude = excluded_rids
+
+
+# Physics ray for players / grenades, merged with one analytical destructible pass.
+func _intersect_ray(from: Vector3, to: Vector3) -> Dictionary:
+	if _ray_query == null:
+		return {}
+	var space: PhysicsDirectSpaceState3D = get_world_3d().direct_space_state
+	if space == null:
+		return {}
+	_ray_query.from = from
+	_ray_query.to = to
+	_ray_query.exclude = excluded_rids
+	var _t0 := Time.get_ticks_usec() if Trace.enabled else 0
+	var terrain_q: Dictionary = DestructibleManager.query_bullet_ray(from, to, excluded_rids)
+	var destruct_hit: Dictionary = terrain_q.get("hit", {})
+	var terrain_near: bool = bool(terrain_q.get("terrain_near", false))
+	if Trace.enabled:
+		Trace.prof("bullet_analytical", Time.get_ticks_usec() - _t0)
+	_ray_query.collision_mask = RAY_MASK_NO_TERRAIN if terrain_near else RAY_MASK_ALL
+	var _t1 := Time.get_ticks_usec() if Trace.enabled else 0
+	var phys_hit: Dictionary = space.intersect_ray(_ray_query)
+	if Trace.enabled:
+		Trace.prof("bullet_phys_ray", Time.get_ticks_usec() - _t1)
+	_ray_query.collision_mask = RAY_MASK_ALL
+	if terrain_near and phys_hit.is_empty() and destruct_hit.is_empty():
+		_ray_query.collision_mask = RAY_MASK_ALL
+		var _t2 := Time.get_ticks_usec() if Trace.enabled else 0
+		var fb: Dictionary = space.intersect_ray(_ray_query)
+		if Trace.enabled:
+			Trace.prof("bullet_phys_fallback", Time.get_ticks_usec() - _t2)
+		_ray_query.collision_mask = RAY_MASK_ALL
+		return fb
+	if phys_hit.is_empty():
+		return destruct_hit
+	if destruct_hit.is_empty():
+		return phys_hit
+	var t_phys: float = from.distance_to(phys_hit.position)
+	var t_dest: float = from.distance_to(destruct_hit.position)
+	return destruct_hit if t_dest < t_phys else phys_hit
+
 func _do_hitscan() -> void:
 	if not is_inside_tree():
 		return
 
-	var space := get_world_3d().direct_space_state
 	var start_pos := global_position
 	
-	_ray_query.from = start_pos
-	_ray_query.to = start_pos + direction * max_range
-	var result: Dictionary = space.intersect_ray(_ray_query)
+	var result: Dictionary = _intersect_ray(start_pos, start_pos + direction * max_range)
 	
-	var hit_pos: Vector3 = _ray_query.to
+	var hit_pos: Vector3 = start_pos + direction * max_range
 	if not result.is_empty():
 		hit_pos = result.position
 		# Update distance for correct damage falloff/growth in _handle_collision
@@ -355,14 +397,14 @@ func _handle_collision(result: Dictionary) -> void:
 			var ally_rids: Array = hit_player.call("get_hitbox_rids") if hit_player.has_method("get_hitbox_rids") else [hit_player.get_rid()]
 			excluded_rids.append_array(ally_rids)
 			if _ray_query:
-				_ray_query.exclude = excluded_rids
+				_sync_ray_excludes(_ray_query.from, _ray_query.to)
 			return
 
 	if hit_player and hit_player.get("ghost_mode") == true:
 		var ghosts_rids: Array = hit_player.call("get_hitbox_rids") if hit_player.has_method("get_hitbox_rids") else [hit_player.get_rid()]
 		excluded_rids.append_array(ghosts_rids)
 		if _ray_query:
-			_ray_query.exclude = excluded_rids
+			_sync_ray_excludes(_ray_query.from, _ray_query.to)
 		return # Continue through ghosts
 
 	var body_ricochet_bounce := false
@@ -480,7 +522,7 @@ func _handle_collision(result: Dictionary) -> void:
 		if result.has("rid"):
 			excluded_rids.append(result.rid)
 			if _ray_query:
-				_ray_query.exclude = excluded_rids
+				_sync_ray_excludes(_ray_query.from, _ray_query.to)
 		global_position = hit_pos + direction * 0.12
 		distance_traveled += 0.12
 		return
@@ -494,7 +536,7 @@ func _handle_collision(result: Dictionary) -> void:
 		var victim_rids: Array = hit_player.call("get_hitbox_rids") if hit_player.has_method("get_hitbox_rids") else [hit_player.get_rid()]
 		excluded_rids.append_array(victim_rids)
 		if _ray_query:
-			_ray_query.exclude = excluded_rids
+			_sync_ray_excludes(_ray_query.from, _ray_query.to)
 		return
 
 	# Ricochet logic

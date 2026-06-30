@@ -10,7 +10,7 @@ Multiplayer FPS in Godot 4.6. Last-man-standing rounds; round losers pick stacki
 - Physics tick: **120 Hz** (`project.godot` → `common/physics_ticks_per_second=120`)
 - Render cap: 240 fps
 - Main scene: `res://scenes/game.tscn`
-- Autoloads (singletons): `NetworkManager` (`scripts/network_manager.gd`), `SFX` (`scripts/sfx.gd`)
+- Autoloads (singletons): `NetworkManager` (`scripts/network_manager.gd`), `SFX` (`scripts/sfx.gd`), `Trace` (`scripts/trace.gd`, debug/`GG_TRACE=1` only useful)
 
 `Violence` (`scripts/violence.gd`) is a `class_name` static class — call as `Violence.foo(...)`, do **not** instantiate and do **not** `call_deferred()` on it (it's not an instance, will fail to compile).
 
@@ -21,7 +21,9 @@ Multiplayer FPS in Godot 4.6. Last-man-standing rounds; round losers pick stacki
 | `player.gd` (~2k lines) | The Player class. Movement, aim, RPC firing, bot AI, gun visual setup, body scaling, ghost mode. | `_fire_rifle` is the **human** fire path (cycles bolt, ejects casings, adds heat). `_bot_shoot` calls `_rifle_fired.rpc()` directly and **bypasses** all that. |
 | `weapon.gd` | `class_name Weapon` resource. Single source of truth for stats. | Cards mutate fields; never read raw fields in gameplay code — use the `get_*()` derived getters. |
 | `card_library.gd` | All cards. `static func by_id(id)` and `random_ids(n, score)`. | Card dicts have `apply: Callable` that mutates a `Weapon`. |
-| `bullet.gd` | Per-bullet `Node3D` (set_script-ed at spawn, **not** a scene). Raycasts each `_physics_process`. | `_handle_collision` runs gameplay **and** visual spawning synchronously in physics tick — careful adding work here. |
+| `destructible_manager.gd` | Static registry + batched destruction flush for `DestructibleSolid` volumes. | Bullet rays use spatial grid + analytical chunk AABB tests; `register_destructible` must succeed or bullets pass through terrain. |
+| `destructible_solid.gd` | Pre-split destructible terrain/props (`StaticBody3D` + chunk colliders). | `raycast_chunks()` is the analytical narrowphase; GPU damage uses per-chunk decal/deform batches. |
+| `bullet.gd` | Per-bullet `Node3D` (set_script-ed at spawn, **not** a scene). Dual raycast each `_physics_process` (see Performance). | `_handle_collision` runs gameplay **and** visual spawning synchronously in physics tick — careful adding work here. |
 | `procedural_gun.gd` (~1k lines) | `@tool`, builds first-person rifle from primitives. | Re-read the file before editing — has many setters that all call `_rebuild()`. `apply_weapon_stats(w)` is the entry point that maps stats → geometry. |
 | `violence.gd` | Static helpers for blood, gibs, ragdolls, explosion VFX, view punch. | All calls are static. Many cached `MeshInstance3D` resources at the top of the file. |
 | `sfx.gd` (~1.4k lines) | Procedural audio synthesis (no WAV samples on disk for shots/explosions/casings). HDR ducking, raytraced reverb bus, distance-delay simulation. | Hot path uses `_cached_wav(key, gen)` — caches the converted `AudioStreamWAV`, not just the raw `PackedVector2Array`. Don't reintroduce per-call `_samples_to_wav(...)`. |
@@ -39,7 +41,7 @@ Multiplayer FPS in Godot 4.6. Last-man-standing rounds; round losers pick stacki
 
 Run any of them with:
 ```bash
-godot --path /Users/joep/dev/godot res://scenes/<name>.tscn
+godot --path /Users/joep/dev/growing-guns res://scenes/<name>.tscn
 ```
 
 ## Performance
@@ -47,8 +49,16 @@ godot --path /Users/joep/dev/godot res://scenes/<name>.tscn
 Use `scenes/perf_benchmark.tscn` to measure regressions:
 
 ```bash
-godot --headless --path /Users/joep/dev/godot res://scenes/perf_benchmark.tscn
+godot --headless --path /Users/joep/dev/growing-guns res://scenes/perf_benchmark.tscn
 ```
+
+For spike attribution during a bench or gameplay session:
+
+```bash
+GG_TRACE=1 godot --headless --path /Users/joep/dev/growing-guns res://scenes/perf_benchmark.tscn
+```
+
+Grep the log for `[trace] SPIKE` lines. `cpu[...]` buckets are **GDScript µs summed across all physics ticks in that render frame** — not the same thing as `physics_ms` (see below).
 
 Spawns 4 bots with a fixed overpowered card build (uzi×2 + shotgun + explosive×2 + damage), runs for 15 s after a 3 s warmup, dumps a stats table + JSON to `/tmp/godot_perf_bench.json`. Always run **headless** — macOS won't honour `WINDOW_MODE_MINIMIZED` on a freshly-opened window, and a visible window introduces ~500 ms compositor stalls that pollute `frame_ms`.
 
@@ -64,11 +74,88 @@ All toggles live on `BenchFlags` (`scripts/bench_flags.gd`) — a `class_name` w
 
 What's known about the budget (4-bot stress test):
 
-- Floor (no explosion FX/audio at all): ~5 ms `physics_ms` mean — bullet raycasts + bot AI + 4 `CharacterBody3D` moves
-- Each `SFX.explosion(...)` was the biggest offender until the WAV cache landed; visuals are ~0.15 ms each by comparison
-- Bot AI bypasses `_fire_rifle()` so any cost added there (heat / bolt / casings) doesn't show up in this bench. Validate human paths separately.
+- **Target:** `physics_ms` mean ~4–7 ms in baseline combat. Above ~10 ms means meaningful per-tick regression.
+- **Floor (no explosion FX/audio):** ~5 ms `physics_ms` mean — bot AI + 4× `CharacterBody3D` + bullet rays + destruction queue.
+- **Light combat** (few projectiles): `physics_ms` mean can still look fine (~4 ms) even while spike frames are bad — don't trust mean alone.
+- **Heavy combat** (~100–150 projectiles, uzi×2 build): spike frames hit **60–70 ms** render time with **8 physics catch-up steps** (`psteps=8`). Bench `physics_ms` max can reach **200+ ms** on individual samples.
+- Each `SFX.explosion(...)` was the biggest audio offender until the WAV cache landed; blast **visuals** are ~0.15 ms each when not deferred.
+- Bot AI bypasses `_fire_rifle()` so cost added there (heat / bolt / casings) doesn't show up in this bench. Validate human paths separately.
 
-`bench_mode=baseline` should report `physics_ms` mean ~4–7 ms. If it climbs above ~10 ms you've added meaningful per-tick work somewhere.
+### How to read the numbers
+
+| Metric | Source | Meaning |
+|---|---|---|
+| `physics_ms` (bench table) | `Performance.TIME_PHYSICS_PROCESS` | **Last physics tick only**, sampled ~1 Hz during the 15 s measure window. Underreports sustained load. |
+| `physSum` / `psteps` (Trace SPIKE lines) | Trace autoload | Total engine physics ms **this render frame** and how many 120 Hz steps ran (spiral when behind). |
+| `cpu[bullet=…]` etc. | `Trace.prof()` in GDScript | Our script time **summed across all physics ticks in that render frame**. Can exceed `physSum` because it's a different accounting. |
+| `DestructibleManager.bench_bullet_ray_stats()` | Printed at end of bench | Analytical-ray counters: calls, avg grid candidates/ray, full-volume fallback count, `raycast_chunks` invocations. |
+
+### Bullet ray architecture (current — as of analytical-path work)
+
+Each bullet tick calls `_intersect_ray(from, to)`:
+
+1. **`DestructibleManager.query_bullet_ray`** — **one** spatial-grid query + analytical `raycast_chunks` on sorted nearby volumes. Returns `{ hit, terrain_near }`.
+2. **`space.intersect_ray`** — if `terrain_near`, physics mask is **players + projectiles only** (`2|4`); terrain comes from step 1. Open air uses full mask `1|2|4`.
+3. **Fallback** (rare) — if grid said terrain nearby but both rays miss, one full-mask physics ray (grid miss safety net).
+
+Key field in `bullet.gd`: `excluded_rids` (lifetime pierce/ghost list). Do **not** rebuild a per-tick body-RID exclude list — use the layer mask instead.
+
+**Implementation notes (Mar 2026):**
+- Merged duplicate grid passes (`fill_bullet_physics_exclude` + `raycast_bullet_destructibles` → single `query_bullet_ray`).
+- Removed full-volume fallback (was scanning all ~470 volumes — perf cliff + pass-through bugs).
+- Widen grid pad (3× cell) on empty first pass instead of scanning everything.
+- Sort grid candidates by ray distance for early `ray_to` shortening.
+- Cache volume node refs in `_registered_vols` (skip `instance_from_id` per candidate).
+
+**Correctness trap:** `destructible_manager.gd` must compile. A bad call like `sqrtf()` (invalid GDScript) breaks the script → `register_destructible` never runs → analytical path empty + physics excludes terrain → **bullets pass through everything**.
+
+**Correctness trap:** `fill_bullet_physics_exclude` must **not** fall back to excluding all ~470 volume body RIDs when the grid misses. That made physics miss all terrain while analytical also failed → pass-through, and pushed `physics_ms` mean to ~100 ms.
+
+### What is actually costly (measured with `GG_TRACE=1`, not guessed)
+
+On spike frames with **~100–150 projectiles** in flight:
+
+| Trace bucket | Typical spike-frame cost (pre-merge, ~100 proj) | After merge + mask (moderate proj) |
+|---|---|---|
+| `bullet_analytical` / `bullet_destruct_ray` | **~70–125 ms** | **~5–12 ms** |
+| ~~`bullet_sync_exclude`~~ | ~~**~40–55 ms**~~ | **removed** (was duplicate grid) |
+| `bullet_phys_ray` | **~0.3–1 ms** | **~0 ms** when terrain_near (mask skips layer 1) |
+| `bullet_phys_fallback` | **~0.2 ms** | rare |
+| `bullet` (total) | **~90–185 ms** | scales with projectile count + hits |
+| `debris_flush` | varies | Still significant during heavy destruction (see bench destruct prof). |
+| `blast_vfx` | ~0–25 ms | Mostly deferred via `Violence.flush_pending_blast_visuals()` from `game.gd` / bench. |
+
+**Old path (single `intersect_ray` through chunk colliders):** ~5 ms `physics_ms` mean but physics engine scanned **~5000 chunk shapes** on layer 1 per ray — caused **75–85 ms** spike frames attributed to bullet/physics before analytical work.
+
+**Current tradeoff:** physics narrowphase is cheap (`bullet_phys_ray` ≪ 1 ms/frame), but **GDScript analytical broadphase+narrowphase replaced it** and is now the bottleneck. The optimization partially worked; the replacement path isn't lean enough yet.
+
+### Bench counters and Trace buckets
+
+When `BenchFlags.active`, the bench prints:
+
+```
+Bullet analytical rays: calls=N  candidates/ray=X  full-fallback=Y  chunk-volumes tested=Z
+```
+
+- **full-fallback** — grid returned zero cells → scanned all registered volumes (worst case, very expensive).
+- **candidates/ray** — avg volumes considered after spatial grid broadphase.
+
+With `GG_TRACE=1`, `_intersect_ray` sub-buckets: `bullet_sync_exclude`, `bullet_phys_ray`, `bullet_analytical`, `bullet_phys_fallback`, plus parent `bullet`.
+
+### Other recent perf work (for context)
+
+- **GPU damage:** scoped to hit chunks only (`destructible_solid.gd` decal/deform batches) — avoids whole-body material swap regression.
+- **Blast VFX:** heavy visuals deferred; flush from game loop.
+- **Debris:** burst caps + cheap-tier fallback under load (`violence.gd`).
+
+### Open perf work (if heavy combat regresses again)
+
+1. **Cap `raycast_chunks` work** — avg ~26 grid candidates/ray is OK; if it climbs, tighten cell size or cap narrowphase tests per tick.
+2. **Open-air fast path** — when `terrain_near` is false, skip analytical entirely (one physics ray only).
+3. **Per-volume shell collider** — one box shape per volume for physics-only fallback instead of thousands of chunk shapes (bigger change).
+4. **`_handle_collision` on hit frames** — still inside the `bullet` Trace bucket; keep blast VFX deferred.
+
+Always A/B with headless bench + `GG_TRACE=1`. Bench prints `Bullet analytical rays: calls=… candidates/ray=…`.
 
 ## Networking notes
 
@@ -96,6 +183,8 @@ What's known about the budget (4-bot stress test):
 - **Don't add per-frame work in `bullet._physics_process`** without measuring — bullets are spawned in bursts (~50–90 in flight in heavy combat).
 - **Don't add per-call allocations to SFX hot paths** (`shot`, `explosion`, `casing_drop`, `impact`). They run hundreds of times per second under stress. Use `_cached_wav` + `_play_stream`, never `_play(_samples_to_wav(...))`.
 - **Don't remove the `_bench_inc` / `bench_no_*` hooks** without checking `perf_benchmark.gd` first — they're how the bench attributes cost.
+- **Don't break `destructible_manager.gd` compile** — if it fails to load, destructibles don't register and the dual bullet-ray path silently stops hitting terrain.
+- **Don't reintroduce full-volume grid fallback** — never scan all ~470 registered volumes per ray.
 
 ## Build / export
 

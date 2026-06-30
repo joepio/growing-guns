@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://jq0y22ius753"]
+
+[ext_resource type="Script" path="res://scripts/gpu_damage_bench.gd" id="1_gpudmgbench"]
+
+[node name="GpuDamageBench" type="Node3D"]
+script = ExtResource("1_gpudmgbench")

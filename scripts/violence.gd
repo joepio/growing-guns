@@ -1295,6 +1295,19 @@ static var _cheap_light_count: int = 0
 # Live smoke billow pivots — avoids get_nodes_in_group() on every blast push.
 static var _blast_smoke_layer_pivots: Array[Node3D] = []
 
+# Heavy billow/shard/ember spawns are deferred to process-frame flush so a burst
+# of explosions in one physics tick can't spend 20ms+ synchronously.
+static var _pending_blast_visuals: Array = []
+static var _blast_visual_process_frame: int = -1
+static var _blast_visual_process_usec: int = 0
+static var _debris_process_frame: int = -1
+static var _debris_process_usec: int = 0
+
+const MAX_PENDING_BLAST_VISUALS := 32
+const MAX_BLAST_HEAVY_JOBS_PER_PROCESS_FRAME := 2
+const MAX_BLAST_HEAVY_USEC_PER_PROCESS_FRAME := 4500
+const MAX_DEBRIS_USEC_PER_PROCESS_FRAME := 3500
+
 # Bench-only spawn cost attribution (perf_benchmark reads via bench_blast_prof_summary).
 static var _bench_blast_usec: Dictionary = {}
 static var _bench_blast_n: Dictionary = {}
@@ -1432,17 +1445,99 @@ static func _claim_cheap_blast(pos: Vector3) -> bool:
 	return true
 
 
+static func _full_blast_eligible_except_frame_cap(pos: Vector3) -> bool:
+	_begin_blast_frame()
+	if _blast_cluster_blocked(pos):
+		return false
+	var now := Time.get_ticks_msec()
+	var window_count := _full_blasts_this_window
+	if now - _full_blast_window_ms >= FULL_BLAST_WINDOW_MS:
+		window_count = 0
+	return window_count < MAX_FULL_BLASTS_PER_WINDOW
+
+
+static func _reserve_full_blast_slot(pos: Vector3) -> void:
+	var now := Time.get_ticks_msec()
+	if now - _full_blast_window_ms >= FULL_BLAST_WINDOW_MS:
+		_full_blast_window_ms = now
+		_full_blasts_this_window = 0
+	_full_blasts_this_window += 1
+	_blast_cluster_positions.append(pos)
+
+
+static func _sync_blast_visual_process_budget() -> void:
+	var f := Engine.get_process_frames()
+	if _blast_visual_process_frame != f:
+		_blast_visual_process_frame = f
+		_blast_visual_process_usec = 0
+
+
+static func _sync_debris_process_budget() -> void:
+	var f := Engine.get_process_frames()
+	if _debris_process_frame != f:
+		_debris_process_frame = f
+		_debris_process_usec = 0
+
+
+static func debug_pending_blast_visuals() -> int:
+	return _pending_blast_visuals.size()
+
+
+static func _enqueue_blast_visual_job(
+	scene: Node,
+	pos: Vector3,
+	radius: float,
+	color: Color,
+	play_audio: bool,
+	include_immediate: bool,
+) -> void:
+	if _pending_blast_visuals.size() >= MAX_PENDING_BLAST_VISUALS:
+		return
+	_pending_blast_visuals.append({
+		"scene": scene,
+		"pos": pos,
+		"radius": radius,
+		"color": color,
+		"play_audio": play_audio,
+		"immediate": include_immediate,
+	})
+
+
+static func flush_pending_blast_visuals() -> void:
+	_sync_blast_visual_process_budget()
+	if _pending_blast_visuals.is_empty():
+		return
+	var jobs_done := 0
+	while not _pending_blast_visuals.is_empty():
+		if jobs_done >= MAX_BLAST_HEAVY_JOBS_PER_PROCESS_FRAME:
+			break
+		if _blast_visual_process_usec >= MAX_BLAST_HEAVY_USEC_PER_PROCESS_FRAME:
+			break
+		var job: Dictionary = _pending_blast_visuals[0]
+		var scene: Node = job.get("scene") as Node
+		if scene == null or not is_instance_valid(scene):
+			_pending_blast_visuals.pop_front()
+			continue
+		var t0 := Time.get_ticks_usec()
+		var pos: Vector3 = job.get("pos") as Vector3
+		var radius: float = float(job.get("radius"))
+		var color: Color = job.get("color") as Color
+		var play_audio: bool = bool(job.get("play_audio"))
+		if bool(job.get("immediate")):
+			_spawn_bullet_blast_immediate_visuals(scene, pos, radius, color, play_audio)
+		_spawn_bullet_blast_heavy_visuals(scene, pos, radius, color)
+		_pending_blast_visuals.pop_front()
+		jobs_done += 1
+		_blast_visual_process_usec += Time.get_ticks_usec() - t0
+
+
 # Read-only budget peek — lets bullet.gd skip the blast RPC when every layer
 # is capped/clustered (common for minigun + explosive on one spot).
 static func blast_vfx_will_spawn(pos: Vector3) -> bool:
 	_begin_blast_frame()
 	if _blast_cluster_blocked(pos):
 		return false
-	var max_full := maxi(1, int(round(MAX_FULL_BLASTS_PER_FRAME * vfx_quality_scale())))
-	var window_count := _full_blasts_this_window
-	if Time.get_ticks_msec() - _full_blast_window_ms >= FULL_BLAST_WINDOW_MS:
-		window_count = 0
-	if _full_blasts_this_frame < max_full and window_count < MAX_FULL_BLASTS_PER_WINDOW:
+	if _full_blast_eligible_except_frame_cap(pos):
 		return true
 	return _cheap_blasts_this_frame < maxi(2, int(round(MAX_CHEAP_BLASTS_PER_FRAME * vfx_quality_scale())))
 
@@ -2205,6 +2300,65 @@ static func _spawn_blast_fireball_light(scene: Node, pos: Vector3, radius: float
 	_tween_blast_fireball_light(glow, radius, color, energy_mult, range_start, range_end)
 
 
+static func _spawn_bullet_blast_immediate_visuals(
+	scene: Node,
+	pos: Vector3,
+	radius: float,
+	color: Color,
+	play_audio: bool,
+) -> void:
+	if radius >= BLAST_DISTORTION_MIN_RADIUS:
+		_bench_blast_scope("heat_distortion", func() -> void:
+			spawn_heat_distortion(
+				scene, pos, radius,
+				blast_heat_distortion_duration(radius),
+				blast_heat_distortion_strength(radius)))
+	_bench_blast_scope("flash_light", func() -> void:
+		_spawn_blast_flash_light(scene, pos, radius))
+	_bench_blast_scope("fireball_light", func() -> void:
+		_spawn_blast_fireball_light(scene, pos, radius, color))
+	if play_audio and radius >= 3.5:
+		if not (BenchFlags.active and BenchFlags.no_explosion_audio) and _claim_explosion_sfx():
+			_bench_blast_scope("explosion_audio", func() -> void:
+				SFX.explosion(pos, radius))
+
+
+static func _spawn_bullet_blast_heavy_visuals(
+	scene: Node,
+	pos: Vector3,
+	radius: float,
+	color: Color,
+) -> void:
+	if scene == null or (BenchFlags.active and BenchFlags.no_explosion_visuals):
+		return
+	_bench_blast_scope("smoke_push", func() -> void:
+		_push_nearby_blast_smoke(scene, pos, radius))
+	_bench_blast_scope("smoke_billow", func() -> void:
+		spawn_blast_fire_smoke(scene, pos, radius, color))
+	_bench_blast_scope("fire_billow", func() -> void:
+		spawn_blast_fire_clouds(scene, pos, radius, color))
+	_bench_blast_scope("flame_shards", func() -> void:
+		spawn_blast_flame_shards(scene, pos, radius, color))
+	_bench_blast_scope("embers", func() -> void:
+		spawn_blast_embers(scene, pos, radius, color))
+
+
+static func _spawn_bullet_blast_feedback(
+	scene: Node,
+	pos: Vector3,
+	radius: float,
+	local_player: Node,
+) -> void:
+	if scene.has_method("trigger_explosion_sidechain"):
+		_bench_blast_scope("sidechain", func() -> void:
+			var sidechain_peak := clampf(radius / 5.0, 0.35, 3.0)
+			scene.trigger_explosion_sidechain(pos, radius, sidechain_peak))
+	if local_player and is_instance_valid(local_player) and local_player.has_method("apply_explosion_view_punch"):
+		_bench_blast_scope("view_punch", func() -> void:
+			var punch_peak := clampf(radius / 5.0, 0.45, 1.6)
+			local_player.apply_explosion_view_punch(pos, radius, punch_peak))
+
+
 static func _spawn_cheap_blast_flare(scene: Node, pos: Vector3, radius: float, color: Color) -> void:
 	if scene == null or radius <= 0.0 or not _claim_cheap_blast(pos):
 		return
@@ -2221,16 +2375,17 @@ static func spawn_bullet_blast(scene: Node, pos: Vector3, radius: float, color: 
 	if scene == null:
 		return
 	var t0 := Time.get_ticks_usec() if BenchFlags.active else 0
-	var full_blast := _claim_full_blast(pos)
-	if full_blast and scene.has_method("trigger_explosion_sidechain"):
-		_bench_blast_scope("sidechain", func() -> void:
-			var sidechain_peak := clampf(radius / 5.0, 0.35, 3.0)
-			scene.trigger_explosion_sidechain(pos, radius, sidechain_peak))
-	if full_blast and local_player and is_instance_valid(local_player) and local_player.has_method("apply_explosion_view_punch"):
-		_bench_blast_scope("view_punch", func() -> void:
-			var punch_peak := clampf(radius / 5.0, 0.45, 1.6)
-			local_player.apply_explosion_view_punch(pos, radius, punch_peak))
-	if not full_blast:
+	var eligible := _full_blast_eligible_except_frame_cap(pos)
+	var full_blast := eligible and _claim_full_blast(pos)
+	if full_blast:
+		_spawn_bullet_blast_feedback(scene, pos, radius, local_player)
+		_spawn_bullet_blast_immediate_visuals(scene, pos, radius, color, play_audio)
+		_enqueue_blast_visual_job(scene, pos, radius, color, play_audio, false)
+	elif eligible:
+		_spawn_bullet_blast_feedback(scene, pos, radius, local_player)
+		_reserve_full_blast_slot(pos)
+		_enqueue_blast_visual_job(scene, pos, radius, color, play_audio, true)
+	else:
 		_bench_blast_scope("cheap_flare", func() -> void:
 			_spawn_cheap_blast_flare(scene, pos, radius, color))
 		if BenchFlags.active:
@@ -2238,28 +2393,6 @@ static func spawn_bullet_blast(scene: Node, pos: Vector3, radius: float, color: 
 			_bench_blast_n["blast_calls"] = int(_bench_blast_n.get("blast_calls", 0)) + 1
 			_bench_blast_n["blast_cheap"] = int(_bench_blast_n.get("blast_cheap", 0)) + 1
 		return
-	if radius >= BLAST_DISTORTION_MIN_RADIUS:
-		_bench_blast_scope("heat_distortion", func() -> void:
-			spawn_heat_distortion(scene, pos, radius, blast_heat_distortion_duration(radius), blast_heat_distortion_strength(radius)))
-	_bench_blast_scope("flash_light", func() -> void:
-		_spawn_blast_flash_light(scene, pos, radius))
-	_bench_blast_scope("fireball_light", func() -> void:
-		_spawn_blast_fireball_light(scene, pos, radius, color))
-	if not (BenchFlags.active and BenchFlags.no_explosion_visuals):
-		_bench_blast_scope("smoke_push", func() -> void:
-			_push_nearby_blast_smoke(scene, pos, radius))
-		_bench_blast_scope("smoke_billow", func() -> void:
-			spawn_blast_fire_smoke(scene, pos, radius, color))
-		_bench_blast_scope("fire_billow", func() -> void:
-			spawn_blast_fire_clouds(scene, pos, radius, color))
-		_bench_blast_scope("flame_shards", func() -> void:
-			spawn_blast_flame_shards(scene, pos, radius, color))
-		_bench_blast_scope("embers", func() -> void:
-			spawn_blast_embers(scene, pos, radius, color))
-	if play_audio and radius >= 3.5:
-		if not (BenchFlags.active and BenchFlags.no_explosion_audio) and _claim_explosion_sfx():
-			_bench_blast_scope("explosion_audio", func() -> void:
-				SFX.explosion(pos, radius))
 	if BenchFlags.active:
 		_bench_blast_prof("blast_total", Time.get_ticks_usec() - t0)
 		_bench_blast_n["blast_calls"] = int(_bench_blast_n.get("blast_calls", 0)) + 1
@@ -3041,10 +3174,10 @@ static func spawn_laser_tracer(scene: Node, from: Vector3, to: Vector3, alpha: f
 
 static var _impact_chip_meshes: Array[Mesh] = []
 const DEBRIS_GRAVITY := 16.0
-const MAX_DESTRUCT_DEBRIS_PER_FRAME := 80
+const MAX_DESTRUCT_DEBRIS_PER_FRAME := 55
 const MAX_DESTRUCT_DEBRIS_PER_FRAME_CHEAP := 140
-const MAX_DEBRIS_FLUSH_USEC := 2500
-const MAX_PREMIUM_DEBRIS_BURSTS_PER_FRAME := 10
+const MAX_DEBRIS_FLUSH_USEC := 2200
+const MAX_PREMIUM_DEBRIS_BURSTS_PER_FRAME := 7
 const MAX_DEBRIS_QUEUE_PREMIUM := 14
 const DEBRIS_JOB_MERGE_DIST_SQ := 16.0  # 4m — coalesce rapid carves on one surface
 static var _debris_frame_id: int = -1
@@ -3129,6 +3262,10 @@ static func _debris_chip_material(color: Color, alpha: float, roughness: float =
 
 static func _debris_load_t() -> float:
 	return clampf(float(_debris_chip_fifo.size()) / float(MAX_ACTIVE_DEBRIS_CHIPS), 0.0, 1.0)
+
+
+static func _debris_queue_load_t() -> float:
+	return clampf(float(_debris_queue.size()) / 24.0, 0.0, 1.0)
 
 
 static func _debris_spawn_scale() -> float:
@@ -3304,6 +3441,8 @@ static func _destruct_debris_budget_remaining(tier: String = "premium") -> int:
 		if tier == "cheap"
 		else MAX_DESTRUCT_DEBRIS_PER_FRAME
 	)
+	if tier == "premium":
+		cap = int(round(float(cap) * lerpf(1.0, 0.5, _debris_queue_load_t())))
 	return maxi(0, cap - _debris_this_frame)
 
 
@@ -3373,7 +3512,13 @@ static func spawn_destruction_debris(
 
 
 static func flush_destruction_debris() -> void:
-	var deadline := Time.get_ticks_usec() + MAX_DEBRIS_FLUSH_USEC
+	_sync_debris_process_budget()
+	if _debris_process_usec >= MAX_DEBRIS_USEC_PER_PROCESS_FRAME:
+		return
+	var t0 := Time.get_ticks_usec()
+	var tick_deadline := t0 + MAX_DEBRIS_FLUSH_USEC
+	var frame_deadline := t0 + (MAX_DEBRIS_USEC_PER_PROCESS_FRAME - _debris_process_usec)
+	var deadline := mini(tick_deadline, frame_deadline)
 	while not _debris_queue.is_empty():
 		if Time.get_ticks_usec() >= deadline:
 			break
@@ -3391,6 +3536,7 @@ static func flush_destruction_debris() -> void:
 		_consume_destruct_debris_budget(spawned)
 		if int(job.get("next_i", 0)) >= int(job.get("chip_count", 0)):
 			_debris_queue.pop_front()
+	_debris_process_usec += Time.get_ticks_usec() - t0
 
 
 static func debug_debris_queue_len() -> int:
@@ -3418,7 +3564,7 @@ static func _pick_debris_tier(blast_radius: float, chunks_removed: int) -> Strin
 	_sync_debris_frame_ids()
 	var load_t: float = _debris_load_t()
 	var qs: float = vfx_quality_scale()
-	if load_t >= 0.55 or qs <= 0.55:
+	if load_t >= 0.48 or qs <= 0.55:
 		return "cheap"
 	var queue_cap: int = maxi(3, int(round(float(MAX_DEBRIS_QUEUE_PREMIUM) * qs)))
 	if _debris_queue.size() >= queue_cap:
@@ -3492,7 +3638,7 @@ static func _debris_launch_horizontal(away: Vector3, blast_heavy: float) -> Vect
 
 static func _spawn_debris_job(job: Dictionary, max_chips: int) -> int:
 	var tier: String = str(job.get("tier", "premium"))
-	if tier == "premium" and _debris_load_t() >= 0.45:
+	if tier == "premium" and _debris_load_t() >= 0.35:
 		tier = "cheap"
 	if tier == "cheap":
 		return _spawn_debris_job_cheap(job, max_chips)
