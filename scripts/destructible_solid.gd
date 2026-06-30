@@ -42,6 +42,7 @@ var _decal_mat: ShaderMaterial = null  # fragment-only damage (bullet holes)
 var _dmg_mat: ShaderMaterial = null  # full vertex+fragment deform carve
 var _dmg_axis: int = 2
 var _dmg_plane_size: Vector2 = Vector2.ONE
+var _dmg_tex_res: int = 512
 static var _dmg_brush_tex: Texture2D = null
 var _chunk_cols: Array[CollisionShape3D] = []
 var _chunk_grid: Array[CollisionShape3D] = []
@@ -216,7 +217,9 @@ func _ensure_damage_buffer() -> void:
 		_dmg_plane_size = Vector2(s.x, s.z)
 	else:
 		_dmg_plane_size = Vector2(s.x, s.y)
-	var res := clampi(int(maxf(_dmg_plane_size.x, _dmg_plane_size.y) * 28.0), 384, 1280)
+	# Higher res on large faces so 0.2–0.4 m bullet holes stay a few texels wide.
+	var res := clampi(int(maxf(_dmg_plane_size.x, _dmg_plane_size.y) * 36.0), 512, 1536)
+	_dmg_tex_res = res
 
 	_dmg_viewport = SubViewport.new()
 	_dmg_viewport.size = Vector2i(res, res)
@@ -280,6 +283,36 @@ func _dmg_region_ruv(l: Vector3, region: int) -> Vector2:
 	return Vector2(t.x, t.y)
 
 
+func _refresh_damage_transform() -> void:
+	if _decal_mat == null:
+		return
+	var world_to_local := global_transform.affine_inverse()
+	_decal_mat.set_shader_parameter("dmg_world_to_local", world_to_local)
+	if _dmg_mat != null:
+		_dmg_mat.set_shader_parameter("dmg_world_to_local", world_to_local)
+
+
+# Half-extents of a damage brush in atlas UV (3-wide x 2-tall face grid).
+# Large walls need a wider world-space decal or the R splat lands on ~1 texel.
+func _damage_brush_half_uv(world_half: float, plane: Vector2) -> Vector2:
+	var ru := (world_half / maxf(plane.x, 0.01)) / 3.0
+	var rv := (world_half / maxf(plane.y, 0.01)) / 2.0
+	var tex_res := float(_dmg_tex_res)
+	var min_ru := 10.0 / tex_res
+	var min_rv := 10.0 / tex_res
+	var max_ru := (0.48 / maxf(plane.x, 0.01)) / 3.0
+	var max_rv := (0.48 / maxf(plane.y, 0.01)) / 2.0
+	return Vector2(
+		clampf(maxf(ru, min_ru), min_ru, maxf(min_ru, max_ru)),
+		clampf(maxf(rv, min_rv), min_rv, maxf(min_rv, max_rv)),
+	)
+
+
+func _decal_world_radius(plane: Vector2) -> float:
+	var span := maxf(plane.x, plane.y)
+	return clampf(maxf(0.22, span * 0.011), 0.22, 0.48)
+
+
 # Queue a damage splat at a body-local hit point (sparse CPU event; the GPU buffer
 # accumulates, never read back). Written into the hit face's signed atlas region
 # (3x2 grid), kept round in world space. Chunks under the splat migrate into the
@@ -297,21 +330,25 @@ func _splat_damage(local_pos: Vector3, world_radius: float, damage: float, local
 	var atlas_uv := Vector2((float(col) + ruv.x) / 3.0, (float(row) + ruv.y) / 2.0)
 	var strong := damage >= MIN_DESTRUCTION_DAMAGE
 	var crater := world_radius * 1.4 + 0.25
-	# DECAL (R): a SMALL, low-strength bullet hole written by every hit. Keeping it
-	# small + faint means same-spot shots stay a tight cluster of holes rather than
-	# accumulating into one ever-growing dark circle.
-	var dec_r := 0.18
-	var decal := clampf(0.12 + damage * 0.004, 0.12, 0.32)
+	# DECAL (R): bullet hole + radial cracks. Must cover enough texels on wide walls
+	# (arena faces are tens of metres — a fixed 0.18 m stamp was sub-pixel).
+	var dec_r := _decal_world_radius(plane)
+	var dec_uv := _damage_brush_half_uv(dec_r, plane)
+	var decal := clampf(0.18 + damage * 0.0045, 0.18, 0.42)
 	_dmg_splatter.pending.append({
 		"uv": atlas_uv, "decal": decal, "deform": 0.0,
-		"ru": (dec_r / maxf(plane.x, 0.01)) / 3.0, "rv": (dec_r / maxf(plane.y, 0.01)) / 2.0})
+		"ru": dec_uv.x, "rv": dec_uv.y,
+	})
 	# DEFORM (G): only strong hits, with the larger crater radius so the geometry
 	# carve reads clearly. Accumulates so a strong gun wears the chunk down gradually.
 	if strong:
 		var deform := clampf(damage * 0.013, 0.08, 0.72)
+		var def_uv := _damage_brush_half_uv(crater, plane)
 		_dmg_splatter.pending.append({
 			"uv": atlas_uv, "decal": 0.0, "deform": deform,
-			"ru": (crater / maxf(plane.x, 0.01)) / 3.0, "rv": (crater / maxf(plane.y, 0.01)) / 2.0})
+			"ru": def_uv.x, "rv": def_uv.y,
+		})
+	_refresh_damage_transform()
 	_dmg_splatter.queue_redraw()
 	_dmg_viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
 	if strong:

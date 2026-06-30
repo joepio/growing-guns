@@ -297,9 +297,11 @@ void fragment() {
 		vec2 plane = region < 2 ? dmg_box_size.zy : (region < 4 ? dmg_box_size.xz : dmg_box_size.xy);
 		vec2 wc = ruv * plane;                          // world-space coords (m)
 
-		float raw = dmg_samp_ruv(ruv, region);          // R = bullet-hole decal
+		float raw_r = dmg_samp_ruv(ruv, region);        // R = bullet-hole decal
+		float raw_g = dmg_samp(v_dmg_t01, region);     // G = deform carve
+		float raw = max(raw_r, raw_g * 0.38);          // cracks follow both channels
 		float j = dmg_fbm(wc * 6.0);
-		float c = clamp(raw * (0.4 + 1.25 * j) - 0.05, 0.0, 1.5);
+		float c = clamp(raw_r * (0.45 + 1.25 * j) - 0.035, 0.0, 1.5);
 		float ws = 0.04;
 		vec2 du = vec2(ws / max(plane.x, 0.01), 0.0);
 		vec2 dv = vec2(0.0, ws / max(plane.y, 0.01));
@@ -311,8 +313,8 @@ void fragment() {
 
 		// Small dark bullet hole + light spalled rim — from the R decal ONLY, so a
 		// strong hit's wide deform crater doesn't read as a giant scorch.
-		float hole = smoothstep(0.06, 0.2, c);
-		float spall = smoothstep(0.03, 0.1, c) * (1.0 - hole);
+		float hole = smoothstep(0.04, 0.16, c);
+		float spall = smoothstep(0.02, 0.08, c) * (1.0 - hole);
 		col = mix(col, col * 1.25, spall * 0.55);
 		col = mix(col, vec3(0.02), hole);
 
@@ -321,7 +323,7 @@ void fragment() {
 		vec3 dn = normalize(vec3(-grad.x * nscale, -grad.y * nscale, 1.0));
 		NORMAL = normalize(TANGENT * dn.x + BINORMAL * dn.y + NORMAL * dn.z);
 
-		float band = smoothstep(0.01, 0.08, raw) * (1.0 - smoothstep(0.4, 0.7, raw));
+		float band = smoothstep(0.008, 0.06, raw) * (1.0 - smoothstep(0.35, 0.65, raw));
 		band *= smoothstep(0.003, 0.02, length(grad));
 		float ang = atan(grad.y, grad.x) + (dmg_fbm(wc * 2.4) - 0.5) * 0.9;
 		float phase = dmg_fbm(wc * 0.5) * 12.0;
