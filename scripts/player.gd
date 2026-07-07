@@ -3782,10 +3782,12 @@ func _play_hurt_sound(pos: Vector3) -> void:
 	# `is_self` = this peer owns the player who got hit. Their copy plays a
 	# quieter 2D variant; everyone else hears the spatial 3D version.
 	SFX.hurt(pos, is_multiplayer_authority() and not is_bot)
+	CrowdAudio.on_player_hurt(pos)
 
 @rpc("any_peer", "call_local", "unreliable")
 func _play_death_sound(pos: Vector3) -> void:
 	SFX.death(pos, is_multiplayer_authority() and not is_bot)
+	CrowdAudio.on_player_death(pos)
 
 
 @rpc("any_peer", "call_local", "unreliable")

@@ -398,6 +398,7 @@ func _spawn_cluster_fragments(origin: Vector3, shooter: int) -> void:
 @rpc("authority", "call_local", "reliable")
 func _do_cluster_pop_vfx(pos: Vector3, radius: float) -> void:
 	SFX.explosion(pos, radius)
+	CrowdAudio.on_explosion(pos, radius)
 	var scene: Node = get_tree().current_scene
 	if scene and scene.has_method("trigger_explosion_sidechain"):
 		scene.trigger_explosion_sidechain(pos, radius, 0.85)
@@ -436,6 +437,7 @@ func _do_cluster_pop_vfx(pos: Vector3, radius: float) -> void:
 func _do_vfx() -> void:
 	var radius := _blast_radius()
 	SFX.explosion(global_position, radius)
+	CrowdAudio.on_explosion(global_position, radius)
 	var pos: Vector3 = global_position
 	var scene: Node = get_tree().current_scene
 	if scene and scene.has_method("trigger_explosion_sidechain"):

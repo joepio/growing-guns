@@ -2994,6 +2994,10 @@ func _apply_round_modifier_environment() -> void:
 
 @rpc("authority", "call_local", "reliable")
 func _show_round_modifier_on_screens() -> void:
+	# Every peer passes through here exactly once per round start (the
+	# modifier check below only gates the toast) — the colosseum crowd
+	# roars in anticipation as the fight opens.
+	CrowdAudio.on_round_start()
 	if current_round_modifier.is_empty():
 		return
 	if _splitscreen and _splitscreen.is_enabled() and _splitscreen.has_method("show_round_modifier_for_all"):
@@ -3555,6 +3559,8 @@ func _set_local_round_win_strip(text: String) -> void:
 
 @rpc("authority", "call_local", "reliable")
 func _show_round_win_on_screens(winner_id: int) -> void:
+	# The colosseum's biggest moment — every peer celebrates the victor.
+	CrowdAudio.on_round_win()
 	# Losers get the full-screen death flash — a banner behind it was unreadable.
 	var winner_name: String = NetworkManager.players.get(winner_id, "Player")
 	if _splitscreen and _splitscreen.is_enabled() and _splitscreen.has_method("show_round_win_for_all"):
