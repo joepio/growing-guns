@@ -4,7 +4,6 @@ extends Node3D
 #
 # Run:
 #   godot --headless --path /Users/joep/dev/growing-guns res://scenes/destruction_stress_bench.tscn
-#   godot --headless --path /Users/joep/dev/growing-guns res://scenes/destruction_stress_bench.tscn -- debris_tier=cheap
 
 const ARENA_SCENE := preload("res://scenes/arena_procedural.tscn")
 const DestructibleManager = preload("res://scripts/destructible_manager.gd")
@@ -18,7 +17,6 @@ const SAMPLE_SEC := 2.0
 var bench_seed: int = DEFAULT_SEED
 var blast_radius: float = 4.5
 var blast_damage: float = 120.0
-var debris_tier: String = "auto"
 
 var _arena: Node3D = null
 var _blast_targets: Array[Vector3] = []
@@ -40,12 +38,7 @@ var _results: Array[Dictionary] = []
 func _ready() -> void:
 	BenchFlags.active = true
 	_parse_cli_args()
-	match debris_tier:
-		"cheap":
-			BenchFlags.debris_cheap_only = true
-		"premium":
-			BenchFlags.debris_premium_only = true
-	print("[destruction-stress-bench] seed=%x tier=%s radius=%.1f" % [bench_seed, debris_tier, blast_radius])
+	print("[destruction-stress-bench] seed=%x radius=%.1f" % [bench_seed, blast_radius])
 	_arena = ARENA_SCENE.instantiate()
 	_arena.name = "Arena"
 	add_child(_arena)
@@ -54,7 +47,6 @@ func _ready() -> void:
 	for _i in 30:
 		await get_tree().physics_frame
 		DestructibleManager.flush()
-		Violence.flush_destruction_debris()
 	_collect_blast_targets()
 	print("[destruction-stress-bench] targets=%d" % _blast_targets.size())
 	_phase = "warmup"
@@ -69,8 +61,6 @@ func _parse_cli_args() -> void:
 			blast_radius = maxf(0.5, float(arg.substr(13)))
 		elif arg.begins_with("blast_damage="):
 			blast_damage = maxf(1.0, float(arg.substr(13)))
-		elif arg.begins_with("debris_tier="):
-			debris_tier = arg.substr(12)
 
 
 func _physics_process(delta: float) -> void:
@@ -97,13 +87,13 @@ func _physics_process(delta: float) -> void:
 			_physics_ms.clear()
 			_debris_nodes.clear()
 			_debris_queue.clear()
-			Violence.reset_debris_bench_counters()
+			GpuDebris.reset_debug_counters()
 			DestructibleManager.reset_chunk_removals()
 		return
 	_frame_ms.append(Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0)
 	_physics_ms.append(Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0)
 	_debris_nodes.append(_count_group("destruction_debris"))
-	_debris_queue.append(Violence.debug_debris_queue_len())
+	_debris_queue.append(GpuDebris.debug_live_particles())
 	if _t >= SAMPLE_SEC:
 		_record_stage(rate)
 		_stage += 1
@@ -114,7 +104,7 @@ func _physics_process(delta: float) -> void:
 		_phase = "warmup"
 		_t = 0.0
 		_stress_accum = 0.0
-		Violence.reset_debris_bench_counters()
+		GpuDebris.reset_debug_counters()
 
 
 func _collect_blast_targets() -> void:
@@ -152,41 +142,38 @@ func _record_stage(rate: float) -> void:
 		"frame_ms": _stats(_frame_ms),
 		"physics_ms": _stats(_physics_ms),
 		"debris_nodes": _istats(_debris_nodes),
-		"debris_queue": _istats(_debris_queue),
-		"premium_bursts": Violence.debug_debris_premium_bursts(),
-		"cheap_bursts": Violence.debug_debris_cheap_bursts(),
+		"debris_particles": _istats(_debris_queue),
+		"debris_bursts": GpuDebris.debug_bursts_total(),
 		"removals_per_sec": int(DestructibleManager.debug_chunk_removals() / SAMPLE_SEC),
 	}
 	_results.append(row)
 	print(
-		"[destruction-stress-bench] rate=%4.0f/s act=%4.0f/s phys=%5.2fms frame=%5.2fms debris=%4d queue=%4d removals=%5d/s prem=%d cheap=%d"
+		"[destruction-stress-bench] rate=%4.0f/s act=%4.0f/s phys=%5.2fms frame=%5.2fms emitters=%4d particles=%4d removals=%5d/s bursts=%d"
 		% [
 			rate,
 			row.rate_actual,
 			row.physics_ms.mean,
 			row.frame_ms.mean,
 			row.debris_nodes.mean,
-			row.debris_queue.mean,
+			row.debris_particles.mean,
 			row.removals_per_sec,
-			row.premium_bursts,
-			row.cheap_bursts,
+			row.debris_bursts,
 		]
 	)
 
 
 func _dump_results() -> void:
-	print("\n========== DESTRUCTION STRESS BENCH (%s) ==========" % debris_tier)
+	print("\n========== DESTRUCTION STRESS BENCH ==========")
 	for row in _results:
 		print(
-			"rate %4.0f/s  phys %5.2fms  frame %5.2fms  debris %4d  queue %4d  prem %d  cheap %d"
+			"rate %4.0f/s  phys %5.2fms  frame %5.2fms  emitters %4d  particles %4d  bursts %d"
 			% [
 				row.rate_target,
 				row.physics_ms.mean,
 				row.frame_ms.mean,
 				row.debris_nodes.mean,
-				row.debris_queue.mean,
-				row.premium_bursts,
-				row.cheap_bursts,
+				row.debris_particles.mean,
+				row.debris_bursts,
 			]
 		)
 	print("====================================================\n")
@@ -194,7 +181,6 @@ func _dump_results() -> void:
 		"seed": bench_seed,
 		"blast_radius": blast_radius,
 		"blast_damage": blast_damage,
-		"debris_tier": debris_tier,
 		"stages": _results,
 	}
 	var f := FileAccess.open(JSON_PATH, FileAccess.WRITE)

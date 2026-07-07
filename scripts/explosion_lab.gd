@@ -12,6 +12,7 @@ extends Node3D
 
 const ARENA_SCENE := preload("res://scenes/arena_procedural.tscn")
 const ION_CANNON := preload("res://scripts/ion_cannon.gd")
+const DestructibleManager = preload("res://scripts/destructible_manager.gd")
 const ARENA_SEED := 7
 
 const MOVE_SPEED := 8.0
@@ -53,6 +54,7 @@ var _fx := {
 	"fire_clouds": true,
 	"shards": true,
 	"embers": true,
+	"carve": true,
 }
 
 var _perf_labels := {}
@@ -80,6 +82,7 @@ func _ready() -> void:
 	_build_ui()
 	_build_perf_hud()
 	_warmup()
+	GpuDebris.warmup(self)
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	var cap := _cli_capture_path()
 	if not cap.is_empty():
@@ -132,6 +135,9 @@ func _input(event: InputEvent) -> void:
 		)
 	elif event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_SPACE:
 		_boom()
+	elif event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_G:
+		GpuDebris.enabled = not GpuDebris.enabled
+		print("[exlab] GPU debris: ", "ON" if GpuDebris.enabled else "OFF (no debris)")
 	elif event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	elif event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
@@ -225,35 +231,68 @@ func _cli_capture_path() -> String:
 func _capture_explosion(path: String) -> void:
 	DisplayServer.window_set_size(Vector2i(1280, 720))
 	get_viewport().size = Vector2i(1280, 720)
+	var wait_frames := 13
+	var seq: Array[int] = []          # --seq=15,60,120: multi-frame series from ONE boom
+	var cam := Vector3(0.0, 4.5, 15.0)
+	var look := Vector3(0.0, 3.0, 0.0)
 	for a in OS.get_cmdline_user_args():
 		if a.begins_with("--only="):
 			var only := a.substr(7)
 			for k in _fx:
 				_fx[k] = (k == only)
-	_camera.global_position = Vector3(0.0, 4.5, 15.0)
-	_camera.look_at(Vector3(0.0, 3.0, 0.0), Vector3.UP)
-	await get_tree().process_frame
-	var wait_frames := 13
-	for a in OS.get_cmdline_user_args():
-		if a.begins_with("--frame="):
+		elif a.begins_with("--frame="):
 			wait_frames = int(a.substr(8))
-	_boom()
-	# Let the fireball reach its meaty peak before grabbing the frame.
-	for _i: int in wait_frames:
-		await get_tree().process_frame
-	RenderingServer.force_draw(true)
+		elif a.begins_with("--seq="):
+			for s in a.substr(6).split(","):
+				seq.append(int(s))
+		elif a.begins_with("--cam="):
+			var parts := a.substr(6).split(",")
+			if parts.size() == 3:
+				cam = Vector3(float(parts[0]), float(parts[1]), float(parts[2]))
+				look = BLAST_PAD
+		elif a.begins_with("--repeat="):
+			# Keep booming every N seconds during a --seq capture — lets a
+			# sequence show sustained-fire behaviour (budget eviction etc.).
+			_repeat_interval = float(a.substr(9))
+	_camera.global_position = cam
+	_camera.look_at(look, Vector3.UP)
 	await get_tree().process_frame
+	_boom()
+	if seq.is_empty():
+		# Let the fireball reach its meaty peak before grabbing the frame.
+		for _i: int in wait_frames:
+			await get_tree().process_frame
+		RenderingServer.force_draw(true)
+		await get_tree().process_frame
+		if not _save_capture(path):
+			get_tree().quit(1)
+			return
+		get_tree().quit()
+		return
+	seq.sort()
+	var fi := 0
+	for target: int in seq:
+		while fi < target:
+			await get_tree().process_frame
+			fi += 1
+		var p := path.get_basename() + ("_f%03d." % target) + path.get_extension()
+		if not _save_capture(p):
+			get_tree().quit(1)
+			return
+	get_tree().quit()
+
+
+func _save_capture(path: String) -> bool:
 	var img: Image = get_viewport().get_texture().get_image()
 	if img == null or img.is_empty():
 		push_error("ExplosionLab: empty capture")
-		get_tree().quit(1)
-		return
+		return false
 	if not path.is_absolute_path():
 		path = ProjectSettings.globalize_path("res://").path_join(path)
 	DirAccess.make_dir_recursive_absolute(path.get_base_dir())
 	img.save_png(path)
 	print("ExplosionLab captured: ", path)
-	get_tree().quit()
+	return true
 
 # -------------------- explosions --------------------
 
@@ -294,6 +333,13 @@ func _boom() -> void:
 		Violence.spawn_blast_flame_shards(self, pos, _radius, col)
 	if _fx.embers:
 		Violence.spawn_blast_embers(self, pos, _radius, col)
+	# Actually destroy terrain (skipped in the --benchmark sweep so 400/s rates
+	# don't erase the arena mid-measurement). Same radius/damage mapping as an
+	# explosive bullet hit; the coordinator inside the arena scene flushes it.
+	if _fx.carve and not _bench:
+		# 160: enough to remove chunks near the centre (~53-97 HP each), not just
+		# deform them — removals are what trigger the debris burst.
+		DestructibleManager.apply_blast(pos, _radius * 0.52, 160.0)
 
 # -------------------- UI --------------------
 
@@ -370,6 +416,7 @@ func _build_ui() -> void:
 	_add_toggle(vb, "Fire clouds", "fire_clouds")
 	_add_toggle(vb, "Flame shards", "shards")
 	_add_toggle(vb, "Embers", "embers")
+	_add_toggle(vb, "Carve terrain", "carve")
 
 	vb.add_child(HSeparator.new())
 	_header(vb, "DENSITY", Color(0.7, 0.9, 1.0), 12)
