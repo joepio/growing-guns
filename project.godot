@@ -135,3 +135,10 @@ ambient_bus=&"RaytracedAmbient"
 textures/vram_compression/import_etc2_astc=true
 environment/defaults/default_clear_color=Color(0.05, 0.02, 0.08, 1)
 shader_compilation/pso_cache_size_mb=64
+
+[shader_globals]
+
+world_light_dim={
+"type": "float",
+"value": 1.0
+}

@@ -283,6 +283,7 @@ var _blackout_base_sky_contrib: float = 0.0
 var _blackout_base_bg_energy: float = 1.0
 var _blackout_base_bg_mode: int = Environment.BG_SKY
 var _blackout_base_fog_enabled: bool = true
+var _blackout_hidden_lights: Array[Light3D] = []
 var _base_tonemap_exposure: float = 1.0
 var _exposure_duck: float = 0.0
 var _exposure_duck_vel: float = 0.0
@@ -2662,6 +2663,12 @@ func _swap_arena(map_index: int, map_seed: int = 0, arena_size_min: float = -1.0
 		_arena_env = we.environment
 		_base_tonemap_exposure = _arena_env.tonemap_exposure
 	_fog_base_saved = false
+	# The old arena's env/lights are gone with it — drop stale blackout state so
+	# a blackout that spans the swap re-saves its baseline from the NEW env and
+	# re-hides the NEW arena's decorative lights (a stale non-empty hidden-lights
+	# list would otherwise skip that).
+	_blackout_base_saved = false
+	_blackout_hidden_lights.clear()
 	_apply_round_modifier_environment()
 
 func _clear_coop_downed_players() -> void:
@@ -2925,6 +2932,29 @@ func _apply_round_modifier_environment() -> void:
 			sun.light_energy = 0.0
 		if fill:
 			fill.light_energy = 0.0
+		# The arena generator also scatters decorative point lights — torches,
+		# building roof lights, lava glow, fort underglow — that global dimming
+		# never touches; together they kept the whole arena readable. Hide them
+		# for the round: visibility beats zeroing energy because the torch
+		# flicker tweens keep rewriting light_energy every frame.
+		if _blackout_hidden_lights.is_empty() and arena:
+			for n: Node in arena.find_children("*", "Light3D", true, false):
+				var l := n as Light3D
+				if l == sun or l == fill or not l.visible:
+					continue
+				l.visible = false
+				_blackout_hidden_lights.append(l)
+		# Sky clouds are UNSHADED billboards — they ignore lighting entirely and
+		# keep their baked daytime tint, reading as glowing blobs against the
+		# blacked-out sky. Unlit clouds at night are invisible; hide them.
+		if arena:
+			var sky_clouds := arena.get_node_or_null("SkyClouds")
+			if sky_clouds:
+				sky_clouds.visible = false
+		# Blast SMOKE uses the same unshaded billow shader (and lingers sky-high
+		# after explosions, reading as more glowing clouds). The billow shader
+		# multiplies its smoke body by this global; fire stays bright.
+		RenderingServer.global_shader_parameter_set("world_light_dim", 0.06)
 	elif _blackout_base_saved:
 		_arena_env.ambient_light_energy = _blackout_base_ambient
 		_arena_env.ambient_light_sky_contribution = _blackout_base_sky_contrib
@@ -2935,6 +2965,15 @@ func _apply_round_modifier_environment() -> void:
 			sun.light_energy = _blackout_base_sun
 		if fill:
 			fill.light_energy = _blackout_base_fill
+		for l: Light3D in _blackout_hidden_lights:
+			if is_instance_valid(l):
+				l.visible = true
+		_blackout_hidden_lights.clear()
+		if arena:
+			var sky_clouds := arena.get_node_or_null("SkyClouds")
+			if sky_clouds:
+				sky_clouds.visible = true
+		RenderingServer.global_shader_parameter_set("world_light_dim", 1.0)
 		_blackout_base_saved = false
 
 	if Trace.enabled:

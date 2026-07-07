@@ -1778,6 +1778,10 @@ const _BILLOW_MM_CODE := "
 	uniform float growth_min = 0.35;
 	uniform float tail_power = 1.5;    // <1 = long lingering tail, >1 = quick fade
 	uniform float sky_mode = 0.0;      // 1 = persistent sky clouds (no blast fade)
+	// Blackout rounds crush this toward 0 (set via RenderingServer global):
+	// unshaded smoke/cloud bodies would otherwise keep their baked daytime
+	// grey and read as glowing blobs against the dark sky. Fire stays bright.
+	global uniform float world_light_dim;
 	uniform vec3 warm_glow : source_color = vec3(1.0, 0.45, 0.12);
 	uniform vec3 fire_cool : source_color = vec3(1.0, 0.5, 0.16);
 	uniform vec3 fire_hot : source_color = vec3(1.0, 0.97, 0.86);
@@ -1864,7 +1868,7 @@ const _BILLOW_MM_CODE := "
 				grey = clamp(grey + warm.r * 0.55, 0.0, 1.0);
 			}
 			grey = floor(grey * 16.0 + 0.5) / 16.0;
-			ALBEDO = vec3(grey);
+			ALBEDO = vec3(grey * world_light_dim);
 		}
 	}
 "
