@@ -360,16 +360,15 @@ func _splat_damage(local_pos: Vector3, world_radius: float, damage: float, local
 			if is_instance_valid(c) and not bool(c.get_meta("destroyed", false)):
 				_move_chunk_to_decal(c)
 	# A few chips fly off at EVERY hit (not just removal), scaled by damage — a weak
-	# shot flicks a couple of flecks, a heavy round throws a real spray. The debris
-	# FIFO caps keep sustained fire from spamming.
+	# shot flicks a couple of flecks, a heavy round throws a real spray. GPU
+	# debris merges/caps per-tick chip jobs so sustained fire can't spam it.
 	var scene := _fx_scene()
 	if scene != null:
 		var wp := to_global(local_pos)
 		var chip_count := clampf(0.06 + damage * 0.008, 0.06, 1.0)
 		var chip_size := TARGET_CELL * clampf(0.05 + damage * 0.0022, 0.05, 0.35)
-		Violence.spawn_destruction_debris(
-			scene, wp, global_basis, Vector3.ONE * chip_size,
-			_material_base_color(), wp, world_radius, 1, chip_count)
+		GpuDebris.request_chips(
+			scene, wp, world_radius, _material_base_color(), chip_size, chip_count)
 
 
 func apply_pending_carves() -> bool:
@@ -446,7 +445,6 @@ func apply_pending_carves() -> bool:
 
 	# Disable + hide every removed chunk, then ONE debris burst + ONE jag job.
 	var burst_center := Vector3.ZERO
-	var burst_size := Vector3.ZERO
 	var exposure_center := Vector3.ZERO
 	var scene := _fx_scene()
 	var max_blood_cleanup_r := 0.0
@@ -455,7 +453,6 @@ func apply_pending_carves() -> bool:
 		_remove_chunk_from_decal(col)
 		_remove_chunk_from_deform(col)
 		burst_center += col.global_position
-		burst_size += col.get_meta("chunk_size") as Vector3
 		exposure_center += col.get_meta("chunk_center_local") as Vector3
 		max_blood_cleanup_r = maxf(
 			max_blood_cleanup_r,
@@ -474,9 +471,9 @@ func apply_pending_carves() -> bool:
 	var base_color := _material_base_color()
 	# Debris radiates from the BLAST origin, not each block's own centre, so a big
 	# boom throws everything outward instead of each block puffing on the spot.
-	Violence.spawn_destruction_debris(
-		scene, burst_center / n, global_basis, burst_size / n, base_color,
-		to_global(blast_center_local), max_radius, to_remove_cols.size())
+	GpuDebris.request_burst(
+		scene, to_global(blast_center_local), max_radius,
+		to_remove_cols.size(), base_color)
 	exposure_center /= n
 	var exposure_radius := 0.0
 	for col: CollisionShape3D in to_remove_cols:
@@ -492,6 +489,27 @@ func apply_pending_carves() -> bool:
 	if BenchFlags.active and t0 > 0:
 		DestructibleManager.bench_destruct_prof("chunk_remove", Time.get_ticks_usec() - t0)
 	return true
+
+
+# GPU debris: append (world center, half-extent) pairs for every chunk still
+# standing, for rasterizing into a blast's occupancy snapshot. Conservative
+# for Y-rotated bodies (axis-aligned box around the rotated chunk).
+func alive_chunk_world_boxes(out: Array[Vector3]) -> void:
+	var gt := global_transform
+	var b := gt.basis
+	for col: CollisionShape3D in _chunk_cols:
+		if col == null or not is_instance_valid(col) or col.disabled:
+			continue
+		if bool(col.get_meta("destroyed", false)):
+			continue
+		var c: Vector3 = col.get_meta("chunk_center_local") as Vector3
+		var h: Vector3 = (col.get_meta("chunk_size") as Vector3) * 0.5
+		out.append(gt * c)
+		out.append(Vector3(
+			absf(b.x.x) * h.x + absf(b.y.x) * h.y + absf(b.z.x) * h.z,
+			absf(b.x.y) * h.x + absf(b.y.y) * h.y + absf(b.z.y) * h.z,
+			absf(b.x.z) * h.x + absf(b.y.z) * h.y + absf(b.z.z) * h.z,
+		))
 
 
 func debug_chunk_count() -> int:

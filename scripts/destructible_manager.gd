@@ -83,6 +83,21 @@ static func apply_blast(
 	bench_destruct_prof("carve_calls", 0)
 
 
+# Read-only broadphase for GPU debris occupancy snapshots: every registered
+# volume whose bounding sphere touches the world-space box. No unregistration
+# side effects here — callers may hold the result across a frame.
+static func volumes_overlapping_aabb(world_aabb: AABB) -> Array[Node3D]:
+	var out: Array[Node3D] = []
+	var i := 0
+	while i < _registered_ids.size():
+		var vol: Node3D = _registered_vols[i]
+		if vol != null and is_instance_valid(vol):
+			if world_aabb.grow(_registered_bounds[i]).has_point(_registered_centers[i]):
+				out.append(vol)
+		i += 1
+	return out
+
+
 static func carve_sphere(
 	world_pos: Vector3,
 	radius: float,

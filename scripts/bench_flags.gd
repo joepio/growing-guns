@@ -20,8 +20,6 @@ static var no_muzzle_flash: bool = false
 static var no_explosion_visuals: bool = false
 static var no_explosion_audio: bool = false
 static var no_destruction: bool = false
-static var debris_cheap_only: bool = false
-static var debris_premium_only: bool = false
 
 # Counter sink — set by the bench to its own scene root so static callers
 # can fan events without re-resolving current_scene.

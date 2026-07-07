@@ -26,6 +26,7 @@ Multiplayer FPS in Godot 4.6. Last-man-standing rounds; round losers pick stacki
 | `bullet.gd` | Per-bullet `Node3D` (set_script-ed at spawn, **not** a scene). Dual raycast each `_physics_process` (see Performance). | `_handle_collision` runs gameplay **and** visual spawning synchronously in physics tick — careful adding work here. |
 | `procedural_gun.gd` (~1k lines) | `@tool`, builds first-person rifle from primitives. | Re-read the file before editing — has many setters that all call `_rebuild()`. `apply_weapon_stats(w)` is the entry point that maps stats → geometry. |
 | `violence.gd` | Static helpers for blood, gibs, ragdolls, explosion VFX, view punch. | All calls are static. Many cached `MeshInstance3D` resources at the top of the file. |
+| `gpu_debris.gd` | Destruction rubble, simulated on the GPU. `request_burst` (chunk removals) / `request_chips` (per-hit flecks) rasterize alive chunks into a 3D occupancy texture; the particles shader bounces shards off it. | `enabled` is a kill-switch, default true. New bursts evict oldest emitters when the particle pool is full. Emitters join the `destruction_debris` group (round cleanup, Trace `dbr`). |
 | `sfx.gd` (~1.4k lines) | Procedural audio synthesis (no WAV samples on disk for shots/explosions/casings). HDR ducking, raytraced reverb bus, distance-delay simulation. | Hot path uses `_cached_wav(key, gen)` — caches the converted `AudioStreamWAV`, not just the raw `PackedVector2Array`. Don't reintroduce per-call `_samples_to_wav(...)`. |
 | `game.gd` (~2.3k lines) | Round flow, scoreboard, card pick UI, state machine, HUD overlays. | Still the biggest file — search before adding. Two child managers split out: `dev_panel.gd` and `splitscreen_manager.gd`. |
 | `dev_panel.gd` | F1 inspector — read-mostly view of the local-or-targeted player + card add/remove buttons. | `_ready()` self-builds; instantiated by Game and added under `$HUD`. Game routes its dev keybindings (G/P/M/1-5/?) through it via `_dev_panel.get_target()` / `refresh_if_visible()`. |
@@ -125,7 +126,7 @@ On spike frames with **~100–150 projectiles** in flight:
 | `bullet_phys_ray` | **~0.3–1 ms** | **~0 ms** when terrain_near (mask skips layer 1) |
 | `bullet_phys_fallback` | **~0.2 ms** | rare |
 | `bullet` (total) | **~90–185 ms** | scales with projectile count + hits |
-| `debris_flush` | varies | Still significant during heavy destruction (see bench destruct prof). |
+| `gpu_debris` | ~0 ms | Occupancy-snapshot build + emitter spawn per blast (debris sim itself runs on the GPU). |
 | `blast_vfx` | ~0–25 ms | Mostly deferred via `Violence.flush_pending_blast_visuals()` from `game.gd` / bench. |
 
 **Old path (single `intersect_ray` through chunk colliders):** ~5 ms `physics_ms` mean but physics engine scanned **~5000 chunk shapes** on layer 1 per ray — caused **75–85 ms** spike frames attributed to bullet/physics before analytical work.
@@ -171,7 +172,7 @@ godot --path /Users/joep/dev/growing-guns res://scenes/brick_render_bench.tscn -
 
 - **GPU damage:** scoped to hit chunks only (`destructible_solid.gd` decal/deform batches) — avoids whole-body material swap regression.
 - **Blast VFX:** heavy visuals deferred; flush from game loop.
-- **Debris:** burst caps + cheap-tier fallback under load (`violence.gd`).
+- **Debris:** fully GPU-simulated (`gpu_debris.gd` + `shaders/gpu_debris.gdshader`) — one-shot GPUParticles3D colliding against a per-blast occupancy snapshot of the alive chunk grid. Cosmetic only, no readback, no physics bodies. Budgets scale with `PerfGovernor` (new bursts evict the oldest emitters). The old CPU parabola-chip system was deleted from `violence.gd`.
 
 ### Open perf work (if heavy combat regresses again)
 

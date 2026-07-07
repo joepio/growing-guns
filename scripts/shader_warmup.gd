@@ -37,6 +37,7 @@ static func warmup_effect_shaders(scene_root: Node, force_draw: bool = true) -> 
 	ION_CANNON_SCRIPT.warmup_shaders(scene_root)
 	PLAYER_SCRIPT.warmup_phoenix_shaders(scene_root)
 	Violence.warmup_gib_render(scene_root)
+	GpuDebris.warmup(scene_root)
 	arena_gen.warmup_gpu_materials(scene_root)
 	if force_draw and DisplayServer.get_name() != "headless":
 		RenderingServer.force_draw(true)

@@ -240,7 +240,7 @@ func _process(_delta: float) -> void:
 				DestructibleManager.reset_bench_destruct_prof()
 				DestructibleManager.reset_chunk_removals()
 				DestructibleManager.reset_bench_bullet_ray_stats()
-				Violence.reset_debris_bench_counters()
+				GpuDebris.reset_debug_counters()
 				_chunks_at_measure_start = _count_arena_chunks()
 				_debris_nodes.clear()
 				_debris_queue_len.clear()
@@ -308,7 +308,7 @@ func _capture_sample() -> void:
 	_resource_count.append(int(Performance.get_monitor(Performance.OBJECT_RESOURCE_COUNT)))
 	_projectile_count.append(get_tree().get_nodes_in_group("projectiles").size())
 	_debris_nodes.append(get_tree().get_nodes_in_group("destruction_debris").size())
-	_debris_queue_len.append(Violence.debug_debris_queue_len())
+	_debris_queue_len.append(GpuDebris.debug_live_particles())
 	_destruct_dirty_queue.append(DestructibleManager.debug_dirty_queue_len())
 	_arena_chunks.append(_count_arena_chunks())
 	var mem := int(Performance.get_monitor(Performance.MEMORY_STATIC))
@@ -339,8 +339,8 @@ func _dump_results() -> void:
 		"drawn_objects": _istats(_drawn_objects),
 		"active_rigid_bodies": _istats(_active_rb),
 		"projectiles_in_group": _istats(_projectile_count),
-		"destruction_debris_nodes": _istats(_debris_nodes),
-		"destruction_debris_queue": _istats(_debris_queue_len),
+		"gpu_debris_emitters": _istats(_debris_nodes),
+		"gpu_debris_particles": _istats(_debris_queue_len),
 		"destruction_dirty_queue": _istats(_destruct_dirty_queue),
 		"arena_chunks_remaining": _istats(_arena_chunks),
 		"node_count": _istats(_node_count),
@@ -366,8 +366,8 @@ func _dump_results() -> void:
 	_print_irow("drawn_objects",      _istats(_drawn_objects))
 	_print_irow("active_rigid_bodies",_istats(_active_rb))
 	_print_irow("projectiles",        _istats(_projectile_count))
-	_print_irow("debris_nodes",       _istats(_debris_nodes))
-	_print_irow("debris_queue",       _istats(_debris_queue_len))
+	_print_irow("debris_emitters",    _istats(_debris_nodes))
+	_print_irow("debris_particles",   _istats(_debris_queue_len))
 	_print_irow("destruct_dirty_q",   _istats(_destruct_dirty_queue))
 	_print_irow("arena_chunks",       _istats(_arena_chunks))
 	_print_irow("node_count",         _istats(_node_count))
@@ -449,8 +449,7 @@ func _count_arena_chunks() -> int:
 func _print_destruct_summary(summary: Dictionary) -> void:
 	var chunks_end := _count_arena_chunks()
 	var chunks_removed := DestructibleManager.debug_chunk_removals()
-	var prem := Violence.debug_debris_premium_bursts()
-	var cheap := Violence.debug_debris_cheap_bursts()
+	var bursts := GpuDebris.debug_bursts_total()
 	var destructibles := DestructibleManager.debug_registered_count()
 	var removals_per_sec := int(float(chunks_removed) / MEASURE_SEC)
 	summary["destruction"] = {
@@ -459,8 +458,7 @@ func _print_destruct_summary(summary: Dictionary) -> void:
 		"chunks_at_end": chunks_end,
 		"chunks_removed": chunks_removed,
 		"removals_per_sec": removals_per_sec,
-		"debris_premium_bursts": prem,
-		"debris_cheap_bursts": cheap,
+		"gpu_debris_bursts": bursts,
 		"destructible_volumes": destructibles,
 	}
 	print("\n--- level destruction (measure window) ---")
@@ -477,7 +475,7 @@ func _print_destruct_summary(summary: Dictionary) -> void:
 			])
 	print("Arena chunks:           start=%d  end=%d  removed=%d  (~%d/s)"
 		% [_chunks_at_measure_start, chunks_end, chunks_removed, removals_per_sec])
-	print("Debris bursts:          premium=%d  cheap=%d" % [prem, cheap])
+	print("GPU debris bursts:      %d" % bursts)
 	if not BenchFlags.no_destruction and chunks_removed <= 0:
 		print("WARNING: no chunk removals — destruction may not be wired (check arena + explosive hits)")
 	var prof: Dictionary = DestructibleManager.bench_destruct_prof_summary()
