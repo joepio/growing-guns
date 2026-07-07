@@ -10,7 +10,7 @@ Multiplayer FPS in Godot 4.6. Last-man-standing rounds; round losers pick stacki
 - Physics tick: **120 Hz** (`project.godot` → `common/physics_ticks_per_second=120`)
 - Render cap: 240 fps
 - Main scene: `res://scenes/game.tscn`
-- Autoloads (singletons): `NetworkManager` (`scripts/network_manager.gd`), `SFX` (`scripts/sfx.gd`), `Trace` (`scripts/trace.gd`, debug/`GG_TRACE=1` only useful)
+- Autoloads (singletons): `NetworkManager` (`scripts/network_manager.gd`), `SFX` (`scripts/sfx.gd`), `CrowdAudio` (`scripts/crowd_audio.gd`, colosseum crowd ambience + reactions), `Trace` (`scripts/trace.gd`, debug/`GG_TRACE=1` only useful)
 
 `Violence` (`scripts/violence.gd`) is a `class_name` static class — call as `Violence.foo(...)`, do **not** instantiate and do **not** `call_deferred()` on it (it's not an instance, will fail to compile).
 

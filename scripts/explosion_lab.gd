@@ -37,6 +37,7 @@ var _radius: float = 8.0
 var _repeat_interval: float = 0.0
 var _blast_type: int = TYPE_BULLET
 var _repeat_accum: float = 0.0
+var _boom_at_crowd: bool = false  # capture flag: aim booms into the stands
 
 # Stress test
 var _stress_rate: float = 0.0   # explosions/sec
@@ -250,6 +251,12 @@ func _capture_explosion(path: String) -> void:
 			if parts.size() == 3:
 				cam = Vector3(float(parts[0]), float(parts[1]), float(parts[2]))
 				look = BLAST_PAD
+		elif a.begins_with("--look="):
+			var lparts := a.substr(7).split(",")
+			if lparts.size() == 3:
+				look = Vector3(float(lparts[0]), float(lparts[1]), float(lparts[2]))
+		elif a == "--boom-at-crowd":
+			_boom_at_crowd = true
 		elif a.begins_with("--repeat="):
 			# Keep booming every N seconds during a --seq capture — lets a
 			# sequence show sustained-fire behaviour (budget eviction etc.).
@@ -299,6 +306,13 @@ func _save_capture(path: String) -> bool:
 func _boom() -> void:
 	_booms_this_second += 1
 	var pos := BLAST_PAD
+	if _boom_at_crowd and CrowdAudio.ring_active:
+		# Nearest seat toward -Z — self-adapts to whatever arena size this seed
+		# rolled. Pin the height onto the lower rows (the ring point floats at
+		# 35% of the band, mid-air above the seats — real blasts detonate ON
+		# the stands via their colliders).
+		pos = CrowdAudio._ring_point_toward(Vector3(0.0, 3.0, -1000.0))
+		pos.y = CrowdAudio._y_base + 3.0
 	if _stress_rate > 0.0:
 		# Spread stress booms a little so they're not all one pixel-stack.
 		pos += Vector3(randf_range(-1.0, 1.0), randf_range(0.0, 0.6), randf_range(-1.0, 1.0)) * _radius
@@ -333,6 +347,9 @@ func _boom() -> void:
 		Violence.spawn_blast_flame_shards(self, pos, _radius, col)
 	if _fx.embers:
 		Violence.spawn_blast_embers(self, pos, _radius, col)
+	# Crowd reaction + destruction — mirrors Violence's production blast path,
+	# which this stress-oriented boom deliberately bypasses.
+	CrowdAudio.on_explosion(pos, _radius)
 	# Actually destroy terrain (skipped in the --benchmark sweep so 400/s rates
 	# don't erase the arena mid-measurement). Same radius/damage mapping as an
 	# explosive bullet hit; the coordinator inside the arena scene flushes it.

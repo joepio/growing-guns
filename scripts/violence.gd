@@ -1782,6 +1782,9 @@ const _BILLOW_MM_CODE := "
 	// unshaded smoke/cloud bodies would otherwise keep their baked daytime
 	// grey and read as glowing blobs against the dark sky. Fire stays bright.
 	global uniform float world_light_dim;
+	// Hue for the (otherwise greyscale) smoke body — white = classic smoke,
+	// red = the colosseum's blood mist. Only the non-fire branch uses it.
+	uniform vec3 smoke_tint : source_color = vec3(1.0);
 	uniform vec3 warm_glow : source_color = vec3(1.0, 0.45, 0.12);
 	uniform vec3 fire_cool : source_color = vec3(1.0, 0.5, 0.16);
 	uniform vec3 fire_hot : source_color = vec3(1.0, 0.97, 0.86);
@@ -1868,7 +1871,7 @@ const _BILLOW_MM_CODE := "
 				grey = clamp(grey + warm.r * 0.55, 0.0, 1.0);
 			}
 			grey = floor(grey * 16.0 + 0.5) / 16.0;
-			ALBEDO = vec3(grey * world_light_dim);
+			ALBEDO = vec3(grey * world_light_dim) * smoke_tint;
 		}
 	}
 "
@@ -1893,12 +1896,15 @@ static func _get_billow_mm_shader() -> Shader:
 # Builds one cloud layer as a single MultiMesh + material + tween.
 static func _spawn_blast_billow(scene: Node, pos: Vector3, radius: float, count: int,
 		is_fire: bool, tint: Color, layer_life: float, scale_lo: float, scale_hi: float, rise: float,
-		stretch: float = 1.0, delay_bias: float = 0.0) -> void:
+		stretch: float = 1.0, delay_bias: float = 0.0, smoke_tint: Color = Color.WHITE,
+		pushable: bool = true) -> void:
 	# Smoke layers (non-fire) join "blast_smoke_layers" and get re-tweened by every
 	# later blast — bound how many can pile up. Bail before building the MultiMesh
 	# so a capped layer costs nothing. Fire billows aren't pushed, so they skip this.
+	# pushable=false opts a cloud out of the whole layer system (the colosseum's
+	# blood mist is PART of its blast — being shoved away by it looked absurd).
 	var smoke_layer_cap := maxi(4, int(round(MAX_ACTIVE_BLAST_SMOKE_LAYERS * vfx_quality_scale())))
-	if not is_fire and _active_blast_smoke_layers >= smoke_layer_cap:
+	if not is_fire and pushable and _active_blast_smoke_layers >= smoke_layer_cap:
 		return
 	var rng := RandomNumberGenerator.new()
 	var mm := MultiMesh.new()
@@ -1967,10 +1973,12 @@ static func _spawn_blast_billow(scene: Node, pos: Vector3, radius: float, count:
 	else:
 		mat.set_shader_parameter("tail_power", 0.38)   # smoke lingers with a long, slow tail
 		mat.set_shader_parameter("warm_glow", tint.lerp(Color(1.0, 0.45, 0.12), 0.6))
+		if smoke_tint != Color.WHITE:
+			mat.set_shader_parameter("smoke_tint", smoke_tint)
 	mmi.material_override = mat
 	var base := pos + Vector3.UP * (radius * 0.1)
 	var host: Node3D = mmi
-	if is_fire:
+	if is_fire or not pushable:
 		_attach_world_3d(scene, mmi, base)
 	else:
 		var pivot := Node3D.new()
@@ -2306,6 +2314,9 @@ static func _spawn_bullet_blast_immediate_visuals(
 		_spawn_blast_flash_light(scene, pos, radius))
 	_bench_blast_scope("fireball_light", func() -> void:
 		_spawn_blast_fireball_light(scene, pos, radius, color))
+	# Crowd reaction is independent of the explosion-SFX rate limiter — it's
+	# cheap state math with its own internal cooldowns.
+	CrowdAudio.on_explosion(pos, radius)
 	if play_audio and radius >= 3.5:
 		if not (BenchFlags.active and BenchFlags.no_explosion_audio) and _claim_explosion_sfx():
 			_bench_blast_scope("explosion_audio", func() -> void:

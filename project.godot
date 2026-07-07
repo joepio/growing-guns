@@ -12,7 +12,7 @@ config_version=5
 
 config/name="Growing Guns"
 config/description="High-paced multiplayer arena shooter"
-config/version="0.2.39"
+config/version="0.2.40"
 run/main_scene="res://scenes/start_screen.tscn"
 config/features=PackedStringArray("4.6", "Forward Plus")
 run/max_fps=360
@@ -26,6 +26,7 @@ general/3d_panning_strength=1.0
 
 NetworkManager="*res://scripts/network_manager.gd"
 SFX="*res://scripts/sfx.gd"
+CrowdAudio="*res://scripts/crowd_audio.gd"
 ProceduralMusic="*res://scripts/procedural_music.gd"
 PerfGovernor="*res://scripts/perf_governor.gd"
 Trace="*res://scripts/trace.gd"

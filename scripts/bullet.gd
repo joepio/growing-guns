@@ -11,6 +11,8 @@ var velocity: Vector3 = Vector3.ZERO
 var shooter_id: int = 0
 var weapon_stats: Weapon = null
 var max_range: float = 200.0
+var _crowd_hit_reported := false
+var _crowd_scared := false  # overfly scare fired (separate from a body hit)
 var distance_traveled: float = 0.0
 
 var ricochet_left: int = 0          # wall ricochets remaining (Ricochet card)
@@ -266,6 +268,23 @@ func _physics_process(delta: float) -> void:
 	if result.is_empty():
 		global_position += step
 		distance_traveled += step_len
+		# The stands' collider is the slope through the step NOSES — the
+		# spectators' bodies rise ABOVE it and have no colliders of their own,
+		# so bullets fly straight through back rows. Resolve those analytically:
+		# in the band, in the body zone above the steps, someone home -> hit.
+		# point_in_crowd exits on one Y compare for anything below the stands.
+		if not _crowd_hit_reported and CrowdAudio.point_in_crowd(global_position):
+			var crowd := ColosseumCrowd.active
+			if crowd != null and crowd.bullet_body_zone(global_position) \
+					and crowd.apply_bullet(global_position) > 0:
+				_crowd_hit_reported = true
+				CrowdAudio.notify_crowd_kill(global_position)
+				queue_free()
+				return
+			# Overflying the crowd without hitting a body: one scare per bullet.
+			if not _crowd_scared:
+				_crowd_scared = true
+				CrowdAudio.on_crowd_bullet_hit(global_position)
 	else:
 		_handle_collision(result)
 
@@ -349,6 +368,13 @@ func _do_hitscan() -> void:
 		# Update distance for correct damage falloff/growth in _handle_collision
 		distance_traveled = start_pos.distance_to(hit_pos)
 		_handle_collision(result)
+	# Hitscan rounds never tick through the stands band — resolve body hits
+	# along the beam analytically, then the band-crossing scare.
+	if ColosseumCrowd.active:
+		var crowd_kill := ColosseumCrowd.active.raycast_bodies(start_pos, hit_pos)
+		if crowd_kill.is_finite():
+			CrowdAudio.notify_crowd_kill(crowd_kill)
+	CrowdAudio.check_segment(start_pos, hit_pos)
 	
 	# Visual laser tracer
 	var shooter_node: Node3D = _shooter_node()
@@ -434,6 +460,14 @@ func _handle_collision(result: Dictionary) -> void:
 	var normal: Vector3 = result.normal
 
 	global_position = hit_pos
+
+	# Bullet landed ON the stands: they have colliders now, so neither the
+	# mid-air band check (only runs on ray MISSES) nor the hitscan inner-
+	# cylinder crossing (the ray stops at the surface) ever fires for these
+	# hits. Hit-frame only — one has_meta on a Node.
+	if collider != null and collider.has_meta("colosseum_stands") and not _crowd_hit_reported:
+		_crowd_hit_reported = true
+		CrowdAudio.on_crowd_bullet_hit(hit_pos)
 
 	# Bench instrumentation. BenchFlags.active is false outside the bench so
 	# these calls hit one static bool branch and short-circuit.

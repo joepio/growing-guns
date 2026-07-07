@@ -65,6 +65,8 @@ static var _static_rock_material_cache: Dictionary = {}
 	set(v): arena_size_max = v; if auto_regenerate: _queue_regen()
 @export_range(8.0, 18.0, 0.5) var wall_height: float = 12.0:
 	set(v): wall_height = v; if auto_regenerate: _queue_regen()
+@export var build_colosseum: bool = true:
+	set(v): build_colosseum = v; if auto_regenerate: _queue_regen()
 
 # Effective arena size for the current generation. Computed from the seeded
 # RNG at the start of regenerate(); reported in stats.
@@ -295,6 +297,7 @@ var _spawn_positions: Array[Vector3] = []
 var _lava_damage_accum_by_player: Dictionary = {}
 var _lava_safe_zones: Array = []
 var _all_floor_lava: bool = false
+var _has_perimeter_walls: bool = true  # colosseum facade height keys off this
 var _lava_openness: LavaFloorOpenness = null
 
 var last_stats: Dictionary = {}
@@ -339,6 +342,7 @@ func regenerate() -> void:
 	_lava_damage_accum_by_player.clear()
 	_lava_safe_zones.clear()
 	_all_floor_lava = false
+	_has_perimeter_walls = true
 	_lava_openness = null
 	_ensure_materials()
 
@@ -408,6 +412,8 @@ func regenerate() -> void:
 	_build_floor(has_hole, hole_pos, hole_size)
 	if not no_walls:
 		_build_walls()
+	else:
+		_has_perimeter_walls = false
 	_build_lava_pool()
 	_setup_lava_openness_from_floor()
 	# Reserve the hole as an unplaceable circle so buildings / pillars / etc.
@@ -1918,27 +1924,49 @@ func _build_sky_visuals(rng: RandomNumberGenerator) -> void:
 
 	var hell := _all_floor_lava or cinematic_present
 	var tint := _cloud_tint()
-	var cloud_count := 16 if hell else 9
-	var ring_min := arena_size * (0.28 if hell else 0.34)
-	var ring_max := arena_size * (0.92 if hell else 0.86)
-	var y_min := 24.0 if hell else 24.0
-	var y_max := 40.0 if hell else 39.0
+	var cloud_count := 22 if hell else 14
+	# Clouds live ABOVE the colosseum rim (they used to float at 24-40 m,
+	# inside the bowl). Band bottom clears the back wall + crenellations;
+	# hell keeps a lower, more oppressive ceiling than a clear day.
+	var rim_top := wall_height + ColosseumBuilder.BASE_ABOVE_WALLS \
+		+ float(ColosseumBuilder.ROWS) * ColosseumBuilder.ROW_RISE \
+		+ ColosseumBuilder.BACK_WALL_EXTRA + 3.0
+	var y_min := maxf(48.0 if hell else 55.0, rim_top + (6.0 if hell else 12.0))
+	var y_max := y_min + (26.0 if hell else 34.0)
+	# Higher clouds may drift well past the bowl — a full sky, not a ring
+	# squeezed inside the arena.
+	var ring_min := arena_size * (0.2 if hell else 0.25)
+	var ring_max := arena_size * (1.45 if hell else 1.35)
 	for i in cloud_count:
 		var angle := (TAU * float(i) / float(cloud_count)) + rng.randf_range(-0.22, 0.22)
 		var dist := rng.randf_range(ring_min, ring_max)
 		var center := Vector3(cos(angle) * dist, rng.randf_range(y_min, y_max), sin(angle) * dist)
+		# Bigger puffs to compensate for the extra distance overhead.
 		var cluster := Violence.spawn_sky_cloud_cluster(
 			root, center, rng, tint,
-			rng.randi_range(7 if hell else 6, 12 if hell else 10),
-			rng.randf_range(14.0 if hell else 11.0, 22.0 if hell else 18.0),
-			rng.randf_range(8.0 if hell else 6.5, 14.0 if hell else 10.0),
-			rng.randf_range(14.0 if hell else 12.0, 26.0 if hell else 20.0),
+			rng.randi_range(8 if hell else 7, 14 if hell else 12),
+			rng.randf_range(20.0 if hell else 16.0, 34.0 if hell else 28.0),
+			rng.randf_range(13.0 if hell else 10.0, 22.0 if hell else 16.0),
+			rng.randf_range(22.0 if hell else 19.0, 40.0 if hell else 32.0),
 			hell,
 		)
 		if owner_root and cluster != null:
 			cluster.owner = owner_root
-	if hell:
+	# Horizon silhouettes predate the colosseum: they sit at 0.88 * arena_size,
+	# which is INSIDE the bowl (stands start at 0.82) — with the colosseum on
+	# they poke through the stands as giant black slabs. Only build them when
+	# there's no colosseum to dress the horizon.
+	if hell and not build_colosseum:
 		_build_horizon_silhouettes(rng, root, owner_root)
+	# The duel is a spectacle: a colossal spectator bowl rings the whole arena,
+	# rising well above the castle towers. Two draw calls (see ColosseumBuilder).
+	if build_colosseum:
+		var pal: Dictionary = current_palette()
+		var stone: Color = (pal.get("building", Color(0.5, 0.47, 0.43)) as Color).darkened(0.2)
+		var colosseum := ColosseumBuilder.build(
+			self, rng, arena_size, wall_height, stone, _has_perimeter_walls)
+		if owner_root and colosseum:
+			colosseum.owner = owner_root
 
 
 func _build_horizon_silhouettes(rng: RandomNumberGenerator, root: Node3D, owner_root: Node = null) -> void:
