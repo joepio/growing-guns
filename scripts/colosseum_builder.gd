@@ -86,6 +86,18 @@ static func build(
 	var roman: Color = quarry[rng.randi() % quarry.size()]
 	_build_stands(root, inner_r, base_y, roman.lerp(stone, 0.22))
 	var crowd_mat := _build_crowd(root, rng, inner_r, base_y)
+	# Jumbotrons on the outer wall — live broadcast feed of the arena
+	# (stadium_tv.gd). Skipped in editor previews like the crowd controller.
+	if not Engine.is_editor_hint():
+		var tvs := StadiumTV.new()
+		tvs.name = "StadiumTVs"
+		root.add_child(tvs)
+		tvs.setup(
+			inner_r,
+			base_y,
+			inner_r + float(ROWS) * ROW_DEPTH + 1.4,
+			base_y + float(ROWS) * ROW_RISE + BACK_WALL_EXTRA,
+		)
 	# Hand the ring geometry + crowd material to the reaction system: bullets
 	# and blasts landing in this band scare the crowd, kills make it roar, and
 	# CrowdAudio drives the shader's excitement/panic uniforms. Editor preview
