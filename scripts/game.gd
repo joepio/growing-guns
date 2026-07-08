@@ -41,11 +41,14 @@ const ARENA_OFFSET := Vector3(1.7405052, 4.5380306, 16.383654)
 enum State { WAITING, PLAYING, PICKING_CARD, MATCH_OVER }
 
 const CARDS_PER_PICK := 3
-# Round-start gladiator cages: how high above the spawn the cage hangs (short
-# trapdoor drop, not a sky dive) and how long the fighters are held inside
-# (covers the ~1.5s card-growth morph plus a beat of crowd anticipation).
-const CAGE_SPAWN_HEIGHT := 7.5
-const CAGE_HOLD_SECONDS := 2.8
+# Round-start gladiator cages: fighters spawn caged at CAGE_SPAWN_HEIGHT, a
+# crane lowers them to CAGE_HOLD_HEIGHT over CAGE_DESCEND_SECONDS (the
+# card-growth morph plays on the way down), and after CAGE_HOLD_SECONDS
+# total the trapdoors drop everyone into the fight.
+const CAGE_SPAWN_HEIGHT := 45.0
+const CAGE_HOLD_HEIGHT := 13.0
+const CAGE_DESCEND_SECONDS := 2.6
+const CAGE_HOLD_SECONDS := 4.2
 const GAME_MODE_VERSUS := "versus"
 const GAME_MODE_COOP := "coop"
 const COOP_BASE_ENEMIES := 3
@@ -2181,9 +2184,10 @@ func _start_round_now() -> void:
 	Trace.span_begin("_warmup_round_audio")
 	_warmup_round_audio()
 	Trace.span_end("_warmup_round_audio")
-	# Cage the fighters. Floors open together once the hold expires.
+	# Cage the fighters. Cranes lower everyone in; floors open together once
+	# the hold expires.
 	for p in round_players:
-		p.enter_spawn_cage.rpc()
+		p.enter_spawn_cage.rpc(CAGE_SPAWN_HEIGHT - CAGE_HOLD_HEIGHT, CAGE_DESCEND_SECONDS)
 	_cage_release_timer = CAGE_HOLD_SECONDS
 	if multiplayer.is_server() and is_coop_mode():
 		_begin_coop_enemy_wave()
