@@ -89,6 +89,9 @@ func _ready() -> void:
 	if not cap.is_empty():
 		await _capture_explosion(cap)
 		return
+	if "--ray-probe" in OS.get_cmdline_user_args():
+		_run_ray_probe.call_deferred()
+		return
 	if "--benchmark" in OS.get_cmdline_args() or "--benchmark" in OS.get_cmdline_user_args():
 		_bench = true
 		_radius = 10.0
@@ -98,6 +101,53 @@ func _ready() -> void:
 
 func _exit_tree() -> void:
 	Engine.time_scale = 1.0
+
+
+# Headless correctness probe for the analytical bullet ray (broadphase
+# regressions here historically caused bullets passing through terrain):
+# fires rays that MUST hit (walls, floor) and MUST miss (open sky).
+#   godot --headless --path . res://scenes/explosion_lab.tscn -- --ray-probe
+func _run_ray_probe() -> void:
+	var arena := get_node_or_null("Arena")
+	var size_v: Variant = arena.get("arena_size") if arena != null else null
+	var size: float = float(size_v) if size_v is float else 80.0
+	print("[ray-probe] arena=%s size_v=%s -> size=%.0f" % [
+		str(arena), str(size_v), size])
+	var half := size * 0.5
+	var excl: Array[RID] = []
+	var fails := 0
+	# Wall rays are INFORMATIONAL: a miss can be legitimate (gate openings,
+	# no-walls variants) and is gameplay-safe either way — terrain_near=false
+	# routes the bullet to a FULL-mask physics ray (terrain included), and
+	# terrain_near=true with no analytical hit triggers bullet.gd's full-mask
+	# fallback. Only the floor and sky rays are hard assertions.
+	for dirv: Vector3 in [Vector3.RIGHT, Vector3.LEFT, Vector3.BACK, Vector3.FORWARD]:
+		var from := Vector3(0, 4.0, 0)
+		var res: Dictionary = DestructibleManager.query_bullet_ray(
+			from, from + dirv * (half + 10.0), excl)
+		var hit: Dictionary = res.get("hit", {})
+		if not hit.is_empty():
+			print("[ray-probe] wall %s -> HIT d=%.1f" % [dirv, (hit.position as Vector3).distance_to(from)])
+		else:
+			print("[ray-probe] wall %s -> no analytical hit (terrain_near=%s -> %s)" % [
+				dirv, res.get("terrain_near", false),
+				"masked ray + fallback" if bool(res.get("terrain_near", false)) else "full-mask physics ray"])
+	var fres: Dictionary = DestructibleManager.query_bullet_ray(
+		Vector3(half * 0.4, 8.0, half * 0.3), Vector3(half * 0.4, -3.0, half * 0.3), excl)
+	if (fres.get("hit", {}) as Dictionary).is_empty():
+		fails += 1
+		print("[ray-probe] floor -> MISS (FAIL)")
+	else:
+		print("[ray-probe] floor -> HIT")
+	var sres: Dictionary = DestructibleManager.query_bullet_ray(
+		Vector3(-half, 40.0, 0.0), Vector3(half, 40.0, 0.0), excl)
+	if (sres.get("hit", {}) as Dictionary).is_empty():
+		print("[ray-probe] sky -> MISS (ok)")
+	else:
+		fails += 1
+		print("[ray-probe] sky -> HIT (FAIL)")
+	print("[ray-probe] result: ", "PASS" if fails == 0 else "FAIL (%d)" % fails)
+	get_tree().quit(0 if fails == 0 else 1)
 
 func _warmup() -> void:
 	Violence.warmup_blast_materials(self)

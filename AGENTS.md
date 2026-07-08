@@ -37,6 +37,7 @@ Multiplayer FPS in Godot 4.6. Last-man-standing rounds; round losers pick stacki
 - `scenes/action_lab.tscn` — full arena, 5 random-card bots, free-look camera, live SFX sliders. Use for AI / combat playtesting.
 - `scenes/gun_lab.tscn` + `gun_preview.tscn` — preview procedural gun visually, tweak exports.
 - `scenes/audio_lab.tscn` — SFX mix / synth iteration.
+- `scenes/crowd_lab.tscn` — colosseum crowd audio: enthusiasm/fear sliders, event buttons, chant audition/reroll, mix knobs.
 - `scenes/lava_death_lab.tscn` — lava-shader body + sink death; live-tune sink timing and SFX.
 - `scenes/deform_wall_test.tscn` — 20×6 wall, one body UV, weak decals top / strong deform bottom (matches in-game chunk batching). Auto-captures PNG with `-- capture=/tmp/wall.png`.
 - `scenes/deform_inspect.tscn` — four single bricks (weak decal vs strong deform on centre/corner/side). `-- capture=/tmp/inspect.png`.
@@ -107,7 +108,7 @@ Key field in `bullet.gd`: `excluded_rids` (lifetime pierce/ghost list). Do **not
 **Implementation notes (Mar 2026):**
 - Merged duplicate grid passes (`fill_bullet_physics_exclude` + `raycast_bullet_destructibles` → single `query_bullet_ray`).
 - Removed full-volume fallback (was scanning all ~470 volumes — perf cliff + pass-through bugs).
-- Widen grid pad (3× cell) on empty first pass instead of scanning everything.
+- ~~Widen grid pad (3× cell) on empty first pass~~ — REMOVED (Jul 2026): volumes are inserted into every cell their bounds overlap, so an empty first pass proves clear air; the widen re-scanned ~850 cells per bullet-tick for nothing and drove the crowd-era physics spiral. Regression guard: `explosion_lab.tscn -- --ray-probe` (headless) asserts the analytical+fallback contract.
 - Sort grid candidates by ray distance for early `ray_to` shortening.
 - Cache volume node refs in `_registered_vols` (skip `instance_from_id` per candidate).
 
