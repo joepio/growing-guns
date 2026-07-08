@@ -522,9 +522,15 @@ static func query_bullet_ray(
 	_ensure_vol_grid()
 	var seg_len: float = sqrt(seg_len_sq)
 	var seg_dir: Vector3 = seg / seg_len
+	# NO widened rescan on an empty pass: volumes are inserted into EVERY cell
+	# their bounding sphere overlaps (_vol_grid_insert_id), so an empty first
+	# pass PROVES nothing hittable is within a full cell of the segment. The
+	# old 3x-pad rescan only gathered volumes 12-36m away that the OBB filter
+	# rejected anyway — ~850 dict lookups per bullet-tick, paid precisely by
+	# open-air flights (crowd-bound shots), and it drove the playtest's
+	# physics catch-up spiral. Pass-through stays impossible regardless: with
+	# terrain_near=false the physics ray runs FULL mask incl. layer-1 chunks.
 	var grid_candidates: Array[int] = _vol_grid_candidates(world_from, world_to, BULLET_VOL_CELL)
-	if grid_candidates.is_empty():
-		grid_candidates = _vol_grid_candidates(world_from, world_to, BULLET_VOL_CELL * 3.0)
 	if BenchFlags.active:
 		_bench_ray_calls += 1
 		_bench_grid_candidate_sum += grid_candidates.size()

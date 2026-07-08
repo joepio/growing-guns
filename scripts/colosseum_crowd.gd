@@ -20,7 +20,7 @@ const GORE_CHIP_SIZE := 0.42
 # Rolling mark pool: scorch + blood quads share one MultiMesh; when full, the
 # oldest mark is overwritten. Fixed cost forever.
 const MAX_MARKS := 256
-const MARKS_PER_BLAST := 9
+const MARKS_PER_BLAST := 22
 const DEAD_XFORM := Transform3D(
 	Basis(Vector3(0.0001, 0, 0), Vector3(0, 0.0001, 0), Vector3(0, 0, 0.0001)),
 	Vector3(0.0, -500.0, 0.0))
@@ -281,10 +281,23 @@ func apply_blast(world_pos: Vector3, radius: float) -> int:
 		Color(0.04, 0.035, 0.03, 0.85), 0.0)
 	if kills > 0:
 		_spawn_gore(world_pos, maxf(radius * 0.75, 1.2), kills)
+		# Bigger massacres leave bigger pools: mark size scales with the body
+		# count — a 30-kill blast paints double-size splatters.
+		var mag := clampf(1.0 + float(kills) * 0.035, 1.0, 2.0)
 		for spot in kill_spots:
 			_add_mark(
-				spot, randf_range(1.4, 2.4),
+				spot, randf_range(1.4, 2.4) * mag,
 				Color(randf_range(0.42, 0.55), 0.04, 0.03, randf_range(0.88, 1.0)), 1.0)
+		# Big blasts don't stop at the kill zone: blood gets thrown OUTWARD
+		# onto the surrounding rows too.
+		if kills >= 10:
+			for _i in mini(kills / 3, 8):
+				var a := randf() * TAU
+				var rr := radius * randf_range(1.1, 1.7)
+				_add_mark(
+					local + Vector3(cos(a) * rr, 0.0, sin(a) * rr),
+					randf_range(1.0, 1.8) * mag,
+					Color(randf_range(0.38, 0.5), 0.04, 0.03, randf_range(0.7, 0.9)), 1.0)
 	return kills
 
 

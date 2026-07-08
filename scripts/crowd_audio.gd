@@ -43,6 +43,20 @@ var murmur_db: float = -22.0
 var cheer_db: float = -10.0
 var panic_db: float = -9.0
 var reaction_db: float = -8.0
+var chant_db: float = -10.0
+# Clap voicing — read at BAKE time by _synth_cheer; changing these at
+# runtime needs a cheer-loop rebake (crowd_lab has a button for it).
+# The gains are RELATIVE TO THE ROAR'S MEASURED RMS (1.0 = as loud as the
+# roar body) — the mix is measured, not guessed, because the formant
+# resonators amplify ~40 dB and buried every hand-picked linear gain.
+var clap_fore_gain: float = 0.7    # foreground pats loudness vs roar
+var clap_wash_gain: float = 0.35   # fused applause bed loudness vs roar
+# Applause is its own looping layer, split from the cheer bake. It only
+# opens near PEAK enthusiasm (kill / round start / win) — a warm crowd
+# roars but doesn't clap.
+var claps_db: float = -12.0
+var clap_center_hz: float = 1250.0 # foreground bandpass centre
+var clap_rate: float = 32.0        # foreground pats/sec/side
 
 # State — public so the dev panel / labs can poke it.
 var enthusiasm: float = 0.0
@@ -73,10 +87,14 @@ var _shader_panic: float = -1.0
 var _murmur_player: AudioStreamPlayer
 var _cheer_player: AudioStreamPlayer
 var _panic_player: AudioStreamPlayer
+var _clap_player: AudioStreamPlayer
 # Smoothed layer gains (0..1) so state spikes swell in instead of snapping.
 var _murmur_gain: float = 0.0
 var _cheer_gain: float = 0.0
 var _panic_gain: float = 0.0
+var _clap_gain: float = 0.0
+# Claps-only mix stashed by _synth_cheer(split = true) for the caller.
+var _split_claps := PackedVector2Array()
 
 var _roar_wav: AudioStreamWAV = null
 var _surge_wav: AudioStreamWAV = null  # round-start anticipation swell
@@ -89,11 +107,32 @@ var _scream_cd: float = 0.0
 # the round-win celebration owns the mix for a few seconds.
 var _celebrate_hold: float = 0.0
 
+# Chants: short pentatonic phrases a crowd section sings in rough unison,
+# procedurally composed at boot (5 melodies, 3 reps baked per WAV). One
+# plays at a time from a random point on the ring when enthusiasm is high;
+# panic fades it out mid-song.
+const CHANT_COUNT := 5
+var _chant_wavs: Array[AudioStreamWAV] = []
+var _chant_player: AudioStreamPlayer3D = null
+var _chant_cd: float = 10.0
+var _chant_bag: Array[int] = []
+var _chant_fading: bool = false
+var _chant_force_delay: float = 0.0
+
 
 func _ready() -> void:
 	_murmur_player = _make_loop_player()
 	_cheer_player = _make_loop_player()
 	_panic_player = _make_loop_player()
+	_clap_player = _make_loop_player()
+	_chant_player = AudioStreamPlayer3D.new()
+	_chant_player.unit_size = 26.0
+	_chant_player.max_db = 6.0
+	_chant_player.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
+	_chant_player.attenuation_filter_cutoff_hz = 6500.0
+	_chant_player.attenuation_filter_db = -12.0
+	_chant_player.finished.connect(_on_chant_finished)
+	add_child(_chant_player)
 	_synth_all()
 
 
@@ -246,6 +285,8 @@ func on_round_win() -> void:
 	_cheer_gain = 1.0
 	_celebrate_hold = 4.0
 	_roar_cd = 2.5
+	# Victory song right behind the eruption.
+	_chant_force_delay = 1.8
 	# SPL 135: a 15k-strong stadium eruption really is that loud — and it has
 	# to clear SFX's HDR cull window (max_spl - 35) even when the winning
 	# blow was a 165-SPL explosion, or the roar never plays at all.
@@ -340,6 +381,7 @@ func _process(delta: float) -> void:
 	if _celebrate_hold > 0.0:
 		_celebrate_hold -= delta
 		enthusiasm = 1.0
+	_update_chant(delta)
 	_roar_cd = maxf(0.0, _roar_cd - delta)
 	_ooh_cd = maxf(0.0, _ooh_cd - delta)
 	_scream_cd = maxf(0.0, _scream_cd - delta)
@@ -347,16 +389,21 @@ func _process(delta: float) -> void:
 	var murmur_t := 0.0
 	var cheer_t := 0.0
 	var panic_t := 0.0
+	var clap_t := 0.0
 	if ring_active:
 		murmur_t = clampf(0.55 + 0.3 * enthusiasm - 0.25 * fear, 0.15, 0.9)
 		cheer_t = enthusiasm * (1.0 - fear * 0.75)
 		panic_t = fear
+		# Applause only at emotional peaks — kills / round start / wins push
+		# enthusiasm into the 0.6..1.0 band; baseline warmth stays clap-free.
+		clap_t = clampf((enthusiasm - 0.6) / 0.4, 0.0, 1.0) * (1.0 - fear * 0.75)
 	# Swell up fast (crowds react quickly), settle down a bit slower.
 	var k_up := minf(1.0, delta * 5.0)
 	var k_down := minf(1.0, delta * 1.6)
 	_murmur_gain += (murmur_t - _murmur_gain) * (k_up if murmur_t > _murmur_gain else k_down)
 	_cheer_gain += (cheer_t - _cheer_gain) * (k_up if cheer_t > _cheer_gain else k_down)
 	_panic_gain += (panic_t - _panic_gain) * (k_up if panic_t > _panic_gain else k_down)
+	_clap_gain += (clap_t - _clap_gain) * (k_up if clap_t > _clap_gain else k_down)
 
 	# Duck the beds under heavy combat — piggybacks on SFX's HDR loudness
 	# tracker so gunfights push the crowd into the background naturally.
@@ -365,9 +412,16 @@ func _process(delta: float) -> void:
 	var duck: float = 0.0
 	if _celebrate_hold <= 0.0:
 		duck = clampf((SFX._hdr_max_spl - 112.0) * 0.4, 0.0, 10.0)
-	_apply_gain(_murmur_player, _murmur_gain, murmur_db - duck)
-	_apply_gain(_cheer_player, _cheer_gain, cheer_db - duck)
+	# While a chant runs, the free-form roar steps back only slightly — the
+	# chant is ADDITIVE: the arena gets a bit louder overall when the crowd
+	# organizes, with just enough duck that the beds don't smear the melody.
+	var chant_duck := 0.0
+	if _chant_player != null and _chant_player.playing and not _chant_fading:
+		chant_duck = 2.0
+	_apply_gain(_murmur_player, _murmur_gain, murmur_db - duck - chant_duck * 0.3)
+	_apply_gain(_cheer_player, _cheer_gain, cheer_db - duck - chant_duck)
 	_apply_gain(_panic_player, _panic_gain, panic_db - duck * 0.5)
+	_apply_gain(_clap_player, _clap_gain, claps_db - duck - chant_duck * 0.5)
 
 	# Drive the silhouette shader so the crowd's body language matches the
 	# sound: excited → higher/faster hops, afraid → cowering tremble.
@@ -386,6 +440,64 @@ func _process(delta: float) -> void:
 # the bed clearly present at baseline while full roar stays where it was.
 const LAYER_DYN_RANGE_DB := 14.0
 
+# -------------------- chants --------------------
+
+func _update_chant(delta: float) -> void:
+	if _chant_player == null:
+		return
+	if _chant_player.playing:
+		# Terror (or the arena being torn down) kills the singing mid-song.
+		if fear > 0.5 or not ring_active:
+			_chant_fading = true
+		if _chant_fading:
+			_chant_player.volume_db -= 50.0 * delta
+			if _chant_player.volume_db <= -55.0:
+				_chant_player.stop()
+				_chant_fading = false
+				_chant_cd = randf_range(16.0, 30.0)
+			return
+		# Heavy combat ducks the chant like the beds; light fear thins it.
+		var duck: float = clampf((SFX._hdr_max_spl - 112.0) * 0.5, 0.0, 14.0)
+		var target: float = chant_db - duck - fear * 10.0
+		_chant_player.volume_db = lerpf(_chant_player.volume_db, target, minf(1.0, delta * 6.0))
+		return
+	_chant_fading = false
+	if not ring_active or _chant_wavs.is_empty() or (BenchFlags.active):
+		return
+	if _chant_force_delay > 0.0:
+		_chant_force_delay -= delta
+		if _chant_force_delay <= 0.0:
+			_start_chant()
+		return
+	_chant_cd -= delta
+	# Once armed and the mood is right, start within ~4 s (per-frame chance).
+	if _chant_cd <= 0.0 and enthusiasm > 0.4 and fear < 0.25 and randf() < delta / 4.0:
+		_start_chant()
+
+
+func _on_chant_finished() -> void:
+	_chant_cd = randf_range(14.0, 26.0)
+
+
+func _start_chant() -> void:
+	if _chant_wavs.is_empty() or not _resolve_center():
+		return
+	# Shuffle-bag so the same melody never repeats back-to-back.
+	if _chant_bag.is_empty():
+		for i in _chant_wavs.size():
+			_chant_bag.append(i)
+		_chant_bag.shuffle()
+	var idx: int = _chant_bag.pop_back()
+	var ang := randf() * TAU
+	_chant_player.global_position = _ring_point_toward(
+		_ring_center + Vector3(cos(ang), 0.0, sin(ang)))
+	_chant_player.stream = _chant_wavs[idx]
+	_chant_player.volume_db = chant_db - 8.0  # swells in via the lerp above
+	_chant_player.pitch_scale = randf_range(0.97, 1.03)
+	_chant_player.play()
+	_chant_cd = 999.0  # re-armed by finished / fade-out
+
+
 func _apply_gain(p: AudioStreamPlayer, gain: float, base_db: float) -> void:
 	if p == null or p.stream == null:
 		return
@@ -403,9 +515,12 @@ func _synth_all() -> void:
 	var murmur := await _synth_murmur(LOOP_SECONDS + SEAM_SECONDS)
 	_murmur_player.stream = _to_wav(_finish_loop(murmur), true)
 	_murmur_player.play()
-	var cheer := await _synth_cheer(LOOP_SECONDS + SEAM_SECONDS, true, 0.0)
+	var cheer := await _synth_cheer(LOOP_SECONDS + SEAM_SECONDS, true, 0.0, true)
 	_cheer_player.stream = _to_wav(_finish_loop(cheer), true)
 	_cheer_player.play()
+	_clap_player.stream = _to_wav(_finish_loop(_split_claps), true)
+	_split_claps = PackedVector2Array()
+	_clap_player.play()
 	var panic := await _synth_panic(LOOP_SECONDS + SEAM_SECONDS, true, 0.0)
 	_panic_player.stream = _to_wav(_finish_loop(panic), true)
 	_panic_player.play()
@@ -418,6 +533,9 @@ func _synth_all() -> void:
 	_scream_wav = _to_wav(_normalize(scream, 0.75), false)
 	var ooh := await _synth_ooh(1.1)
 	_ooh_wav = _to_wav(_normalize(ooh, 0.6), false)
+	for i in CHANT_COUNT:
+		var chant := await _synth_chant(60101 + i * 977)
+		_chant_wavs.append(_to_wav(_normalize(chant, 0.6), false))
 
 
 func _finish_loop(buf: PackedVector2Array) -> PackedVector2Array:
@@ -500,10 +618,16 @@ func _synth_murmur(seconds: float) -> PackedVector2Array:
 # slowly wobbling) with a 5–6 Hz flutter — the "thousands yelling" texture —
 # plus applause crackle (Poisson-triggered bright noise bursts).
 # `one_shot` > 0 wraps it in a fast-attack / decaying kill-roar envelope.
-func _synth_cheer(seconds: float, _looped: bool, one_shot: float) -> PackedVector2Array:
+func _synth_cheer(seconds: float, _looped: bool, one_shot: float, split: bool = false) -> PackedVector2Array:
 	var n := int(seconds * RATE)
-	var out := PackedVector2Array()
-	out.resize(n)
+	# Components render into separate buffers and are mixed by MEASURED RMS
+	# at the end — see the clap_*_gain comment up top.
+	var roar_buf := PackedVector2Array()
+	roar_buf.resize(n)
+	var wash_buf := PackedVector2Array()
+	wash_buf.resize(n)
+	var fore_buf := PackedVector2Array()
+	fore_buf.resize(n)
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 52002 + int(one_shot)
 	# Resonator states: [y1, y2] per formant per channel.
@@ -515,20 +639,40 @@ func _synth_cheer(seconds: float, _looped: bool, one_shot: float) -> PackedVecto
 	var c2 := 0.0
 	var r1 := exp(-PI * 140.0 / RATE)  # ~140 Hz formant bandwidth
 	var r1sq := r1 * r1
-	var clap_l := 0.0
-	var clap_r := 0.0
-	# Dense distant applause: ~1300 Poisson claps/sec/side, ACCUMULATED into
-	# a leaky integrator (env += amp on trigger, exponential decay). One
-	# state var IS the exact sum of every overlapping decaying clap, so a
-	# 50x density costs nothing — and it all bakes into the cached loop at
-	# boot anyway, so runtime cost is zero regardless. Two lowpass poles
-	# (~1.2 kHz, 12 dB/oct) push the wash across the arena.
-	var clap_decay := exp(-1.0 / (0.009 * RATE))
-	var clap_p := 1300.0 / RATE
+	# Applause, two tiers. The dense WASH (~900 Poisson claps/s/side into a
+	# leaky integrator) fuses into stadium crackle — that's the "thousands",
+	# but by Campbell's theorem high-rate shot noise converges to a steady
+	# level, so on its own it stops reading as claps at all. The FOREGROUND
+	# tier (~20/s/side, heavy-tailed loudness, brighter/less filtered) rides
+	# on top: the individually audible pats from the nearest rows.
+	var wash_l := 0.0
+	var wash_r := 0.0
+	var wash_decay := exp(-1.0 / (0.009 * RATE))
+	var wash_p := 1400.0 / RATE
 	var clap_lp_l := 0.0
 	var clap_lp_r := 0.0
 	var clap_lp2_l := 0.0
 	var clap_lp2_r := 0.0
+	var fore_l := 0.0
+	var fore_r := 0.0
+	var fore_p := clap_rate / RATE
+	# Foreground pats go through a two-pole BANDPASS (steep on BOTH sides)
+	# around clap_center_hz. Plain lowpasses failed twice: shallow ones left
+	# hiss on top (read as "high-pitched"), and cutting low enough to kill
+	# the hiss sank the claps into the roar's 640-1350 Hz formant band where
+	# they masked completely. A mid bandpass gives the "pok" its own slot.
+	var rc := exp(-PI * 320.0 / RATE)
+	var rcsq := rc * rc
+	var cgain := 1.0 - rc  # input pre-scale ≈ unit peak gain at resonance
+	# Per-channel filter tuning, re-rolled on every clap trigger — each pair
+	# of hands gets its own centre pitch and decay length instead of every
+	# pat being the identical "pok".
+	var cc_l := 2.0 * rc * cos(TAU * clap_center_hz / RATE)
+	var cc_r := cc_l
+	var fore_decay_l := exp(-1.0 / (0.016 * RATE))
+	var fore_decay_r := fore_decay_l
+	var fb_l := Vector2.ZERO
+	var fb_r := Vector2.ZERO
 	var sw_ph := rng.randf() * TAU
 	# Formant drift + loudness surge are RANDOM WALKS, not LFOs. A periodic
 	# pitch wobble on a resonant filter makes the whole bed read as one siren
@@ -580,28 +724,73 @@ func _synth_cheer(seconds: float, _looped: bool, one_shot: float) -> PackedVecto
 			f2l = Vector2(y2l, f2l.x)
 			var y2r := wr + c2 * f2r.x - r1sq * f2r.y
 			f2r = Vector2(y2r, f2r.x)
-			# Applause: one draw decides L / R / neither this sample; claps
-			# ADD into the envelope so they pile up instead of retriggering.
+			# Wash: one draw decides L / R / neither; claps ADD so they fuse.
 			var cr := rng.randf()
-			if cr < clap_p:
-				clap_l += rng.randf_range(0.2, 0.7)
-			elif cr < clap_p * 2.0:
-				clap_r += rng.randf_range(0.2, 0.7)
-			clap_l *= clap_decay
-			clap_r *= clap_decay
-			clap_lp_l += (wl * clap_l - clap_lp_l) * 0.28
-			clap_lp_r += (wr * clap_r - clap_lp_r) * 0.28
-			clap_lp2_l += (clap_lp_l - clap_lp2_l) * 0.28
-			clap_lp2_r += (clap_lp_r - clap_lp2_r) * 0.28
-			# Applause breathes with the roar's surges instead of idling flat,
-			# and follows the one-shot macro envelope (osc_env is 1.0 in loops).
-			var clap_mix := 0.07 * (0.5 + 0.5 * flut) * osc_env
-			out[i] = Vector2(
-				(y1l + y2l * 0.55) * 0.02 * env + clap_lp2_l * clap_mix,
-				(y1r + y2r * 0.55) * 0.02 * env + clap_lp2_r * clap_mix)
+			if cr < wash_p:
+				wash_l += rng.randf_range(0.2, 0.7)
+			elif cr < wash_p * 2.0:
+				wash_r += rng.randf_range(0.2, 0.7)
+			wash_l *= wash_decay
+			wash_r *= wash_decay
+			clap_lp_l += (wl * wash_l - clap_lp_l) * 0.18
+			clap_lp_r += (wr * wash_r - clap_lp_r) * 0.18
+			clap_lp2_l += (clap_lp_l - clap_lp2_l) * 0.18
+			clap_lp2_r += (clap_lp_r - clap_lp2_r) * 0.18
+			# Foreground: rate breathes with the surge, amplitudes heavy-
+			# tailed (pow 2.2) so most blend and the odd clap pops out.
+			var fr := rng.randf()
+			var fp := fore_p * (0.4 + 0.9 * flut)
+			if fr < fp:
+				fore_l = maxf(fore_l, 0.25 + 0.75 * pow(rng.randf(), 2.2))
+				cc_l = 2.0 * rc * cos(TAU * clap_center_hz * rng.randf_range(0.72, 1.35) / RATE)
+				fore_decay_l = exp(-1.0 / (rng.randf_range(0.010, 0.024) * RATE))
+			elif fr < fp * 2.0:
+				fore_r = maxf(fore_r, 0.25 + 0.75 * pow(rng.randf(), 2.2))
+				cc_r = 2.0 * rc * cos(TAU * clap_center_hz * rng.randf_range(0.72, 1.35) / RATE)
+				fore_decay_r = exp(-1.0 / (rng.randf_range(0.010, 0.024) * RATE))
+			fore_l *= fore_decay_l
+			fore_r *= fore_decay_r
+			# Independent noise draws decorrelate the pats from the roar bed.
+			var b_l := rng.randf_range(-1.0, 1.0) * fore_l * cgain + cc_l * fb_l.x - rcsq * fb_l.y
+			fb_l = Vector2(b_l, fb_l.x)
+			var b_r := rng.randf_range(-1.0, 1.0) * fore_r * cgain + cc_r * fb_r.x - rcsq * fb_r.y
+			fb_r = Vector2(b_r, fb_r.x)
+			# Both tiers breathe with the surges and follow the one-shot
+			# macro envelope (osc_env is 1.0 in loops).
+			var clap_mix := (0.5 + 0.5 * flut) * osc_env
+			roar_buf[i] = Vector2((y1l + y2l * 0.55) * env, (y1r + y2r * 0.55) * env)
+			wash_buf[i] = Vector2(clap_lp2_l, clap_lp2_r) * clap_mix
+			fore_buf[i] = Vector2(b_l, b_r) * clap_mix
 			i += 1
 		await get_tree().process_frame
+	# Measured mix: scale each clap tier so its RMS lands at the requested
+	# fraction of the roar's RMS, whatever the filters did to the levels.
+	var roar_rms := _rms(roar_buf)
+	var wsc := roar_rms / maxf(_rms(wash_buf), 0.000001) * clap_wash_gain
+	var fsc := roar_rms / maxf(_rms(fore_buf), 0.000001) * clap_fore_gain
+	var out := PackedVector2Array()
+	out.resize(n)
+	if split:
+		# Roar and applause become SEPARATE loops so runtime can gate the
+		# claps on peak enthusiasm; relative fore/wash balance is preserved
+		# inside the clap mix.
+		var claps := PackedVector2Array()
+		claps.resize(n)
+		for j in n:
+			out[j] = roar_buf[j]
+			claps[j] = wash_buf[j] * wsc + fore_buf[j] * fsc
+		_split_claps = claps
+	else:
+		for j in n:
+			out[j] = roar_buf[j] + wash_buf[j] * wsc + fore_buf[j] * fsc
 	return out
+
+
+func _rms(buf: PackedVector2Array) -> float:
+	var acc := 0.0
+	for v in buf:
+		acc += v.x * v.x + v.y * v.y
+	return sqrt(acc / maxf(float(buf.size() * 2), 1.0))
 
 
 # Panic engine: brighter formants (~1050 / 2450 Hz) with fast chaotic
@@ -653,8 +842,9 @@ func _synth_panic(seconds: float, _looped: bool, one_shot: float) -> PackedVecto
 		w_rough_ph.append(rng.randf() * TAU)
 		w_rough_depth.append(rng.randf_range(0.35, 0.7))
 		w_drive.append(rng.randf_range(1.6, 3.0))
-		# Most screams hold dead flat; some sag slightly at the very end.
-		w_fall.append(0.0 if rng.randf() < 0.4 else rng.randf_range(0.04, 0.12))
+		# Most screams hold dead flat; a few bend down only in the final
+		# instant (pow 6 below keeps the hold clean until ~85% through).
+		w_fall.append(0.0 if rng.randf() < 0.7 else rng.randf_range(0.03, 0.06))
 		w_h3.append(0.35 if w_f0[k] * 3.0 < 9500.0 else 0.0)
 		w_h4.append(0.2 if w_f0[k] * 4.0 < 9500.0 else 0.0)
 	var f1l := Vector2.ZERO
@@ -715,7 +905,7 @@ func _synth_panic(seconds: float, _looped: bool, one_shot: float) -> PackedVecto
 					continue
 				var vib := 1.0 + w_jit[k] + 0.01 * sin(TAU * w_vib_hz[k] * t + w_vib_ph[k])
 				var rise := minf(u / 0.05, 1.0)
-				var freq := w_f0[k] * (0.85 + 0.15 * rise) * (1.0 - w_fall[k] * pow(u, 2.0)) * vib
+				var freq := w_f0[k] * (0.85 + 0.15 * rise) * (1.0 - w_fall[k] * pow(u, 6.0)) * vib
 				w_ph[k] += TAU * freq / RATE
 				var am := 1.0 - w_rough_depth[k] \
 					+ w_rough_depth[k] * (0.5 + 0.5 * sin(TAU * w_rough_hz[k] * t + w_rough_ph[k]))
@@ -736,6 +926,173 @@ func _synth_panic(seconds: float, _looped: bool, one_shot: float) -> PackedVecto
 			out[i] = out_lp2
 			i += 1
 		await get_tree().process_frame
+	return out
+
+
+# Stadium chant: a crowd section sings a short wordless phrase in rough
+# unison, 3 repetitions per bake (quieter first rep — the section "joins in" —
+# loudest middle, trailing third). Composition: 4-7 notes random-walked on a
+# minor pentatonic (instant stadium flavor), chant rhythm of single/double
+# units with a held final note resolving to the root, then a rest before the
+# repeat. Timbre: four detuned harmonic-stack "sections" with shared
+# portamento sliding into each note, syllable envelopes, breath noise and
+# gentle tanh cohesion.
+func _synth_chant(seed_v: int) -> PackedVector2Array:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = seed_v
+	var scale := [0, 3, 5, 7, 10]  # minor pentatonic, semitones
+	var root_hz := rng.randf_range(200.0, 280.0)
+	var unit := rng.randf_range(0.24, 0.3)  # one rhythmic unit (~eighth note)
+	var count := rng.randi_range(4, 7)
+	var deg := rng.randi_range(0, 2)
+	var degs: Array[int] = []
+	var durs: Array[float] = []
+	for n in count:
+		degs.append(deg)
+		if n == count - 1:
+			durs.append(2.0 + float(rng.randi_range(0, 1)))  # held last note
+		else:
+			durs.append(1.0 if rng.randf() < 0.65 else 2.0)
+		var step: int = [-1, 0, 1][rng.randi_range(0, 2)]
+		if rng.randf() < 0.15:
+			step = 2
+		deg = clampi(deg + step, 0, scale.size() - 1)
+	degs[count - 1] = 0 if rng.randf() < 0.7 else 2  # resolve home
+	var rest := (2.0 + float(rng.randi_range(0, 1))) * unit
+	# Flatten the 3 reps into one event list: x=start, y=end, z=freq, w=gain.
+	var rep_gain := [0.65, 1.0, 0.8]
+	var events: Array[Vector4] = []
+	var t0 := 0.15
+	for r in 3:
+		for n in count:
+			var f := root_hz * pow(2.0, float(scale[degs[n]]) / 12.0)
+			var d: float = durs[n] * unit
+			events.append(Vector4(t0, t0 + d * 0.92, f, rep_gain[r]))
+			t0 += d
+		t0 += rest
+	var n_samp := int((t0 + 0.7) * RATE)
+	# Three sub-sections of the crowd sing the same phrase SLOPPILY: each has
+	# its own timing lag, detune, portamento speed, attack/release and a slow
+	# individual gain wobble. Perfect sync read as one clean synth voice — the
+	# smear BETWEEN sections is what makes it a crowd. Roar and melody
+	# accumulate into separate buffers and are mixed by measured RMS at the
+	# end (same trick as the cheer engine: resonator gains are huge and
+	# hand-picked levels lie).
+	var roar_acc := PackedVector2Array()
+	roar_acc.resize(n_samp)
+	var mel_acc := PackedVector2Array()
+	mel_acc.resize(n_samp)
+	var r1 := exp(-PI * 140.0 / RATE)
+	var r1sq := r1 * r1
+	# ~26 Hz band per partial: wide enough to sound like many voices on a
+	# note, not a pure tone.
+	var rm := exp(-PI * 26.0 / RATE)
+	var rmsq := rm * rm
+	for k in 3:
+		var off: float = [0.0, 0.05, 0.09][k] + rng.randf_range(-0.02, 0.03)
+		var det: float = [1.0, 1.012, 0.985][k] * rng.randf_range(0.996, 1.004)
+		var porta := rng.randf_range(0.0008, 0.0018)
+		var atk := rng.randf_range(0.0006, 0.0012)   # attack tau ~38-75 ms
+		var rel := rng.randf_range(0.00025, 0.0005)  # release tau ~90-180 ms
+		var sec_gain: float = [1.0, 0.75, 0.6][k]
+		var sec_pan: float = [0.5, 0.33, 0.67][k]
+		var lf := 2.0 * (1.0 - sec_pan)
+		var rf := 2.0 * sec_pan
+		var c1 := 0.0
+		var c2 := 0.0
+		var cm2 := 0.0
+		var cm3 := 0.0
+		var cm4 := 0.0
+		var f1l := Vector2.ZERO
+		var f1r := Vector2.ZERO
+		var f2l := Vector2.ZERO
+		var f2r := Vector2.ZERO
+		var m2l := Vector2.ZERO
+		var m2r := Vector2.ZERO
+		var m3l := Vector2.ZERO
+		var m3r := Vector2.ZERO
+		var m4l := Vector2.ZERO
+		var m4r := Vector2.ZERO
+		var cur_f := root_hz * det
+		var env := 0.0
+		var ev_idx := 0
+		var wob := 1.0
+		var i := 0
+		while i < n_samp:
+			var stop := mini(i + CHUNK, n_samp)
+			while i < stop:
+				var t := float(i) / RATE - off
+				while ev_idx < events.size() and t > events[ev_idx].y:
+					ev_idx += 1
+				var target_gain := 0.0
+				var target_f := cur_f
+				if ev_idx < events.size():
+					target_f = events[ev_idx].z * det  # pre-glide toward next note
+					if t >= events[ev_idx].x:
+						target_gain = events[ev_idx].w
+				cur_f += (target_f - cur_f) * porta
+				env += (target_gain - env) * (atk if target_gain > env else rel)
+				if i % 64 == 0:
+					# This section drifts louder/softer on its own.
+					wob = clampf(wob + rng.randf_range(-0.03, 0.03), 0.75, 1.25)
+					# Formants track the note at half power — the mouth opens up
+					# and the whole voice brightens on high notes.
+					var track := pow(cur_f / root_hz, 0.5)
+					var f1 := 640.0 * track
+					c1 = 2.0 * r1 * cos(TAU * f1 / RATE)
+					c2 = 2.0 * r1 * cos(TAU * f1 * 2.1 / RATE)
+					# Pitched harmonics 2-4 only — the fundamental resonator was
+					# a near-sine and read synthy. The ear reconstructs the pitch
+					# from the overtone spacing (missing fundamental), and the
+					# chant stays shouty instead of hummy.
+					cm2 = 2.0 * rm * cos(TAU * cur_f * 2.0 / RATE)
+					cm3 = 2.0 * rm * cos(TAU * cur_f * 3.0 / RATE)
+					cm4 = 2.0 * rm * cos(TAU * cur_f * 4.0 / RATE)
+				var wl := rng.randf_range(-1.0, 1.0)
+				var wr := rng.randf_range(-1.0, 1.0)
+				var y1l := wl + c1 * f1l.x - r1sq * f1l.y
+				f1l = Vector2(y1l, f1l.x)
+				var y1r := wr + c1 * f1r.x - r1sq * f1r.y
+				f1r = Vector2(y1r, f1r.x)
+				var y2l := wl + c2 * f2l.x - r1sq * f2l.y
+				f2l = Vector2(y2l, f2l.x)
+				var y2r := wr + c2 * f2r.x - r1sq * f2r.y
+				f2r = Vector2(y2r, f2r.x)
+				var p2l := wl + cm2 * m2l.x - rmsq * m2l.y
+				m2l = Vector2(p2l, m2l.x)
+				var p2r := wr + cm2 * m2r.x - rmsq * m2r.y
+				m2r = Vector2(p2r, m2r.x)
+				var p3l := wl + cm3 * m3l.x - rmsq * m3l.y
+				m3l = Vector2(p3l, m3l.x)
+				var p3r := wr + cm3 * m3r.x - rmsq * m3r.y
+				m3r = Vector2(p3r, m3r.x)
+				var p4l := wl + cm4 * m4l.x - rmsq * m4l.y
+				m4l = Vector2(p4l, m4l.x)
+				var p4r := wr + cm4 * m4r.x - rmsq * m4r.y
+				m4r = Vector2(p4r, m4r.x)
+				# Roar keeps sounding through the gaps at reduced level — the
+				# crowd shouts the rhythm rather than switching on and off.
+				var amp := env * sec_gain * wob
+				var roar_amp := (0.3 + 0.7 * env) * sec_gain * wob
+				roar_acc[i] = roar_acc[i] + Vector2(
+					(y1l + y2l * 0.55) * roar_amp * lf,
+					(y1r + y2r * 0.55) * roar_amp * rf)
+				mel_acc[i] = mel_acc[i] + Vector2(
+					(p2l + 0.6 * p3l + 0.35 * p4l) * amp * lf,
+					(p2r + 0.6 * p3r + 0.35 * p4r) * amp * rf)
+				i += 1
+			await get_tree().process_frame
+	# Measured mix (melody at 90% of the roar body), then a one-pole lowpass —
+	# the section sings from across the arena.
+	var roar_rms := _rms(roar_acc)
+	var msc := roar_rms / maxf(_rms(mel_acc), 0.000001) * 0.9
+	var out := PackedVector2Array()
+	out.resize(n_samp)
+	var lp := Vector2.ZERO
+	for j in n_samp:
+		var s := roar_acc[j] + mel_acc[j] * msc
+		lp += (s - lp) * 0.5
+		out[j] = lp
 	return out
 
 

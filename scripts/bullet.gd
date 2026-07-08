@@ -279,7 +279,19 @@ func _physics_process(delta: float) -> void:
 					and crowd.apply_bullet(global_position) > 0:
 				_crowd_hit_reported = true
 				CrowdAudio.notify_crowd_kill(global_position)
-				queue_free()
+				if weapon_stats.explosive_radius > 0.0:
+					# The body IS the impact surface — detonate right here. A
+					# null collider walks _handle_collision's plain world-hit
+					# path (every helper null-guards), so the blast VFX, the
+					# splash damage, and the explosion's own crowd-kill radius
+					# all fire exactly as if the round had struck a wall.
+					_handle_collision({
+						"position": global_position,
+						"collider": null,
+						"normal": -direction.normalized(),
+					})
+				else:
+					queue_free()
 				return
 			# Overflying the crowd without hitting a body: one scare per bullet.
 			if not _crowd_scared:
