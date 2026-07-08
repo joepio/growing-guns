@@ -143,13 +143,26 @@ func _process(delta: float) -> void:
 			for lbl in _ad_labels:
 				lbl.text = str(ad[0])
 
-# Frame a random patch of seating from inside the bowl — a fresh section of
-# fans every crowd segment.
+# Crowd segment variants: a single blocky fan filling the frame (using REAL
+# seat positions from the crowd controller, so we never frame an empty gap),
+# or a wider section of seating.
 func _aim_crowd_cam() -> void:
+	var crowd: Node = get_parent().get_node_or_null("CrowdController")
+	if crowd != null and randf() < 0.6:
+		var seats: PackedVector3Array = crowd.get("_positions")
+		if seats != null and not seats.is_empty():
+			var seat: Vector3 = seats[randi() % seats.size()]
+			var inward := -Vector3(seat.x, 0.0, seat.z).normalized()
+			_crowd_cam.fov = 24.0
+			_crowd_cam.position = seat + inward * 3.4 + Vector3(0.0, 1.7, 0.0)
+			_crowd_cam.look_at(seat + Vector3(0.0, 1.0, 0.0), Vector3.UP)
+			return
+	# Section shot: a fresh patch of fans from inside the bowl.
 	var ang := randf() * TAU
 	var dir := Vector3(cos(ang), 0.0, sin(ang))
 	var row_frac := randf_range(0.2, 0.7)
 	var seat_r := _inner_r + 18.0 * 2.2 * row_frac  # ColosseumBuilder ROWS/ROW_DEPTH
 	var seat_y := _base_y + 18.0 * 1.4 * row_frac
+	_crowd_cam.fov = 32.0
 	_crowd_cam.position = dir * (_inner_r * 0.7) + Vector3(0.0, seat_y + 3.0, 0.0)
 	_crowd_cam.look_at(dir * seat_r + Vector3(0.0, seat_y + 1.0, 0.0), Vector3.UP)
