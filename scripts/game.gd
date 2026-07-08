@@ -944,9 +944,22 @@ func _request_spawn(pname: String) -> void:
 	_set_game_mode.rpc_id(sender, game_mode, coop_wave)
 	if is_coop_mode():
 		_set_coop_wave_progress.rpc_id(sender, _coop_wave_kills, _coop_wave_enemy_total)
-	if state != State.WAITING:
-		_set_game_state.rpc_id(sender, state)
-	_maybe_start_match()
+	if not is_coop_mode() and state != State.WAITING:
+		# A real player joined a versus match already underway (typically the
+		# host warming up against the SP fallback bot). Don't drop them into
+		# the middle of someone else's round — hard-restart: clear any live
+		# card pick, then _restart_match -> WAITING -> _maybe_start_match,
+		# which resets every weapon and opens round 1 clean for both.
+		_hide_card_pick.rpc()
+		pending_pick_cards_by_player.clear()
+		pending_pick_deadlines.clear()
+		completed_picks.clear()
+		eliminated_players.clear()
+		_restart_match()
+	else:
+		if state != State.WAITING:
+			_set_game_state.rpc_id(sender, state)
+		_maybe_start_match()
 	if not _is_bot_id(sender):
 		_announce.rpc("%s joined" % pname, 2.0)
 

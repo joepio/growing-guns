@@ -3,25 +3,20 @@ shader_type spatial;
 // parchment at bowl distances — real jumbotrons punch through.
 render_mode unshaded, cull_back, fog_disabled;
 
-// Stadium jumbotron screen (see stadium_tv.gd). The "broadcast" is the
-// viewer's own previous frame: hint_screen_texture reuses the main
-// viewport's shared per-frame screen copy, so there is NO second scene
-// render — each player sees their own POV on the stadium screens, dressed
-// with scanlines, a rolling flicker band, a blinking LIVE bug and a color
-// ticker bar. (Reading the screen moves this material to the transparent
-// pass, so the TV's own rectangle isn't in the copy — a TV seen on a TV
-// shows the wall behind it, not infinite recursion.)
+// Stadium jumbotron screen (see stadium_tv.gd). The feed is one shared
+// 384x216 SubViewport — POV segments glue its camera to the local player's
+// camera, crowd segments frame the stands. Do NOT switch this back to
+// hint_screen_texture: the full-resolution screen copy it forces measured
+// ~0.5ms/frame at 1600x900 and scales with resolution (≈3ms at 5K retina),
+// while the low-res second render measured free. The overlay dressing:
+// scanlines, rolling flicker, blinking LIVE bug, color ticker bar.
 //
 // Unshaded on purpose: TVs stay lit during the blackout modifier, exactly
 // like real stadium screens (and per docs/lore.md, they're the venue's own
 // hardware). Palette rule: no red — teal/magenta/gold/lime.
 
-uniform sampler2D screen_tex : hint_screen_texture, filter_linear;
-uniform float feed_on : hint_range(0.0, 1.0) = 1.0;
-// Alternate camera segments (crowd closeups): stadium_tv.gd flips feed_src
-// to 1 and enables a small SubViewport whose texture lands here.
 uniform sampler2D feed_tex : source_color, filter_linear;
-uniform float feed_src : hint_range(0.0, 1.0) = 0.0;
+uniform float feed_on : hint_range(0.0, 1.0) = 1.0;
 // Ad break (stadium_tv.gd cycles this): vibrant animated gradient card;
 // the slogan itself is a Label3D floating just in front of the screen.
 uniform float ad_mode : hint_range(0.0, 1.0) = 0.0;
@@ -94,9 +89,7 @@ void fragment() {
 		float sweep = pow(0.5 + 0.5 * sin(uv.x * 6.0 - TIME * 2.2), 12.0);
 		content += vec3(0.9) * sweep * 0.25;
 	} else if (feed_on > 0.5) {
-		vec3 f = (feed_src > 0.5)
-			? texture(feed_tex, uv).rgb
-			: texture(screen_tex, uv).rgb;
+		vec3 f = texture(feed_tex, uv).rgb;
 		// Broadcast grade: contrast pivot above mid to cut the arena's
 		// atmospheric haze, plus a saturation push so the feed reads punchy
 		// at bowl distances.
