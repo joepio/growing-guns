@@ -145,11 +145,45 @@ static func flush_pending() -> void:
 	if _pending.is_empty():
 		return
 	var t0 := Time.get_ticks_usec()
-	var jobs := _pending
-	_pending = []
-	for job: Dictionary in jobs:
-		_spawn_burst(job)
+	# Governor shed tier 1: the occupancy raster is the expensive part of a
+	# spawn (3-7 ms CPU on multi-blast frames), so under pressure build at
+	# most `debris_jobs_per_flush` snapshots per frame and roll the rest to
+	# the next flush. Deferred jobs still merge with new requests, and they
+	# snapshot LATER — after more removals applied — which is harmless.
+	var budget := _pending.size()
+	var gov := _governor()
+	if gov != null:
+		budget = mini(budget, int(gov.debris_jobs_per_flush))
+	if budget < _pending.size():
+		# Bursts (chunk removals) read louder than per-hit chips — spend the
+		# constrained budget on bursts first.
+		var ordered: Array[Dictionary] = []
+		for job: Dictionary in _pending:
+			if str(job["kind"]) == "burst":
+				ordered.append(job)
+		for job: Dictionary in _pending:
+			if str(job["kind"]) != "burst":
+				ordered.append(job)
+		_pending = ordered
+	var n := mini(budget, _pending.size())
+	for i: int in n:
+		_spawn_burst(_pending.pop_front())
+	# Backstop so a long shed period can't grow an unbounded queue (excess
+	# trailing jobs are chips — bursts were sorted to the front above).
+	if _pending.size() > 12:
+		_pending.resize(12)
 	Trace.prof("gpu_debris", Time.get_ticks_usec() - t0)
+
+
+static var _gov: Node = null
+
+
+static func _governor() -> Node:
+	if _gov == null or not is_instance_valid(_gov):
+		var loop := Engine.get_main_loop()
+		if loop is SceneTree:
+			_gov = (loop as SceneTree).root.get_node_or_null("PerfGovernor")
+	return _gov
 
 
 # Compiles the particle-process + draw PSOs before the first real blast

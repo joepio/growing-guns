@@ -1,19 +1,40 @@
 extends Node
 
-# Adaptive VFX quality governor (autoload: PerfGovernor).
+# Adaptive performance governor (autoload: PerfGovernor).
 #
-# Watches the REAL frame time (the _process delta, which is independent of
-# vsync / max_fps, unlike Engine.get_frames_per_second()) and derives a single
-# `quality_scale` in [MIN_SCALE, 1.0]. The expensive explosion budgets in
-# violence.gd multiply their caps by it, so a machine that starts dropping
-# frames automatically sheds the priciest VFX (fewer simultaneous full blasts,
-# fewer smoke layers, fewer particles) to defend the framerate — then eases
-# back to full quality once it has headroom again.
+# Two layers of defense, both driven by the REAL frame time (the _process
+# delta — honest here because the project ships with vsync off):
 #
-# This is a FLOOR protector, not a target enforcer: full quality holds for any
-# machine comfortably above FULL_QUALITY_FPS. We only trim when fps sags toward
-# MIN_QUALITY_FPS. Tune the constants below to taste.
+# 1) CONTINUOUS `quality_scale` in [MIN_SCALE, 1.0] — unchanged contract from
+#    v1. The expensive VFX budgets (violence.gd blast caps, gpu_debris pools,
+#    casing cap, gibs, blood splats) multiply their counts by it, so a machine
+#    that sags sheds the priciest effects first and eases back with headroom.
+#
+# 2) REASON-AWARE shedding — when fps stays below the targets we don't just
+#    dim everything, we look at WHY the frame is slow:
+#      - CPU work  = script process + physics (Performance monitors)
+#      - GPU work  = measured render time on the root viewport
+#    GPU-bound   → step the 3D render scale down a ladder (fill-rate is the
+#                  dominant GPU cost here: smoke/fire overdraw; resolution is
+#                  ~quadratic, so 0.7x scale ≈ half the pixels). HUD stays
+#                  native-res; only the 3D buffer shrinks.
+#    Sustained low fps (either axis) → discrete cosmetic sheds, cheapest
+#    visual loss first:
+#      L1: brass casings stop spawning (active rigid bodies are the top
+#          frame-hitch driver) + gpu_debris snapshot rasters budgeted 1/frame.
+#      L2: full blasts downgrade to cheap flares (kills the smoke/distortion
+#          stack — the worst GPU fill AND a chunk of CPU spawn cost).
+#    The discrete sheds are deliberately classification-INDEPENDENT (they help
+#    both axes and cost little when wrong); only the expensive lever — render
+#    resolution — is gated on the CPU/GPU verdict.
+#
+# Everything shed here is cosmetic and local-only: bullets, damage, and RPCs
+# are untouched, so peers at different tiers stay consistent.
+#
+# All v2 behavior is disabled under BenchFlags.active — benches A/B fixed
+# workloads and a governor moving render scale mid-run would corrupt them.
 
+# --- continuous quality curve (v1 contract, unchanged) ---
 # At/above this measured fps, run everything at full quality (scale = 1.0).
 const FULL_QUALITY_FPS := 200.0
 # At/below this fps, clamp to MIN_SCALE — framerate-survival mode.
@@ -31,18 +52,154 @@ const RISE_LERP := 0.03
 # delta doesn't read as ~0 fps and slam quality to the floor.
 const MAX_FRAME_MS := 100.0
 
+# --- discrete shed tiers (engage below, release above; gap = hysteresis) ---
+const SHED1_ENGAGE_FPS := 72.0   # casings off, debris raster 1/frame
+const SHED1_RELEASE_FPS := 88.0
+const SHED2_ENGAGE_FPS := 55.0   # cheap explosions only
+const SHED2_RELEASE_FPS := 72.0
+# Sustained-time gates so a 2-second firefight spike doesn't flap features.
+const SHED_ENGAGE_SEC := 1.5
+const SHED_RELEASE_SEC := 4.0
+
+# --- dynamic 3D render scale (GPU-bound only) ---
+const RENDER_SCALES: Array[float] = [1.0, 0.85, 0.7, 0.55]
+const RSCALE_ENGAGE_FPS := 80.0   # gpu-bound below this → step down
+const RSCALE_RELEASE_FPS := 100.0 # comfortable above this → step back up
+const RSCALE_DWELL_SEC := 4.0     # min seconds between any two scale changes
+# A frame is "GPU-bound" when measured GPU time dominates the frame budget and
+# clearly exceeds the CPU-side work.
+const GPU_BOUND_FRAME_FRAC := 0.7
+const GPU_OVER_CPU_FACTOR := 1.2
+
 var quality_scale: float = 1.0
+# Discrete shed state — consumers read these directly (they're the API):
+var casings_enabled: bool = true          # procedural_gun.eject_casing
+var full_blasts_allowed: bool = true      # violence.gd blast claim
+var debris_jobs_per_flush: int = 99       # gpu_debris.flush_pending budget
+var shed_level: int = 0                   # 0 = none, 1, 2
+
 var _avg_frame_ms: float = 1000.0 / 240.0
+var _avg_cpu_ms: float = 2.0     # script process + physics, EMA
+var _avg_gpu_ms: float = 2.0     # measured root-viewport render time, EMA
+var _gpu_time_supported: bool = false
+var _rscale_idx: int = 0
+var _rscale_cooldown: float = 0.0
+var _below_sec: Array[float] = [0.0, 0.0]  # sustained-below timers per tier
+var _above_sec: Array[float] = [0.0, 0.0]  # sustained-above timers per tier
+var _headless: bool = false
+
+
+func _ready() -> void:
+	_headless = DisplayServer.get_name() == "headless"
+	if not _headless:
+		# Ask the renderer to time the root viewport so we can tell CPU-bound
+		# from GPU-bound frames. Costs a couple of timestamp queries per frame.
+		RenderingServer.viewport_set_measure_render_time(
+			get_viewport().get_viewport_rid(), true)
+
 
 func _process(delta: float) -> void:
 	var frame_ms: float = minf(delta * 1000.0, MAX_FRAME_MS)
 	_avg_frame_ms = lerpf(_avg_frame_ms, frame_ms, FRAME_EMA)
 	var fps: float = 1000.0 / maxf(_avg_frame_ms, 0.001)
+
+	# v1 continuous curve.
 	var t: float = clampf(inverse_lerp(MIN_QUALITY_FPS, FULL_QUALITY_FPS, fps), 0.0, 1.0)
 	var target: float = lerpf(MIN_SCALE, 1.0, t)
 	var rate: float = FALL_LERP if target < quality_scale else RISE_LERP
 	quality_scale = lerpf(quality_scale, target, rate)
 
+	if BenchFlags.active or _headless:
+		return
+
+	_measure_cpu_gpu()
+	_update_shed_tiers(fps, delta)
+	_update_render_scale(fps, delta)
+
+
+func _measure_cpu_gpu() -> void:
+	var cpu_ms := (
+		Performance.get_monitor(Performance.TIME_PROCESS)
+		+ Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS)
+	) * 1000.0
+	_avg_cpu_ms = lerpf(_avg_cpu_ms, minf(cpu_ms, MAX_FRAME_MS), FRAME_EMA)
+	var rid := get_viewport().get_viewport_rid()
+	var gpu_ms := RenderingServer.viewport_get_measured_render_time_gpu(rid)
+	if gpu_ms > 0.01:
+		_gpu_time_supported = true
+	if _gpu_time_supported:
+		_avg_gpu_ms = lerpf(_avg_gpu_ms, minf(gpu_ms, MAX_FRAME_MS), FRAME_EMA)
+
+
+func is_gpu_bound() -> bool:
+	if _gpu_time_supported:
+		return (
+			_avg_gpu_ms > _avg_frame_ms * GPU_BOUND_FRAME_FRAC
+			and _avg_gpu_ms > _avg_cpu_ms * GPU_OVER_CPU_FACTOR
+		)
+	# No GPU timestamps on this driver: if script+physics only accounts for a
+	# minority of the frame, the rest is render/present — treat as GPU-bound.
+	return _avg_cpu_ms < _avg_frame_ms * 0.5
+
+
+func _update_shed_tiers(fps: float, delta: float) -> void:
+	var engage: Array[float] = [SHED1_ENGAGE_FPS, SHED2_ENGAGE_FPS]
+	var release: Array[float] = [SHED1_RELEASE_FPS, SHED2_RELEASE_FPS]
+	for i: int in 2:
+		var tier := i + 1
+		if fps < engage[i]:
+			_below_sec[i] += delta
+			_above_sec[i] = 0.0
+			if shed_level < tier and _below_sec[i] >= SHED_ENGAGE_SEC:
+				shed_level = tier
+		elif fps > release[i]:
+			_above_sec[i] += delta
+			_below_sec[i] = 0.0
+			if shed_level >= tier and _above_sec[i] >= SHED_RELEASE_SEC:
+				shed_level = tier - 1
+				_above_sec[i] = 0.0
+		else:
+			_below_sec[i] = 0.0
+			_above_sec[i] = 0.0
+	casings_enabled = shed_level < 1
+	debris_jobs_per_flush = 1 if shed_level >= 1 else 99
+	full_blasts_allowed = shed_level < 2
+
+
+func _update_render_scale(fps: float, delta: float) -> void:
+	_rscale_cooldown = maxf(_rscale_cooldown - delta, 0.0)
+	if _rscale_cooldown > 0.0:
+		return
+	var vp := get_viewport()
+	if fps < RSCALE_ENGAGE_FPS and is_gpu_bound() and _rscale_idx < RENDER_SCALES.size() - 1:
+		_rscale_idx += 1
+	elif fps > RSCALE_RELEASE_FPS and _rscale_idx > 0:
+		_rscale_idx -= 1
+	else:
+		return
+	vp.scaling_3d_scale = RENDER_SCALES[_rscale_idx]
+	_rscale_cooldown = RSCALE_DWELL_SEC
+
+
 # Smoothed fps estimate — handy for HUD/debug readouts.
 func smoothed_fps() -> float:
 	return 1000.0 / maxf(_avg_frame_ms, 0.001)
+
+
+func render_scale() -> float:
+	return RENDER_SCALES[_rscale_idx]
+
+
+func bound_label() -> String:
+	if smoothed_fps() >= SHED1_RELEASE_FPS and _rscale_idx == 0:
+		return "ok"
+	return "gpu" if is_gpu_bound() else "cpu"
+
+
+# One-line state dump for trace lines / debugging.
+func debug_state() -> String:
+	return "fps=%.0f cpu=%.1f gpu=%s bnd=%s qs=%.2f rs=%.2f shed=%d" % [
+		smoothed_fps(), _avg_cpu_ms,
+		("%.1f" % _avg_gpu_ms) if _gpu_time_supported else "n/a",
+		bound_label(), quality_scale, render_scale(), shed_level,
+	]

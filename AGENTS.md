@@ -7,7 +7,7 @@ Notes for AI agents working on this codebase.
 Multiplayer FPS in Godot 4.6. Last-man-standing rounds; round losers pick stacking cards that mutate their weapon and body for the next round. Played LAN-only via `ENetMultiplayerPeer`.
 
 - Engine: Godot **4.6.2** (`/Applications/Godot.app/Contents/MacOS/Godot` on this machine)
-- Physics tick: **120 Hz** (`project.godot` → `common/physics_ticks_per_second=120`)
+- Physics tick: **60 Hz** (`project.godot` → `common/physics_ticks_per_second=60`). Was 120 (Apr 2026, bundled with ragdoll work — not audio); lowered Jul 2026 to halve the per-tick CPU floor. Bullets additionally ray-query every OTHER tick over the accumulated 2-tick segment (`bullet.gd _query_tick`) — same coverage, hits land ≤1 tick late. If knight ragdolls jitter at 60 Hz, raise `physics/3d/solver/solver_iterations` before touching the tick rate.
 - Render cap: 240 fps
 - Main scene: `res://scenes/game.tscn`
 - Autoloads (singletons): `NetworkManager` (`scripts/network_manager.gd`), `SFX` (`scripts/sfx.gd`), `CrowdAudio` (`scripts/crowd_audio.gd`, colosseum crowd ambience + reactions), `Trace` (`scripts/trace.gd`, debug/`GG_TRACE=1` only useful)
@@ -27,6 +27,7 @@ Multiplayer FPS in Godot 4.6. Last-man-standing rounds; round losers pick stacki
 | `procedural_gun.gd` (~1k lines) | `@tool`, builds first-person rifle from primitives. | Re-read the file before editing — has many setters that all call `_rebuild()`. `apply_weapon_stats(w)` is the entry point that maps stats → geometry. |
 | `violence.gd` | Static helpers for blood, gibs, ragdolls, explosion VFX, view punch. | All calls are static. Many cached `MeshInstance3D` resources at the top of the file. |
 | `gpu_debris.gd` | Destruction rubble, simulated on the GPU. `request_burst` (chunk removals) / `request_chips` (per-hit flecks) rasterize alive chunks into a 3D occupancy texture; the particles shader bounces shards off it. | `enabled` is a kill-switch, default true. New bursts evict oldest emitters when the particle pool is full. Emitters join the `destruction_debris` group (round cleanup, Trace `dbr`). |
+| `perf_governor.gd` (autoload) | Adaptive perf governor. Continuous `quality_scale` (VFX budgets multiply by it) **plus** reason-aware shedding: classifies frames CPU- vs GPU-bound (measured viewport render time vs script+physics monitors). | GPU-bound → steps `scaling_3d_scale` down a ladder (1.0→0.55). Sustained low fps → discrete sheds: L1 (<72 fps) casings off + debris raster 1/frame; L2 (<55 fps) cheap blast flares only. Hysteresis + dwell prevent flapping. Inert under `BenchFlags.active` and headless. Trace prints `bnd=/rs=/shd=` + `gov[...]`. |
 | `sfx.gd` (~1.4k lines) | Procedural audio synthesis (no WAV samples on disk for shots/explosions/casings). HDR ducking, raytraced reverb bus, distance-delay simulation. | Hot path uses `_cached_wav(key, gen)` — caches the converted `AudioStreamWAV`, not just the raw `PackedVector2Array`. Don't reintroduce per-call `_samples_to_wav(...)`. |
 | `game.gd` (~2.3k lines) | Round flow, scoreboard, card pick UI, state machine, HUD overlays. | Still the biggest file — search before adding. Two child managers split out: `dev_panel.gd` and `splitscreen_manager.gd`. |
 | `dev_panel.gd` | F1 inspector — read-mostly view of the local-or-targeted player + card add/remove buttons. | `_ready()` self-builds; instantiated by Game and added under `$HUD`. Game routes its dev keybindings (G/P/M/1-5/?) through it via `_dev_panel.get_target()` / `refresh_if_visible()`. |
@@ -91,7 +92,7 @@ What's known about the budget (4-bot stress test):
 | Metric | Source | Meaning |
 |---|---|---|
 | `physics_ms` (bench table) | `Performance.TIME_PHYSICS_PROCESS` | **Last physics tick only**, sampled ~1 Hz during the 15 s measure window. Underreports sustained load. |
-| `physSum` / `psteps` (Trace SPIKE lines) | Trace autoload | Total engine physics ms **this render frame** and how many 120 Hz steps ran (spiral when behind). |
+| `physSum` / `psteps` (Trace SPIKE lines) | Trace autoload | Total engine physics ms **this render frame** and how many 60 Hz steps ran (spiral when behind). |
 | `cpu[bullet=…]` etc. | `Trace.prof()` in GDScript | Our script time **summed across all physics ticks in that render frame**. Can exceed `physSum` because it's a different accounting. |
 | `DestructibleManager.bench_bullet_ray_stats()` | Printed at end of bench | Analytical-ray counters: calls, avg grid candidates/ray, full-volume fallback count, `raycast_chunks` invocations. |
 

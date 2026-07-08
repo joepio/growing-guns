@@ -15,7 +15,7 @@ const DestructibleManager = preload("res://scripts/destructible_manager.gd")
 #   physSum   — sum of TIME_PHYSICS_PROCESS across every physics tick since the
 #               previous render frame (total physics-engine ms this frame)
 #   psteps    — how many physics ticks ran since the previous render frame
-#               (at 120 Hz physics + ~50 fps render, expect ~2–3)
+#               (at 60 Hz physics + ~50 fps render, expect ~1–2)
 #   rb        — Performance PHYSICS_3D_ACTIVE_OBJECTS (all active RigidBody3D)
 #   cas/gib/corp — scene group counts (see brass_casings / gib_chunks / corpses)
 #   rb?       — rb minus tagged groups (unlabelled rigid bodies — investigate)
@@ -170,7 +170,8 @@ func _process(delta: float) -> void:
 		print((
 			"[trace] SPIKE %6.1fms +%6dms proc=%4.1f phys1=%4.1f physSum=%5.1f psteps=%d "
 			+ "fps=%3.0f draws=%5d rb=%d cas=%d gib=%d corp=%d rb?=%d plr=%d "
-			+ "proj=%d dbr=%d blood=%d smk=%d qs=%.2f dest=%d exp=%d expm=%d cpuTot=%4.1f%s"
+			+ "proj=%d dbr=%d blood=%d smk=%d qs=%.2f bnd=%s rs=%.2f shd=%d "
+			+ "dest=%d exp=%d expm=%d cpuTot=%4.1f%s"
 		) % [
 			dt_ms, _now(),
 			Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0,
@@ -190,6 +191,9 @@ func _process(delta: float) -> void:
 			sc.get("blood", 0),
 			sc.get("smk", 0),
 			PerfGovernor.quality_scale if PerfGovernor else 1.0,
+			PerfGovernor.bound_label() if PerfGovernor else "?",
+			PerfGovernor.render_scale() if PerfGovernor else 1.0,
+			PerfGovernor.shed_level if PerfGovernor else 0,
 			sc.get("dest", 0),
 			DestructibleManager.debug_exposed_chunk_count(),
 			sc.get("expm", 0),
@@ -217,7 +221,7 @@ func _process(delta: float) -> void:
 		print((
 			"[trace] 1s  +%6dms  frames=%3d  avg=%5.2fms (%3.0ffps)  worst=%6.2fms  "
 			+ "physSum_avg=%5.1f  psteps_avg=%4.1f  draws_avg=%4.0f  "
-			+ "rb_avg=%4.0f  cas_avg=%4.0f  gib_avg=%4.0f"
+			+ "rb_avg=%4.0f  cas_avg=%4.0f  gib_avg=%4.0f  gov[%s]"
 		) % [
 			_now(), _sum_n, avg, 1000.0 / maxf(avg, 0.001), _worst_dt,
 			_sum_phys_sigma / n,
@@ -226,6 +230,7 @@ func _process(delta: float) -> void:
 			_sum_rb / n,
 			_sum_cas / n,
 			_sum_gib / n,
+			PerfGovernor.debug_state() if PerfGovernor else "?",
 		])
 		_sum_dt = 0.0
 		_sum_n = 0
