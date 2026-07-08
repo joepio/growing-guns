@@ -14,7 +14,7 @@ extends Node3D
 const TV_SHADER := preload("res://shaders/stadium_tv.gdshader")
 const TV_COUNT := 4
 const FEED_SIZE := Vector2i(384, 216)
-const SCREEN_W := 21.0
+const SCREEN_W := 26.0
 const SCREEN_H := SCREEN_W * 9.0 / 16.0
 const TILT_DOWN := 0.22          # radians the screens pitch toward the floor
 const ORBIT_SPEED := 0.05        # rad/s broadcast-crane orbit
@@ -52,9 +52,9 @@ func setup(inner_r: float, base_y: float, wall_r: float, wall_h: float) -> void:
 	_mat.set_shader_parameter("feed_tex", _sub.get_texture())
 	_set_feed(true)
 
-	# Screens: high on the outer wall, evenly spaced, tilted at the floor.
-	# Offset by half a screen-count step so they sit between crenellations.
-	var screen_y: float = wall_h - SCREEN_H * 0.5 - 2.5
+	# Screens: crowning the outer wall (top edge pokes above the rim like
+	# real stadium boards), evenly spaced, tilted at the floor.
+	var screen_y: float = wall_h - SCREEN_H * 0.32
 	var screen_r: float = wall_r - 1.35
 	for i in TV_COUNT:
 		var ang := TAU * (float(i) + 0.5) / float(TV_COUNT)
@@ -75,7 +75,9 @@ func setup(inner_r: float, base_y: float, wall_r: float, wall_h: float) -> void:
 		# Slab housing behind the screen so it reads mounted, not floating.
 		var housing := MeshInstance3D.new()
 		var hbox := BoxMesh.new()
-		hbox.size = Vector3(SCREEN_W + 1.2, SCREEN_H + 1.2, 0.8)
+		# Extends below the screen so the raised board reads anchored into
+		# the wall instead of floating above the rim.
+		hbox.size = Vector3(SCREEN_W + 1.2, SCREEN_H + 5.0, 0.8)
 		housing.mesh = hbox
 		var hmat := StandardMaterial3D.new()
 		hmat.albedo_color = Color(0.09, 0.09, 0.11)
@@ -83,7 +85,7 @@ func setup(inner_r: float, base_y: float, wall_r: float, wall_h: float) -> void:
 		housing.material_override = hmat
 		housing.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		screen.add_child(housing)
-		housing.position = Vector3(0.0, 0.0, -0.45)
+		housing.position = Vector3(0.0, -1.9, -0.45)
 
 func _process(delta: float) -> void:
 	if _feed_on:

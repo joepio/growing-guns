@@ -41,6 +41,11 @@ const ARENA_OFFSET := Vector3(1.7405052, 4.5380306, 16.383654)
 enum State { WAITING, PLAYING, PICKING_CARD, MATCH_OVER }
 
 const CARDS_PER_PICK := 3
+# Round-start gladiator cages: how high above the spawn the cage hangs (short
+# trapdoor drop, not a sky dive) and how long the fighters are held inside
+# (covers the ~1.5s card-growth morph plus a beat of crowd anticipation).
+const CAGE_SPAWN_HEIGHT := 7.5
+const CAGE_HOLD_SECONDS := 2.8
 const GAME_MODE_VERSUS := "versus"
 const GAME_MODE_COOP := "coop"
 const COOP_BASE_ENEMIES := 3
@@ -155,6 +160,9 @@ var coop_revive_channels: Dictionary = {}
 var round_wins: Dictionary = {}
 var current_round: int = 1
 var pending_pick_cards: Array = []
+# Server-side countdown until all round-start spawn cages release (see
+# _start_round_now); <= 0 means no cages pending.
+var _cage_release_timer: float = 0.0
 var pending_picker_id: int = 0
 var pending_pick_cards_by_player: Dictionary = {}
 # Server-only countdown until each pending pick auto-resolves (player_id ->
@@ -654,6 +662,12 @@ func _process(delta: float) -> void:
 		_update_ion_cannons(delta)
 	if multiplayer.is_server():
 		_tick_card_pick_deadlines(delta)
+		if _cage_release_timer > 0.0:
+			_cage_release_timer -= delta
+			if _cage_release_timer <= 0.0:
+				for p in players_root.get_children():
+					if p.has_method("release_spawn_cage"):
+						p.release_spawn_cage.rpc()
 		_update_music_muffle_broadcast()
 	_update_custom_cursor()
 	# Polling-based pause toggle. On macOS, pressing Esc while the mouse is
@@ -2140,12 +2154,11 @@ func _start_round_now() -> void:
 		var pick := _pick_spawn(used)
 		used.append(pick["pos"])
 		p.set_ghost_mode.rpc(false)
-		# Rocket-spawn: catch the player ~120m above the landing spot already
-		# moving at terminal speed (80 m/s constant — no gravity ramp), ~1.5s
-		# from spawn to impact — long enough to watch the card-growth morph
-		# finish on the way down. Each player auto-ends their launch on first
-		# floor contact, so there's no central timer gating the round start.
-		var drop := _sky_drop_spawn(pick["pos"], int(p.get("player_id")), used, 120.0)
+		# Cage-spawn: hang the player in a gladiator cage a short drop above
+		# the landing spot. They're frozen inside while the card-growth morph
+		# plays; _process releases every cage together after CAGE_HOLD_SECONDS
+		# and the trapdoor floor drops them into the fight.
+		var drop := _sky_drop_spawn(pick["pos"], int(p.get("player_id")), used, CAGE_SPAWN_HEIGHT)
 		p.server_respawn.rpc(drop["pos"], drop["yaw"])
 		_apply_coop_spawn_health(p)
 		# Clear any leftover freeze (e.g. losers were frozen during card-pick
@@ -2168,9 +2181,10 @@ func _start_round_now() -> void:
 	Trace.span_begin("_warmup_round_audio")
 	_warmup_round_audio()
 	Trace.span_end("_warmup_round_audio")
-	# Now launch players into the fight.
+	# Cage the fighters. Floors open together once the hold expires.
 	for p in round_players:
-		p.set_launching.rpc(true, 80.0)
+		p.enter_spawn_cage.rpc()
+	_cage_release_timer = CAGE_HOLD_SECONDS
 	if multiplayer.is_server() and is_coop_mode():
 		_begin_coop_enemy_wave()
 	if multiplayer.is_server() and ROUND_MODIFIERS_SCRIPT.needs_air_strikes(current_round_modifier):
