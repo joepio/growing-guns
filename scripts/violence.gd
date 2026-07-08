@@ -269,23 +269,41 @@ static func warmup_gib_render(scene: Node) -> void:
 	if player_scene == null:
 		return
 	var temp: Node = player_scene.instantiate()
+	# Far below the arena floor: invisible, and the chunks have nothing to
+	# collide with while they live out their short warmup lifetime.
+	var origin := Transform3D(Basis(), Vector3(0.0, -1000.0, 0.0))
 	var body_model: Node = temp.get_node_or_null("BodyModel")
 	if body_model:
 		var meshes: Array[MeshInstance3D] = []
 		collect_meshes(body_model, meshes)
-		# Far below the arena floor: invisible, and the chunks have nothing to
-		# collide with while they live out their short warmup lifetime.
-		var origin := Transform3D(Basis(), Vector3(0.0, -1000.0, 0.0))
 		for src in meshes:
 			if src.mesh == null:
 				continue
 			gib_explode(
-				src.mesh, origin, scene, src.material_override,
+				src.mesh, origin, scene, src.get_active_material(0),
 				Vector3.ZERO, 0.0, GIB_CHUNK_COUNT, 0.5,
 			)
 	# Chunks duplicate their own material and build meshes from the cache, so
 	# they don't reference temp's nodes — safe to free immediately.
 	temp.free()
+	# The knight (CharacterVisual) only builds once inside the tree, so the
+	# temp player above never contains it — warm its meshes straight from the
+	# model scene, or the first knight gib stalls on a synchronous Voronoi
+	# bake plus a fresh chunk PSO.
+	var knight_scene: PackedScene = load("res://assets/models/knight.fbx") as PackedScene
+	if knight_scene:
+		var knight: Node = knight_scene.instantiate()
+		if knight:
+			var kmeshes: Array[MeshInstance3D] = []
+			collect_meshes(knight, kmeshes)
+			for src in kmeshes:
+				if src.mesh == null:
+					continue
+				gib_explode(
+					src.mesh, origin, scene, src.get_active_material(0),
+					Vector3.ZERO, 0.0, GIB_CHUNK_COUNT, 0.5,
+				)
+			knight.free()
 
 static func _gib_warm_task(mesh: Mesh, chunk_count: int) -> void:
 	var variants: Array = _gib_build_variants(mesh, chunk_count)
@@ -729,6 +747,217 @@ static func disintegrate_corpse(rb: RigidBody3D, push_dir: Vector3 = Vector3.ZER
 		)
 	rb.queue_free()
 
+
+# ---------------------------------------------------------------------------
+# Knight soft ragdoll (skinned CharacterVisual corpses)
+#
+# The blob corpse clones its primitive meshes onto ONE rigid body — fine for
+# a blob, but a humanoid handled that way tumbles as a hard T-pose statue.
+# The knight instead gets real per-limb physics: clone the model, copy the
+# death pose onto the clone's skeleton, generate capsule PhysicalBone3D
+# bodies for the major Mixamo bones and let a PhysicalBoneSimulator3D run.
+# Pin joints (no angular limits) plus angular damping read as floppy and are
+# stable without per-joint tuning. Bones sit on layer 2 in the "corpses"
+# group so bullets keep hitting downed bodies — hit_corpse_any pools limb
+# damage on the corpse root and Voronoi-shatters it at the same
+# CORPSE_DISINTEGRATE_DMG threshold as blob corpses.
+#
+# Each corpse is ~11 physical bodies (vs 1 for the blob torso), so the FIFO
+# cap is tight; settled bodies sleep, and round reset frees the "corpses"
+# group as before (the root node joins the group).
+
+const _KNIGHT_RAGDOLL_BONES: Array = [
+	# [bone, descendant bone giving the capsule its length, radius, mass]
+	["Hips", "Spine", 0.13, 8.0],
+	["Spine1", "Neck", 0.12, 6.0],
+	["Head", "", 0.10, 3.0],
+	["LeftArm", "LeftForeArm", 0.055, 1.6],
+	["LeftForeArm", "LeftHand", 0.05, 1.2],
+	["RightArm", "RightForeArm", 0.055, 1.6],
+	["RightForeArm", "RightHand", 0.05, 1.2],
+	["LeftUpLeg", "LeftLeg", 0.08, 3.5],
+	["LeftLeg", "LeftFoot", 0.06, 2.0],
+	["RightUpLeg", "RightLeg", 0.08, 3.5],
+	["RightLeg", "RightFoot", 0.06, 2.0],
+]
+const MAX_KNIGHT_RAGDOLLS := 4
+static var _knight_ragdolls: Array[Node3D] = []
+
+
+# Returns the hips PhysicalBone3D (death-cam target) or null. The corpse root
+# is in the hips' "knight_corpse_root" meta.
+static func spawn_knight_ragdoll(
+	knight: CharacterVisual,
+	scene: Node,
+	base_velocity: Vector3,
+	push_dir: Vector3,
+	is_head: bool,
+	lifetime: float = 14.0,
+) -> PhysicalBone3D:
+	if knight == null or scene == null:
+		return null
+	var src_model: Node3D = knight._model
+	var src_skel: Skeleton3D = knight._skeleton
+	if src_model == null or src_skel == null:
+		return null
+	var model := CharacterVisual.KNIGHT_SCENE.instantiate() as Node3D
+	if model == null:
+		return null
+	var root := Node3D.new()
+	root.name = "KnightCorpse"
+	root.add_to_group("corpses")  # round reset frees the whole corpse
+	root.set_meta("dmg_taken", 0.0)
+	scene.add_child(root)
+	root.add_child(model)
+	model.global_transform = src_model.global_transform
+	var skel := model.find_child("Skeleton3D", true, false) as Skeleton3D
+	if skel == null:
+		root.queue_free()
+		return null
+	# Freeze the death pose onto the clone (same asset — same bone indices).
+	for i: int in src_skel.get_bone_count():
+		skel.set_bone_pose_position(i, src_skel.get_bone_pose_position(i))
+		skel.set_bone_pose_rotation(i, src_skel.get_bone_pose_rotation(i))
+		skel.set_bone_pose_scale(i, src_skel.get_bone_pose_scale(i))
+	var sim := PhysicalBoneSimulator3D.new()
+	skel.add_child(sim)
+	var hips: PhysicalBone3D = null
+	var head_pb: PhysicalBone3D = null
+	var pbs: Array[PhysicalBone3D] = []
+	for spec: Array in _KNIGHT_RAGDOLL_BONES:
+		var idx: int = skel.find_bone(str(spec[0]))
+		if idx < 0:
+			continue
+		var bone_pose: Transform3D = skel.get_bone_global_pose(idx)
+		# Capsule runs from the bone toward the named descendant (bone-local
+		# space). Head has no target: give it a stub straight up the bone.
+		var v := Vector3(0.0, 0.2, 0.0)
+		if str(spec[1]) != "":
+			var cidx: int = skel.find_bone(str(spec[1]))
+			if cidx < 0:
+				continue
+			v = bone_pose.affine_inverse() * skel.get_bone_global_pose(cidx).origin
+		var length: float = maxf(v.length(), 0.12)
+		var up := Vector3.UP if absf(v.normalized().dot(Vector3.UP)) < 0.98 else Vector3.RIGHT
+		# Same recipe as the editor's "Create Physical Skeleton": the body
+		# offset looks down -Z at the child bone with the capsule midway.
+		var off := Transform3D(Basis.looking_at(v, up), Vector3.ZERO)
+		off.origin = off.basis * Vector3(0.0, 0.0, -length * 0.5)
+		var pb := PhysicalBone3D.new()
+		pb.name = "PB_%s" % str(spec[0])
+		pb.bone_name = str(spec[0])
+		pb.mass = float(spec[3])
+		pb.joint_type = PhysicalBone3D.JOINT_TYPE_PIN
+		pb.angular_damp = 2.0
+		# World-only collisions (mask 1, bones don't see each other); layer 2
+		# keeps the corpse shootable.
+		pb.collision_layer = 2
+		pb.collision_mask = 1
+		pb.add_to_group("corpses")
+		pb.set_meta("knight_corpse_root", root)
+		pb.body_offset = off
+		pb.joint_offset = Transform3D(Basis.IDENTITY, Vector3(0.0, 0.0, length * 0.5))
+		var cs := CollisionShape3D.new()
+		var cap := CapsuleShape3D.new()
+		cap.radius = float(spec[2])
+		cap.height = maxf(length, float(spec[2]) * 2.0 + 0.02)
+		cs.shape = cap
+		# Capsule axis (local Y) onto the body's Z, which points at the child.
+		cs.transform = Transform3D(
+			Basis(Vector3(1, 0, 0), Vector3(0, 0, 1), Vector3(0, -1, 0)), Vector3.ZERO)
+		pb.add_child(cs)
+		sim.add_child(pb)
+		pbs.append(pb)
+		if str(spec[0]) == "Hips":
+			hips = pb
+		elif str(spec[0]) == "Head":
+			head_pb = pb
+	if hips == null:
+		root.queue_free()
+		return null
+	root.set_meta("hips_pb", hips)
+	sim.physical_bones_start_simulation()
+	# Impulse = velocity * mass on every bone → uniform launch velocity; the
+	# extra head kick sells headshots even though the head stays attached.
+	for pb in pbs:
+		pb.apply_central_impulse(base_velocity * pb.mass)
+	if is_head and head_pb:
+		head_pb.apply_central_impulse((push_dir + Vector3.UP * 0.6) * head_pb.mass * 5.0)
+	scene.get_tree().create_timer(lifetime).timeout.connect(root.queue_free)
+	_knight_ragdolls.append(root)
+	root.tree_exiting.connect(func() -> void: _knight_ragdolls.erase(root))
+	while _knight_ragdolls.size() > MAX_KNIGHT_RAGDOLLS:
+		var old: Node3D = _knight_ragdolls.pop_front()
+		if is_instance_valid(old):
+			old.queue_free()
+	return hips
+
+
+# Corpse-hit dispatch: blob torsos are RigidBody3D, knight limbs are
+# PhysicalBone3D. Keeps bullet.gd agnostic of corpse anatomy.
+static func hit_corpse_any(body: Node, hit_pos: Vector3, dir: Vector3, dmg: float) -> void:
+	if body is RigidBody3D:
+		hit_corpse(body as RigidBody3D, hit_pos, dir, dmg)
+		return
+	if not (body is PhysicalBone3D) or not is_instance_valid(body):
+		return
+	var pb := body as PhysicalBone3D
+	var scene: Node = pb.get_tree().current_scene
+	if scene == null:
+		return
+	spawn_blood(scene, hit_pos, dir, 0.7)
+	var splash_dir: Vector3 = dir.normalized() if dir.length_squared() > 0.001 else Vector3.UP
+	_gib_spawn_blood_splat(scene, hit_pos, -splash_dir, splash_dir, 0.5)
+	pb.apply_central_impulse(splash_dir * clampf(dmg * 0.05, 0.5, 4.0))
+	var root := pb.get_meta("knight_corpse_root", null) as Node3D
+	if root == null or not is_instance_valid(root):
+		return
+	# Shots into the downed body stain the limb they hit, same as live hits.
+	var skel := root.find_child("Skeleton3D", true, false) as Skeleton3D
+	if skel != null:
+		var att := _bone_wound_attachment(skel, pb.bone_name)
+		for b in _spawn_player_blood_cluster(att, hit_pos, -splash_dir, 0.6, 2):
+			_fit_knight_wound_blob(b as MeshInstance3D, att)
+	var taken: float = float(root.get_meta("dmg_taken", 0.0)) + dmg
+	root.set_meta("dmg_taken", taken)
+	if taken >= CORPSE_DISINTEGRATE_DMG:
+		disintegrate_knight_corpse(root, splash_dir)
+
+
+# Voronoi-shatter the knight corpse and free it. Chunks come from the bind-
+# pose meshes (same cached variants as death disintegration).
+static func disintegrate_knight_corpse(root: Node3D, push_dir: Vector3) -> void:
+	if root == null or not is_instance_valid(root):
+		return
+	var scene: Node = root.get_tree().current_scene
+	if scene == null:
+		return
+	var origin: Vector3 = root.global_position
+	var hips := root.get_meta("hips_pb", null) as Node3D
+	if hips != null and is_instance_valid(hips):
+		origin = hips.global_position
+	var push_n := push_dir.normalized() if push_dir.length_squared() > 0.001 else Vector3.UP
+	spawn_disintegrate_gore(scene, origin, push_n, 0.9, 0.25, push_n * 4.0, 3.0, origin, 0.55)
+	var meshes: Array[MeshInstance3D] = []
+	collect_meshes(root, meshes)
+	for mi in meshes:
+		if mi.mesh == null:
+			continue
+		gib_explode(
+			mi.mesh,
+			mi.global_transform,
+			scene,
+			mi.get_active_material(0),
+			push_n * 4.0 + Vector3(randf_range(-1.0, 1.0), randf_range(0.6, 1.6), randf_range(-1.0, 1.0)),
+			3.2,
+			GIB_CHUNK_COUNT,
+			14.0,
+			origin,
+			0.6,
+		)
+	root.queue_free()
+
+
 static func _gib_on_chunk_body_entered(rb: RigidBody3D, scene: Node, strength: float) -> void:
 	if rb == null or scene == null or not is_instance_valid(rb):
 		return
@@ -923,6 +1152,81 @@ static func _append_ragdoll_blood_wounds(rb: RigidBody3D, wounds: Array) -> void
 	rb.set_meta("blood_wounds", existing)
 
 
+# Knight wounds ride the skeleton: pick the nearest major bone (same set the
+# ragdoll uses) and parent the blobs to a reused BoneAttachment3D on it, so a
+# shoulder hit stays on the shoulder through run/jump animations and pose.
+static func _knight_wound_attach(knight: CharacterVisual, hit_pos: Vector3) -> BoneAttachment3D:
+	var skel: Skeleton3D = knight._skeleton
+	if skel == null:
+		return null
+	var best := ""
+	var best_d := INF
+	for spec: Array in _KNIGHT_RAGDOLL_BONES:
+		var idx: int = skel.find_bone(str(spec[0]))
+		if idx < 0:
+			continue
+		var p: Vector3 = skel.global_transform * skel.get_bone_global_pose(idx).origin
+		var d := p.distance_squared_to(hit_pos)
+		if d < best_d:
+			best_d = d
+			best = str(spec[0])
+	if best == "":
+		return null
+	return _bone_wound_attachment(skel, best)
+
+
+static func _bone_wound_attachment(skel: Skeleton3D, bone: String) -> BoneAttachment3D:
+	var attach_name := "WoundAttach_%s" % bone
+	var existing := skel.get_node_or_null(attach_name)
+	if existing is BoneAttachment3D:
+		return existing
+	var att := BoneAttachment3D.new()
+	att.name = attach_name
+	att.bone_name = bone
+	skel.add_child(att)
+	return att
+
+
+# Blobs under a BoneAttachment3D inherit the skeleton's world scale (FBX rigs
+# are often not unit-scale); divide it back out so wounds render at the same
+# world size as on the blob body. Tags the blob for corpse transfer.
+static func _fit_knight_wound_blob(blob: MeshInstance3D, attach: BoneAttachment3D) -> void:
+	if blob == null or attach == null:
+		return
+	var ps: Vector3 = attach.global_transform.basis.get_scale()
+	blob.scale = Vector3(
+		blob.scale.x / maxf(ps.x, 0.0001),
+		blob.scale.y / maxf(ps.y, 0.0001),
+		blob.scale.z / maxf(ps.z, 0.0001),
+	)
+	blob.set_meta("wound_bone", attach.bone_name)
+
+
+# Re-create the live player's wounds on the ragdoll clone's skeleton (same
+# asset — same bones, same scale, so the stored bone-local transforms map
+# 1:1), then clear them off the soon-hidden live body.
+static func _transfer_knight_wounds(player: Node, corpse_root: Node3D) -> void:
+	if player == null or corpse_root == null or not is_instance_valid(corpse_root):
+		return
+	var wounds: Array = player.get("_blood_wounds")
+	if wounds.is_empty():
+		return
+	var skel := corpse_root.find_child("Skeleton3D", true, false) as Skeleton3D
+	if skel != null:
+		for w in wounds:
+			if not (w is MeshInstance3D) or not is_instance_valid(w):
+				continue
+			var blob := w as MeshInstance3D
+			var bone: String = str(blob.get_meta("wound_bone", ""))
+			if bone == "":
+				continue
+			var att := _bone_wound_attachment(skel, bone)
+			var copy := blob.duplicate() as MeshInstance3D
+			att.add_child(copy)
+			copy.transform = blob.transform
+	clear_player_blood_wounds(player)
+
+
 static func _player_blood_attach_mesh(player: Node, collider: Node) -> Node3D:
 	if collider != null and collider.is_in_group("player_head_hitboxes"):
 		var head: Variant = player.get("head_blob")
@@ -947,7 +1251,15 @@ static func spawn_player_blood_wound(
 ) -> void:
 	if player == null or hit_pos == Vector3.INF:
 		return
-	var attach := _player_blood_attach_mesh(player, collider)
+	# Knight bodies get bone-attached wounds (they follow limb animation);
+	# blob bodies keep the mesh-parented path.
+	var bone_attach: BoneAttachment3D = null
+	var knight := player.get("character_visual") as CharacterVisual
+	if knight != null and knight.is_active():
+		bone_attach = _knight_wound_attach(knight, hit_pos)
+	var attach: Node3D = bone_attach
+	if attach == null:
+		attach = _player_blood_attach_mesh(player, collider)
 	if attach == null:
 		return
 	var wounds: Array = player.get("_blood_wounds")
@@ -973,6 +1285,8 @@ static func spawn_player_blood_wound(
 			strength * randf_range(0.82, 1.05),
 		)
 		if blob:
+			if bone_attach != null:
+				_fit_knight_wound_blob(blob, bone_attach)
 			wounds.append(blob)
 	player.set("_blood_wounds", wounds)
 
@@ -1375,16 +1689,27 @@ static func _attach_world_3d(scene: Node, node: Node3D, world_pos: Vector3) -> v
 
 static var _perf_governor: Node = null
 
-# Adaptive VFX quality in [PerfGovernor.MIN_SCALE, 1.0]; 1.0 (full quality) when
-# the governor autoload is absent (isolated tool scripts / before tree is up).
-static func vfx_quality_scale() -> float:
+static func _governor() -> Node:
 	if _perf_governor == null or not is_instance_valid(_perf_governor):
 		var loop := Engine.get_main_loop()
 		if loop is SceneTree:
 			_perf_governor = (loop as SceneTree).root.get_node_or_null("PerfGovernor")
-	if _perf_governor:
-		return _perf_governor.quality_scale
-	return 1.0
+	return _perf_governor
+
+
+# Adaptive VFX quality in [PerfGovernor.MIN_SCALE, 1.0]; 1.0 (full quality) when
+# the governor autoload is absent (isolated tool scripts / before tree is up).
+static func vfx_quality_scale() -> float:
+	var gov := _governor()
+	return gov.quality_scale if gov else 1.0
+
+
+# Governor shed tier 2: false means every blast renders as the cheap flare
+# (no smoke/distortion/ember stack) — the single biggest per-blast cost on
+# both axes (GPU fill and CPU spawn work).
+static func _full_blasts_allowed() -> bool:
+	var gov := _governor()
+	return gov == null or gov.full_blasts_allowed
 
 
 static func _begin_blast_frame() -> void:
@@ -1405,6 +1730,8 @@ static func _blast_cluster_blocked(pos: Vector3) -> bool:
 
 
 static func _claim_full_blast(pos: Vector3) -> bool:
+	if not _full_blasts_allowed():
+		return false
 	_begin_blast_frame()
 	if _blast_cluster_blocked(pos):
 		return false
@@ -1438,6 +1765,8 @@ static func _claim_cheap_blast(pos: Vector3) -> bool:
 
 
 static func _full_blast_eligible_except_frame_cap(pos: Vector3) -> bool:
+	if not _full_blasts_allowed():
+		return false
 	_begin_blast_frame()
 	if _blast_cluster_blocked(pos):
 		return false
@@ -1897,7 +2226,7 @@ static func _get_billow_mm_shader() -> Shader:
 static func _spawn_blast_billow(scene: Node, pos: Vector3, radius: float, count: int,
 		is_fire: bool, tint: Color, layer_life: float, scale_lo: float, scale_hi: float, rise: float,
 		stretch: float = 1.0, delay_bias: float = 0.0, smoke_tint: Color = Color.WHITE,
-		pushable: bool = true) -> void:
+		pushable: bool = true, opacity_mult: float = 1.0) -> void:
 	# Smoke layers (non-fire) join "blast_smoke_layers" and get re-tweened by every
 	# later blast — bound how many can pile up. Bail before building the MultiMesh
 	# so a capped layer costs nothing. Fire billows aren't pushed, so they skip this.
@@ -1955,7 +2284,7 @@ static func _spawn_blast_billow(scene: Node, pos: Vector3, radius: float, count:
 			var g := rng.randf_range(0.07, 0.26)
 			body = Color(g * 1.08, g, g * 0.9)
 			opk = rng.randf_range(0.6, 0.85)
-		mm.set_instance_color(i, Color(body.r, body.g, body.b, opk))
+		mm.set_instance_color(i, Color(body.r, body.g, body.b, opk * opacity_mult))
 		# w = per-instance age-speed: some puffs/tongues burn out earlier, some later.
 		mm.set_instance_custom_data(i, Color(seed, delay, heat, rng.randf_range(0.0, 0.8)))
 	var mmi := MultiMeshInstance3D.new()
@@ -3983,7 +4312,18 @@ static func spawn_ragdoll(
 
 	var meshes: Array[MeshInstance3D] = []
 	var body_model: Node = player.get("body_model")
-	if body_model:
+	# The knight (CharacterVisual) and the legacy blob rig coexist under
+	# BodyModel — the blob is merely hidden while the knight is active. Gib
+	# whichever rig the player actually shows, or the corpse explodes into
+	# the old blob pieces. (Deliberately NOT an is_visible_in_tree() filter:
+	# the local player's whole body_model is hidden in first person and their
+	# gibs must still spawn.)
+	var knight: CharacterVisual = player.get("character_visual") as CharacterVisual
+	var use_knight: bool = knight != null and knight.is_active()
+	if use_knight:
+		knight.collect_meshes(meshes)
+	if meshes.is_empty() and body_model:
+		use_knight = false
 		collect_meshes(body_model, meshes)
 	if meshes.is_empty():
 		return
@@ -4046,7 +4386,10 @@ static func spawn_ragdoll(
 				src.mesh,
 				src.global_transform,
 				scene,
-				src.material_override,
+				# Blob meshes carry material_override; the knight's FBX
+				# materials live on the mesh surfaces — get_active_material
+				# resolves both (override wins when set).
+				src.get_active_material(0),
 				base_vel + Vector3(randf_range(-1.5, 1.5), 0, randf_range(-1.5, 1.5)),
 				burst_strength,
 				chunk_count,
@@ -4065,6 +4408,25 @@ static func spawn_ragdoll(
 				first = false
 			for c in chunks:
 				ragdoll_pieces.append(c)
+	elif use_knight:
+		# Soft ragdoll: the knight clone gets per-limb PhysicalBone3D physics
+		# (a single-rigid-body clone of skinned meshes tumbles as a hard
+		# T-pose statue). Headshots kick the head bone extra instead of
+		# detaching it — one skinned mesh, no separable head subtree.
+		var hips: PhysicalBone3D = spawn_knight_ragdoll(
+			knight, scene,
+			base_vel + Vector3(randf_range(-0.6, 0.6), 0, randf_range(-0.6, 0.6)),
+			dir_n, is_head, 14.0,
+		)
+		if hips:
+			ragdoll_pieces.append(hips.get_meta("knight_corpse_root"))
+			_transfer_knight_wounds(player, hips.get_meta("knight_corpse_root"))
+			if local_is_authority:
+				player.set("_ragdoll_head", hips)
+				if scene.has_method("show_death_effect_for"):
+					scene.show_death_effect_for(int(player.get("player_id")), true)
+				elif scene.has_method("show_death_effect"):
+					scene.show_death_effect(true)
 	else:
 		# Split head subtree from torso so headshots can launch the head alone.
 		var head_meshes: Array[MeshInstance3D] = []
@@ -4111,7 +4473,7 @@ static func spawn_ragdoll(
 					src.mesh,
 					src.global_transform,
 					scene,
-					src.material_override,
+					src.get_active_material(0),
 					head_vel + Vector3(
 						randf_range(-2.2, 2.2),
 						randf_range(0.6, 2.8),

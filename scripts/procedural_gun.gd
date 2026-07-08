@@ -311,6 +311,10 @@ func eject_casing() -> void:
 	# bool branch outside the bench (BenchFlags.active = false).
 	if BenchFlags.active and BenchFlags.no_casings:
 		return
+	# Governor shed tier 1: casings are pure cosmetics but each is an active
+	# rigid body with contact monitoring — on struggling machines skip them.
+	if PerfGovernor and not PerfGovernor.casings_enabled:
+		return
 	BenchFlags.inc("casings_spawned")
 
 	var c_radius: float = barrel_radius * casing_radius_frac

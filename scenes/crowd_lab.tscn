@@ -1,6 +1,6 @@
-[gd_scene load_steps=2 format=3]
+[gd_scene format=3 uid="uid://b3lm7s70p3gof"]
 
-[ext_resource type="Script" path="res://scripts/crowd_lab.gd" id="1"]
+[ext_resource type="Script" uid="uid://dlxkdnhxd7kl0" path="res://scripts/crowd_lab.gd" id="1"]
 
-[node name="CrowdLab" type="Node3D"]
+[node name="CrowdLab" type="Node3D" unique_id=2090214355]
 script = ExtResource("1")

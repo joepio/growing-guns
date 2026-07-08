@@ -463,7 +463,18 @@ func _spawn_gore(world_pos: Vector3, radius: float, kills: int, scale_mult: floa
 	# smoke_tint, opted out of smoke-pushing (pushable=false) so its own blast
 	# doesn't shove it away. Skipped for the sub-pixel warmup burst.
 	if scale_mult >= 1.0:
+		# Sized a bit under the blast's own smoke cloud: our `radius` is the
+		# gore radius (0.75x the already-halved kill radius); the smoke gets
+		# the full visual blast radius, so ~2x recovers most of it. Longer
+		# life and a gentler rise than smoke — the red mist hangs in the air
+		# after the grey has dissipated — but translucent (opacity 0.6) so it
+		# reads as a haze over the explosion rather than a solid red wall.
+		var mist_r := maxf(radius * 2.0, 2.0)
+		var mist_life := (0.5 + 0.13 * mist_r) * 1.6
+		var mist_count := clampi(
+			int(round((4.0 + float(kills) * 0.7) * Violence.vfx_quality_scale())), 4, 10)
 		Violence._spawn_blast_billow(
-			get_tree().current_scene, world_pos, maxf(radius, 2.0),
-			clampi(kills / 2, 4, 9), false, Color(0.5, 0.05, 0.05),
-			2.2, 0.45, 0.8, 0.25, 1.0, 0.0, Color(2.2, 0.22, 0.18), false)
+			get_tree().current_scene, world_pos, mist_r,
+			mist_count, false, Color(0.5, 0.05, 0.05),
+			mist_life, 0.45, 1.05, mist_r * 0.3, 1.0, 0.0, Color(2.2, 0.22, 0.18),
+			false, 0.6)

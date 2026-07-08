@@ -14,6 +14,11 @@ var max_range: float = 200.0
 var _crowd_hit_reported := false
 var _crowd_scared := false  # overfly scare fired (separate from a body hit)
 var distance_traveled: float = 0.0
+# Every-other-tick ray budget (see _physics_process): where the last executed
+# query ended, and whether this tick runs one. Starts false so the first tick
+# flips to true — a bullet spawned muzzle-deep in a wall queries immediately.
+var _last_query_pos: Vector3 = Vector3.INF
+var _query_tick := false
 
 var ricochet_left: int = 0          # wall ricochets remaining (Ricochet card)
 var world_pierce_left: int = 0      # surfaces the bullet can drill through (Drill card)
@@ -262,9 +267,20 @@ func _physics_process(delta: float) -> void:
 	var step: Vector3 = velocity * delta
 	var step_len: float = step.length()
 
-	# Mutate the cached query — only from/to change tick-to-tick. exclude is
-	# kept in sync at setup + in the ghost-passthrough branch of _handle_collision.
-	var result: Dictionary = _intersect_ray(global_position, global_position + step)
+	# Ray queries run every OTHER tick, each covering the accumulated segment
+	# since the last query — same coverage, half the queries (bullet rays are
+	# the top CPU cost at high projectile counts). A hit in the skipped half
+	# lands one tick late but at the exact queried position. Homing/drop bend
+	# the true path across the two ticks; the straight-segment error over one
+	# skipped tick is negligible.
+	if _last_query_pos == Vector3.INF:
+		_last_query_pos = global_position
+	_query_tick = not _query_tick
+	var result: Dictionary = {}
+	if _query_tick:
+		result = _intersect_ray(_last_query_pos, global_position + step)
+		if result.is_empty():
+			_last_query_pos = global_position + step
 	if result.is_empty():
 		global_position += step
 		distance_traveled += step_len
@@ -299,6 +315,10 @@ func _physics_process(delta: float) -> void:
 				CrowdAudio.on_crowd_bullet_hit(global_position)
 	else:
 		_handle_collision(result)
+		# Survivors (pierce/ghost-passthrough) restart their query segment at
+		# wherever collision handling left them.
+		if not is_queued_for_deletion():
+			_last_query_pos = global_position
 
 	if _trail_inst and _trail_mat:
 		var trail_len: float = clampf(distance_traveled, 0.001, _max_trail_length)
@@ -502,7 +522,9 @@ func _handle_collision(result: Dictionary) -> void:
 	# The corpse accumulates damage and disintegrates at CORPSE_DISINTEGRATE_DMG.
 	if collider and collider.is_in_group("corpses"):
 		var corpse_dmg: float = bullet_damage
-		Violence.hit_corpse(collider as RigidBody3D, hit_pos, direction, corpse_dmg)
+		# Dispatch, don't cast: blob corpses are RigidBody3D, knight corpses
+		# are PhysicalBone3D limbs.
+		Violence.hit_corpse_any(collider, hit_pos, direction, corpse_dmg)
 		# Bullet stops on corpse — same as hitting a wall. Explosive rounds
 		# still detonate below.
 		if weapon_stats.explosive_radius > 0.0 and Violence.blast_vfx_will_spawn(hit_pos):
