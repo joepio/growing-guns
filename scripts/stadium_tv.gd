@@ -57,7 +57,10 @@ func setup(inner_r: float, base_y: float, wall_r: float, wall_h: float) -> void:
 	var screen_y: float = wall_h - SCREEN_H * 0.32 + 10.0
 	var screen_r: float = wall_r - 1.35
 	for i in TV_COUNT:
-		var ang := TAU * (float(i) + 0.5) / float(TV_COUNT)
+		# Side midpoints of the squircle bowl (scale 1.0 there, so wall_r
+		# aligns with the flat wall face); the corners belong to the
+		# floodlight towers.
+		var ang := TAU * float(i) / float(TV_COUNT)
 		var dir := Vector3(cos(ang), 0.0, sin(ang))
 		var screen := MeshInstance3D.new()
 		screen.name = "Screen%d" % i
@@ -86,6 +89,18 @@ func setup(inner_r: float, base_y: float, wall_r: float, wall_h: float) -> void:
 		housing.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		screen.add_child(housing)
 		housing.position = Vector3(0.0, -1.9, -0.45)
+		# Mount legs down to the roof line — the board sits, not floats.
+		var tangent := Vector3(-sin(ang), 0.0, cos(ang))
+		for side in [-1.0, 1.0]:
+			var leg := MeshInstance3D.new()
+			var lbox := BoxMesh.new()
+			lbox.size = Vector3(0.9, 10.0, 0.9)
+			leg.mesh = lbox
+			leg.material_override = hmat
+			leg.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			leg.position = dir * (screen_r + 0.3) + tangent * side * SCREEN_W * 0.3 \
+				+ Vector3(0.0, screen_y - 5.0, 0.0)
+			add_child(leg)
 
 func _process(delta: float) -> void:
 	if _feed_on:
