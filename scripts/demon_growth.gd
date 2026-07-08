@@ -60,20 +60,23 @@ func _set_corruption(v: float) -> void:
 func _ready() -> void:
 	rebuild()
 
-# Map "how mutated is this weapon vs stock" onto 0..1. Tuned so one or two
-# cards show first seams and a late-game stack (5+ heavy cards) maxes out.
+# Map "how mutated is this weapon vs stock" onto 0..1. CARD COUNT is the
+# pacing driver — the demon takes ~10 rounds of losing to fully grow, so two
+# cards mean a few subtle seams, not a monster. Stats only season it (a
+# heavy explosive build reads a little meaner a little earlier); the
+# seasoning is capped so no single card jumps a stage.
 static func corruption_from_weapon(w: Weapon) -> float:
 	if w == null:
 		return 0.0
+	var cards: float = float(w.applied_cards.size())
 	var d: float = 0.0
-	d += absf(w.damage_mult - 1.0) * 0.5
-	d += absf(w.fire_rate_mult - 1.0) * 0.35
-	d += absf(w.bullet_scale - 1.0) * 0.5
-	d += float(w.extra_projectiles) * 0.3
-	d += absf(float(w.mag_size_bonus)) * 0.02
+	d += absf(w.damage_mult - 1.0) * 0.1
+	d += absf(w.fire_rate_mult - 1.0) * 0.07
+	d += absf(w.bullet_scale - 1.0) * 0.1
+	d += float(w.extra_projectiles) * 0.06
 	if w.explosive_radius > 0.0:
-		d += 0.5
-	return clampf(d / 2.5, 0.0, 1.0)
+		d += 0.1
+	return clampf(cards / 10.0 + minf(d, 0.15), 0.0, 1.0)
 
 func rebuild() -> void:
 	for c in get_children():
@@ -111,7 +114,7 @@ func rebuild() -> void:
 	# --- Stage 1 (any corruption): flesh seams on the receiver ---
 	# Squashed blobs clinging to the side/bottom faces, like tissue growing
 	# out of the panel gaps. Count and size ramp with corruption.
-	var n_blobs: int = 2 + int(round(c * 7.0))
+	var n_blobs: int = 1 + int(round(c * 8.0))
 	for i in n_blobs:
 		var side: float = -1.0 if _rng.randf() < 0.5 else 1.0
 		var on_bottom: bool = _rng.randf() < 0.3
@@ -126,8 +129,8 @@ func rebuild() -> void:
 			squash = Vector3(1.0, 0.5, 1.0)
 		_add_flesh_sphere("Blob%d" % i, r, pos, squash)
 
-	# --- Stage 2 (c > 0.2): muscle sheath swallowing the barrel base ---
-	if c > 0.2:
+	# --- Stage 2 (c > 0.3, ~round 3): muscle sheath at the barrel base ---
+	if c > 0.3:
 		var cover: float = barrel_len * (0.2 + 0.55 * c)
 		var k: int = 3 + int(round(c * 4.0))
 		for i in k:
@@ -142,8 +145,8 @@ func rebuild() -> void:
 		_add_flesh_sphere("Throat", mag_size.y * 0.32 * (0.6 + 0.8 * c),
 			Vector3(0, mag_y, mag_offset_z), Vector3(0.8, 1.3, 0.9))
 
-	# --- Stage 2.5 (c > 0.25): bone spine along the top rail ---
-	var n_spikes: int = int(round(lerpf(0.0, 9.0, maxf(0.0, (c - 0.25) / 0.75))))
+	# --- Stage 2.5 (c > 0.4, ~round 4): bone spine along the top rail ---
+	var n_spikes: int = int(round(lerpf(0.0, 9.0, maxf(0.0, (c - 0.4) / 0.6))))
 	for i in n_spikes:
 		var t2: float = float(i) / float(maxi(1, n_spikes - 1))
 		var z2: float = lerpf(rs.z * 0.42, receiver_front_z - barrel_len * 0.3 * c, t2)
@@ -154,8 +157,8 @@ func rebuild() -> void:
 			Vector3(0, rs.y * 0.5 + 0.02 + h * 0.5, z2), _bone_mat)
 		spike.rotation = Vector3(_rng.randf_range(-0.15, 0.35), 0, _rng.randf_range(-0.12, 0.12))
 
-	# --- Stage 3 (c > 0.45): teeth ringing the muzzle ---
-	if c > 0.45:
+	# --- Stage 3.5 (c > 0.7, ~round 7): teeth ringing the muzzle ---
+	if c > 0.7:
 		var ring_r: float = maxf(barrel_r * muzzle_flare * 1.05, barrel_r * 1.5)
 		var n_teeth: int = 4 + int(round(c * 8.0))
 		var tooth_len: float = 0.024 + 0.03 * c
@@ -172,8 +175,8 @@ func rebuild() -> void:
 			var dir: Vector3 = (Vector3(0, 0, -1.0) - radial * 0.45).normalized()
 			tooth.quaternion = Quaternion(Vector3.UP, dir)
 
-	# --- Stage 3 (c > 0.35): the eye ---
-	if c > 0.35:
+	# --- Stage 3 (c > 0.55, ~round 5-6): the eye ---
+	if c > 0.55:
 		# Right (+X) side: the flank the inspect pose turns toward the camera
 		# (the muzzle yaws LEFT during the card-growth moment).
 		_eye_r = lerpf(0.022, 0.04, c)
@@ -209,8 +212,8 @@ func rebuild() -> void:
 		_eye_root.add_child(_lid)
 		_apply_eye_pose()
 
-	# --- Stage 4 (c > 0.55): tendons strapping the big parts together ---
-	if c > 0.55:
+	# --- Stage 4 (c > 0.8, ~round 8+): tendons strapping it all together ---
+	if c > 0.8:
 		var mag_bottom := Vector3(0, -rs.y * 0.5 - mag_size.y * 0.85, mag_offset_z)
 		_add_tendon("Tendon0", mag_bottom, Vector3(0, -barrel_r * 2.0, receiver_front_z - barrel_len * 0.45), 0.006)
 		_add_tendon("Tendon1", Vector3(rs.x * 0.4, rs.y * 0.4, rs.z * 0.45),
