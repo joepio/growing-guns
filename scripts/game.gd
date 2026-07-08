@@ -46,7 +46,9 @@ const CARDS_PER_PICK := 3
 # card-growth morph plays on the way down), and the trapdoors open the
 # moment the descent settles — no hold.
 const CAGE_SPAWN_HEIGHT := 45.0
-const CAGE_DROP_HEIGHT := 13.0
+# High enough that the trapdoor drop reads a little brutal — a real plunge
+# past the castle towers, not a hop off a ledge.
+const CAGE_DROP_HEIGHT := 22.0
 const CAGE_DESCEND_SECONDS := 2.6
 const GAME_MODE_VERSUS := "versus"
 const GAME_MODE_COOP := "coop"
