@@ -52,9 +52,10 @@ func setup(inner_r: float, base_y: float, wall_r: float, wall_h: float) -> void:
 	_mat.set_shader_parameter("feed_tex", _sub.get_texture())
 	_set_feed(true)
 
-	# Screens: raised well above the rim on their tall housings like real
-	# stadium boards, evenly spaced, tilted at the floor.
-	var screen_y: float = wall_h - SCREEN_H * 0.32 + 10.0
+	# Screens: raised well above the rim like real stadium boards — the
+	# bottom edge must clear the canopy ring (wall_h + ~0.6) or the roof
+	# blocks the lower third of the picture from the arena floor.
+	var screen_y: float = wall_h + SCREEN_H * 0.62
 	var screen_r: float = wall_r - 1.35
 	for i in TV_COUNT:
 		# Side midpoints of the squircle bowl (scale 1.0 there, so wall_r
@@ -94,12 +95,12 @@ func setup(inner_r: float, base_y: float, wall_r: float, wall_h: float) -> void:
 		for side in [-1.0, 1.0]:
 			var leg := MeshInstance3D.new()
 			var lbox := BoxMesh.new()
-			lbox.size = Vector3(0.9, 10.0, 0.9)
+			lbox.size = Vector3(0.9, 16.0, 0.9)
 			leg.mesh = lbox
 			leg.material_override = hmat
 			leg.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 			leg.position = dir * (screen_r + 0.3) + tangent * side * SCREEN_W * 0.3 \
-				+ Vector3(0.0, screen_y - 5.0, 0.0)
+				+ Vector3(0.0, screen_y - 8.0, 0.0)
 			add_child(leg)
 
 func _process(delta: float) -> void:
