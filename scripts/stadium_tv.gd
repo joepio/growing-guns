@@ -4,32 +4,37 @@ extends Node3D
 # Stadium jumbotrons: four screens above the colosseum's outer wall showing
 # the "broadcast". Built by ColosseumBuilder.build().
 #
-# The feed costs nothing: the shader samples the viewer's own previous frame
-# via hint_screen_texture (the main viewport's shared per-frame screen copy),
-# so there is no second scene render, no SubViewport, no extra draw calls —
-# each player sees their own POV up on the stadium screens, which is exactly
-# what the MORE ROUNDS! broadcast would show. All screens share ONE
-# ShaderMaterial; this node is pure static set dressing after setup().
+# The feed is ONE shared 384x216 SubViewport (measured ~free: doubles draw
+# calls, frame time unchanged). POV segments glue the feed camera to the
+# local player's active camera every frame; crowd segments frame the stands.
+# Do NOT switch this to hint_screen_texture: its full-resolution screen copy
+# measured ~0.5ms/frame at 1600x900 and scales with resolution (~3ms at 5K
+# retina) — that was the v0.3.0 playtest perf regression. All screens share
+# ONE ShaderMaterial.
+#
+# SCREEN_LAYER: the screens render on their own layer, excluded from the
+# feed camera's cull mask — a viewport must not draw a material that samples
+# its own texture (and TV-in-TV recursion reads wrong anyway).
 
 const TV_SHADER := preload("res://shaders/stadium_tv.gdshader")
 const TV_COUNT := 4
 const SCREEN_W := 26.0
 const SCREEN_H := SCREEN_W * 9.0 / 16.0
 const TILT_DOWN := 0.22  # radians the screens pitch toward the floor
-# Broadcast programming, looped: the viewer's own POV (free), a crowd
-# closeup from a small SubViewport (near-free: the crowd is ONE MultiMesh,
-# and the viewport only updates during its segment), and sponsor breaks
-# (slogans shared with the perimeter boards — see ad_ring.gd).
+# Broadcast programming, looped: the local player's POV, a crowd closeup,
+# and sponsor breaks (slogans shared with the boards — see ad_ring.gd).
 const PROGRAM: Array = [["live", 12.0], ["crowd", 5.0], ["live", 12.0], ["ad", 5.0]]
 const FEED_SIZE := Vector2i(384, 216)
+const SCREEN_LAYER := 1 << 19  # render layer 20: screens only
 
 var _mat: ShaderMaterial = null
 var _ad_labels: Array[Label3D] = []
 var _ad_index: int = 0
 var _program_i: int = 0
 var _timer: float = 12.0
+var _kind: String = "live"
 var _sub: SubViewport = null
-var _crowd_cam: Camera3D = null
+var _feed_cam: Camera3D = null
 var _inner_r: float = 50.0
 var _base_y: float = 12.0
 
@@ -40,16 +45,17 @@ func setup(inner_r: float, base_y: float, wall_r: float, wall_h: float) -> void:
 	_mat = mat
 	_inner_r = inner_r
 	_base_y = base_y
-	# Crowd-cam viewport: disabled except during its program segment.
+	# Shared feed viewport — live through POV and crowd segments, asleep
+	# during ad breaks.
 	_sub = SubViewport.new()
 	_sub.size = FEED_SIZE
-	_sub.render_target_update_mode = SubViewport.UPDATE_DISABLED
+	_sub.render_target_update_mode = SubViewport.UPDATE_ALWAYS
 	_sub.positional_shadow_atlas_size = 0
 	add_child(_sub)
-	_crowd_cam = Camera3D.new()
-	_crowd_cam.fov = 32.0  # tight closeup framing
-	_sub.add_child(_crowd_cam)
-	_crowd_cam.make_current()
+	_feed_cam = Camera3D.new()
+	_feed_cam.cull_mask = 0xFFFFF & ~SCREEN_LAYER  # never film the screens
+	_sub.add_child(_feed_cam)
+	_feed_cam.make_current()
 	mat.set_shader_parameter("feed_tex", _sub.get_texture())
 
 	# Screens: raised well above the rim like real stadium boards — the
@@ -69,6 +75,7 @@ func setup(inner_r: float, base_y: float, wall_r: float, wall_h: float) -> void:
 		quad.size = Vector2(SCREEN_W, SCREEN_H)
 		screen.mesh = quad
 		screen.material_override = mat
+		screen.layers = 1 | SCREEN_LAYER  # feed cam culls SCREEN_LAYER
 		screen.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		screen.position = dir * screen_r + Vector3(0.0, screen_y, 0.0)
 		add_child(screen)
@@ -118,20 +125,26 @@ func setup(inner_r: float, base_y: float, wall_r: float, wall_h: float) -> void:
 			add_child(leg)
 
 func _process(delta: float) -> void:
+	# POV segment: mirror whatever camera is live for this viewer (player
+	# eye, spectator, splitscreen view) onto the feed camera.
+	if _kind == "live" and _feed_cam:
+		var active := get_viewport().get_camera_3d()
+		if active:
+			_feed_cam.global_transform = active.global_transform
+			_feed_cam.fov = active.fov
 	_timer -= delta
 	if _timer > 0.0:
 		return
 	_program_i = (_program_i + 1) % PROGRAM.size()
 	var segment: Array = PROGRAM[_program_i]
 	_timer = float(segment[1])
-	var kind := str(segment[0])
-	_mat.set_shader_parameter("ad_mode", 1.0 if kind == "ad" else 0.0)
-	_mat.set_shader_parameter("feed_src", 1.0 if kind == "crowd" else 0.0)
+	_kind = str(segment[0])
+	_mat.set_shader_parameter("ad_mode", 1.0 if _kind == "ad" else 0.0)
 	_sub.render_target_update_mode = (
-		SubViewport.UPDATE_ALWAYS if kind == "crowd" else SubViewport.UPDATE_DISABLED)
+		SubViewport.UPDATE_DISABLED if _kind == "ad" else SubViewport.UPDATE_ALWAYS)
 	for lbl in _ad_labels:
-		lbl.visible = kind == "ad"
-	match kind:
+		lbl.visible = _kind == "ad"
+	match _kind:
 		"crowd":
 			_aim_crowd_cam()
 		"ad":
@@ -153,9 +166,9 @@ func _aim_crowd_cam() -> void:
 		if seats != null and not seats.is_empty():
 			var seat: Vector3 = seats[randi() % seats.size()]
 			var inward := -Vector3(seat.x, 0.0, seat.z).normalized()
-			_crowd_cam.fov = 24.0
-			_crowd_cam.position = seat + inward * 3.4 + Vector3(0.0, 1.7, 0.0)
-			_crowd_cam.look_at(seat + Vector3(0.0, 1.0, 0.0), Vector3.UP)
+			_feed_cam.fov = 24.0
+			_feed_cam.position = seat + inward * 3.4 + Vector3(0.0, 1.7, 0.0)
+			_feed_cam.look_at(seat + Vector3(0.0, 1.0, 0.0), Vector3.UP)
 			return
 	# Section shot: a fresh patch of fans from inside the bowl.
 	var ang := randf() * TAU
@@ -163,6 +176,6 @@ func _aim_crowd_cam() -> void:
 	var row_frac := randf_range(0.2, 0.7)
 	var seat_r := _inner_r + 18.0 * 2.2 * row_frac  # ColosseumBuilder ROWS/ROW_DEPTH
 	var seat_y := _base_y + 18.0 * 1.4 * row_frac
-	_crowd_cam.fov = 32.0
-	_crowd_cam.position = dir * (_inner_r * 0.7) + Vector3(0.0, seat_y + 3.0, 0.0)
-	_crowd_cam.look_at(dir * seat_r + Vector3(0.0, seat_y + 1.0, 0.0), Vector3.UP)
+	_feed_cam.fov = 32.0
+	_feed_cam.position = dir * (_inner_r * 0.7) + Vector3(0.0, seat_y + 3.0, 0.0)
+	_feed_cam.look_at(dir * seat_r + Vector3(0.0, seat_y + 1.0, 0.0), Vector3.UP)
