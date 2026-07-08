@@ -18,6 +18,15 @@ render_mode unshaded, cull_back, fog_disabled;
 
 uniform sampler2D screen_tex : hint_screen_texture, filter_linear;
 uniform float feed_on : hint_range(0.0, 1.0) = 1.0;
+// Alternate camera segments (crowd closeups): stadium_tv.gd flips feed_src
+// to 1 and enables a small SubViewport whose texture lands here.
+uniform sampler2D feed_tex : source_color, filter_linear;
+uniform float feed_src : hint_range(0.0, 1.0) = 0.0;
+// Ad break (stadium_tv.gd cycles this): vibrant animated gradient card;
+// the slogan itself is a Label3D floating just in front of the screen.
+uniform float ad_mode : hint_range(0.0, 1.0) = 0.0;
+uniform vec3 ad_col_a : source_color = vec3(0.05, 0.75, 0.72);
+uniform vec3 ad_col_b : source_color = vec3(0.90, 0.15, 0.75);
 uniform float brightness = 1.4;
 // Manual partial atmosphere: fog_disabled kills the engine fog entirely,
 // which made the screens look pasted onto the scene. Blend a *fraction* of
@@ -78,8 +87,16 @@ void fragment() {
 	float bezel = step(max(q.x, q.y), 0.0);
 
 	vec3 content;
-	if (feed_on > 0.5) {
-		vec3 f = texture(screen_tex, uv).rgb;
+	if (ad_mode > 0.5) {
+		// Sponsor card: slow diagonal gradient wash + a bright sweep.
+		float g = 0.5 + 0.5 * sin((uv.x + uv.y) * 2.4 - TIME * 0.7);
+		content = mix(ad_col_a, ad_col_b, g) * 0.8;
+		float sweep = pow(0.5 + 0.5 * sin(uv.x * 6.0 - TIME * 2.2), 12.0);
+		content += vec3(0.9) * sweep * 0.25;
+	} else if (feed_on > 0.5) {
+		vec3 f = (feed_src > 0.5)
+			? texture(feed_tex, uv).rgb
+			: texture(screen_tex, uv).rgb;
 		// Broadcast grade: contrast pivot above mid to cut the arena's
 		// atmospheric haze, plus a saturation push so the feed reads punchy
 		// at bowl distances.

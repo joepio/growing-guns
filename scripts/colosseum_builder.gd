@@ -113,6 +113,11 @@ static func build(
 			inner_r + float(ROWS) * ROW_DEPTH + 1.4,
 			base_y + float(ROWS) * ROW_RISE + BACK_WALL_EXTRA,
 		)
+		# Sponsor ribbon around the barrier — see ad_ring.gd.
+		var ads := AdRing.new()
+		ads.name = "AdRing"
+		root.add_child(ads)
+		ads.setup(inner_r, base_y, _sq)
 	# Hand the ring geometry + crowd material to the reaction system: bullets
 	# and blasts landing in this band scare the crowd, kills make it roar, and
 	# CrowdAudio drives the shader's excitement/panic uniforms. Editor preview
