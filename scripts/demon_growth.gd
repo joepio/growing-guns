@@ -232,7 +232,8 @@ func _process(delta: float) -> void:
 	if Engine.is_editor_hint():
 		return
 	if _anim_elapsed >= 0.0:
-		_anim_elapsed += delta
+		# Clamped step: hitch frames must not fast-forward the growth.
+		_anim_elapsed += minf(delta, 0.05)
 		if _anim_elapsed >= _anim_duration:
 			_anim_elapsed = -1.0
 			corruption = _anim_to

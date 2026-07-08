@@ -130,6 +130,11 @@ var _third_person_demon_growth: DemonGrowth = null
 # Card-growth moment bookkeeping: how many owned cards the gun's visual form
 # already reflects. rebuild_weapon_from_cards animates any newer cards.
 var _grown_card_count: int = 0
+# Round-start growth is armed by rebuild_weapon_from_cards but only STARTED
+# by set_launching(true): the arena swap + shader warmup between the two
+# produces one giant frame, and starting earlier lets that hitch-delta eat
+# the whole animation before the player's first visible frame.
+var _pending_card_growth: bool = false
 var _gun_inspect: float = 0.0  # 0..1 "look at the growing gun" viewmodel blend
 var _ragdoll_pieces: Array[Node] = []
 var _blood_wounds: Array[Node] = []
@@ -1906,12 +1911,12 @@ func _update_gun_feel(delta: float) -> void:
 	_gun_inspect = lerpf(_gun_inspect, 1.0 if inspecting else 0.0, clampf(delta * 5.0, 0.0, 1.0))
 	if _procedural_gun:
 		var s: float = _gun_inspect if _gun_inspect > 0.001 else 0.0
-		# Pull toward screen center, pitch the muzzle up a touch, and ROLL
-		# around the barrel axis — classic weapon-inspect motion that tips the
-		# top/left flank (where the eye grows) toward the camera. A yaw swing
-		# here read as the gun pointing off sideways, not being looked at.
-		var inspect_pos := Vector3(-0.14, 0.05, 0.12) * s
-		var inspect_rot := Vector3(0.3, -0.2, 0.7) * s
+		# Pull toward screen center and yaw the muzzle to the RIGHT so the
+		# gun's LEFT flank (where the eye grows) squares up to the camera.
+		# Rolling around the barrel axis showed the top instead — roll can
+		# never bring a side flank to face the viewer.
+		var inspect_pos := Vector3(-0.16, 0.04, 0.12) * s
+		var inspect_rot := Vector3(0.12, -1.0, -0.08) * s
 		_procedural_gun.position = inspect_pos
 		_procedural_gun.rotation = inspect_rot
 		if _demon_growth:
@@ -4304,6 +4309,11 @@ func set_launching(v: bool, downward_vel: float = 0.0) -> void:
 	if sender != 1 and sender != 0:
 		return
 	launching = v
+	# Drop begins = the player can see again — play the armed card growth now.
+	# Before the authority gate so remote/third-person guns morph too.
+	if v and _pending_card_growth:
+		_pending_card_growth = false
+		_play_card_growth()
 	if is_multiplayer_authority():
 		if v:
 			velocity = Vector3(0.0, -downward_vel, 0.0)
@@ -4485,10 +4495,9 @@ func rebuild_weapon_from_cards() -> void:
 	_update_gun_visuals()
 	_update_body_scale()
 	# Round-start growth moment: a card was picked since the gun last showed
-	# its final form — morph from the previous form into the new one right as
-	# everyone drops back in.
+	# its final form — arm the morph; it starts when the sky drop launches.
 	if _owned_cards.size() > _grown_card_count:
-		_play_card_growth()
+		_pending_card_growth = true
 	_grown_card_count = _owned_cards.size()
 
 
@@ -4531,6 +4540,7 @@ func reset_weapon() -> void:
 	weapon.reset()
 	_owned_cards.clear()
 	_grown_card_count = 0
+	_pending_card_growth = false
 	mag = weapon.get_mag_size()
 	_reset_weapon_combat_state()
 	_phoenix_charges_left = weapon.phoenix_revives

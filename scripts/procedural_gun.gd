@@ -263,9 +263,11 @@ func _process(delta: float) -> void:
 		_barrel_spin *= exp(-2.5 * delta)
 	if Engine.is_editor_hint():
 		return
-	# Growth animation — re-apply lerped stats at a bounded cadence.
+	# Growth animation — re-apply lerped stats at a bounded cadence. Clamp the
+	# step so a hitch frame (arena swap, shader warmup) can't swallow the
+	# whole morph in one delta.
 	if _grow_to != null:
-		_grow_elapsed += delta
+		_grow_elapsed += minf(delta, 0.05)
 		if _grow_elapsed >= _grow_duration:
 			var final_w := _grow_to
 			_grow_from = null
