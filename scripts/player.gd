@@ -137,6 +137,7 @@ var _grown_card_count: int = 0
 var _pending_card_growth: bool = false
 var _gun_inspect: float = 0.0  # 0..1 "look at the growing gun" viewmodel blend
 var _spawn_cage: Node3D = null  # round-start cage (spawn_cage.gd), lives in players_root
+var _cage_descent_tween: Tween = null
 var _ragdoll_pieces: Array[Node] = []
 var _blood_wounds: Array[Node] = []
 
@@ -4291,12 +4292,15 @@ func set_frozen(f: bool) -> void:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 
-# Round-start gladiator cage: freeze in place inside a hanging cage while the
-# card-growth morph plays; game.gd releases everyone together a beat later.
-# Frozen physics means the cage needs no collision — it's pure set dressing,
-# built locally on every peer from this broadcast.
+# Round-start gladiator cage: freeze inside a hanging cage that a crane
+# lowers `descend` meters into the arena while the card-growth morph plays;
+# game.gd releases everyone together once the hold expires. Frozen physics
+# means the cage needs no collision — it's pure set dressing, built locally
+# on every peer from this broadcast. The cage tweens itself on every peer;
+# the player rides along via an identical tween on the authority peer only
+# (remote copies follow the normal position sync).
 @rpc("any_peer", "call_local", "reliable")
-func enter_spawn_cage() -> void:
+func enter_spawn_cage(descend: float = 0.0, descend_seconds: float = 2.6) -> void:
 	var sender := multiplayer.get_remote_sender_id()
 	if sender != 1 and sender != 0:
 		return
@@ -4309,6 +4313,15 @@ func enter_spawn_cage() -> void:
 	# Player origin is capsule-center; the cage floor sits just under the feet.
 	cage.global_position = global_position + Vector3(0.0, -1.1, 0.0)
 	_spawn_cage = cage
+	if descend > 0.0:
+		cage.descend(descend, descend_seconds)
+		if is_multiplayer_authority():
+			# Same curve as SpawnCage.descend — keep trans/ease in sync.
+			_cage_descent_tween = create_tween()
+			_cage_descent_tween.tween_property(
+				self, "global_position",
+				global_position + Vector3(0.0, -descend, 0.0), descend_seconds) \
+				.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 	# The gun grows while the crowd waits for the floor to drop.
 	if _pending_card_growth:
 		_pending_card_growth = false
@@ -4321,6 +4334,9 @@ func release_spawn_cage() -> void:
 	if sender != 1 and sender != 0:
 		return
 	frozen = false
+	if _cage_descent_tween and _cage_descent_tween.is_valid():
+		_cage_descent_tween.kill()  # gravity owns the player from here
+	_cage_descent_tween = null
 	if is_multiplayer_authority() and not is_bot:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	if _spawn_cage and is_instance_valid(_spawn_cage):

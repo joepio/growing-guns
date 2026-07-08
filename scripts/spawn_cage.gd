@@ -15,12 +15,18 @@ const W := 2.6         # inner width
 const H := 3.4         # bar height
 const BAR_R := 0.035
 const BAR_SPACING := 0.42
-const CHAIN_LEN := 50.0
-const WINCH_RISE := 45.0
+# Long enough that the chain top stays hidden in the sky haze even at the
+# low hold position — the cage should read as hanging from nowhere visible.
+const CHAIN_LEN := 90.0
+# Winched far past the fog ceiling before freeing, so the cage visibly
+# leaves the arena instead of vanishing in thin air.
+const WINCH_RISE := 140.0
+const WINCH_SECONDS := 7.0
 
 var _floor_l: Node3D = null
 var _floor_r: Node3D = null
 var _mat: StandardMaterial3D = null
+var _descend_tween: Tween = null
 
 func _ready() -> void:
 	_mat = StandardMaterial3D.new()
@@ -76,8 +82,18 @@ func _floor_half(side: float) -> Node3D:
 	pivot.add_child(plate)
 	return pivot
 
+# Crane descent: lower the cage by `drop` meters, decelerating into the hold
+# position. The caged player is tweened on its authority peer with the SAME
+# curve (player.gd enter_spawn_cage) — keep trans/ease in sync.
+func descend(drop: float, duration: float) -> void:
+	_descend_tween = create_tween()
+	_descend_tween.tween_property(self, "position:y", position.y - drop, duration) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+
 # Swing the trapdoors open, hold a beat, then winch the cage up and free it.
 func open() -> void:
+	if _descend_tween and _descend_tween.is_valid():
+		_descend_tween.kill()
 	var tw := create_tween()
 	tw.set_parallel(true)
 	# Left pivot's plate extends +x: dropping it is a NEGATIVE z-rotation
@@ -88,7 +104,9 @@ func open() -> void:
 		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
 	tw.set_parallel(false)
 	tw.tween_interval(0.8)
-	tw.tween_property(self, "position:y", position.y + WINCH_RISE, 1.8) \
+	# Slow crane retrieval — accelerates away and exits through the sky haze
+	# long before it's freed.
+	tw.tween_property(self, "position:y", position.y + WINCH_RISE, WINCH_SECONDS) \
 		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
 	tw.tween_callback(queue_free)
 
