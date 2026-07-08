@@ -42,13 +42,12 @@ enum State { WAITING, PLAYING, PICKING_CARD, MATCH_OVER }
 
 const CARDS_PER_PICK := 3
 # Round-start gladiator cages: fighters spawn caged at CAGE_SPAWN_HEIGHT, a
-# crane lowers them to CAGE_HOLD_HEIGHT over CAGE_DESCEND_SECONDS (the
-# card-growth morph plays on the way down), and after CAGE_HOLD_SECONDS
-# total the trapdoors drop everyone into the fight.
+# crane lowers them to CAGE_DROP_HEIGHT over CAGE_DESCEND_SECONDS (the
+# card-growth morph plays on the way down), and the trapdoors open the
+# moment the descent settles — no hold.
 const CAGE_SPAWN_HEIGHT := 45.0
-const CAGE_HOLD_HEIGHT := 13.0
+const CAGE_DROP_HEIGHT := 13.0
 const CAGE_DESCEND_SECONDS := 2.6
-const CAGE_HOLD_SECONDS := 4.2
 const GAME_MODE_VERSUS := "versus"
 const GAME_MODE_COOP := "coop"
 const COOP_BASE_ENEMIES := 3
@@ -2157,10 +2156,10 @@ func _start_round_now() -> void:
 		var pick := _pick_spawn(used)
 		used.append(pick["pos"])
 		p.set_ghost_mode.rpc(false)
-		# Cage-spawn: hang the player in a gladiator cage a short drop above
-		# the landing spot. They're frozen inside while the card-growth morph
-		# plays; _process releases every cage together after CAGE_HOLD_SECONDS
-		# and the trapdoor floor drops them into the fight.
+		# Cage-spawn: the player starts frozen in a gladiator cage high over
+		# the landing spot; a crane lowers it while the card-growth morph
+		# plays, and _process opens every trapdoor together as soon as the
+		# descent settles, dropping the fighters into the fight.
 		var drop := _sky_drop_spawn(pick["pos"], int(p.get("player_id")), used, CAGE_SPAWN_HEIGHT)
 		p.server_respawn.rpc(drop["pos"], drop["yaw"])
 		_apply_coop_spawn_health(p)
@@ -2184,11 +2183,11 @@ func _start_round_now() -> void:
 	Trace.span_begin("_warmup_round_audio")
 	_warmup_round_audio()
 	Trace.span_end("_warmup_round_audio")
-	# Cage the fighters. Cranes lower everyone in; floors open together once
-	# the hold expires.
+	# Cage the fighters. Cranes lower everyone in; floors open together the
+	# moment the descent settles (small buffer so the tweens have landed).
 	for p in round_players:
-		p.enter_spawn_cage.rpc(CAGE_SPAWN_HEIGHT - CAGE_HOLD_HEIGHT, CAGE_DESCEND_SECONDS)
-	_cage_release_timer = CAGE_HOLD_SECONDS
+		p.enter_spawn_cage.rpc(CAGE_SPAWN_HEIGHT - CAGE_DROP_HEIGHT, CAGE_DESCEND_SECONDS)
+	_cage_release_timer = CAGE_DESCEND_SECONDS + 0.15
 	if multiplayer.is_server() and is_coop_mode():
 		_begin_coop_enemy_wave()
 	if multiplayer.is_server() and ROUND_MODIFIERS_SCRIPT.needs_air_strikes(current_round_modifier):
