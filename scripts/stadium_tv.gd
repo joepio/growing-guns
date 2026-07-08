@@ -52,9 +52,9 @@ func setup(inner_r: float, base_y: float, wall_r: float, wall_h: float) -> void:
 	_mat.set_shader_parameter("feed_tex", _sub.get_texture())
 	_set_feed(true)
 
-	# Screens: crowning the outer wall (top edge pokes above the rim like
-	# real stadium boards), evenly spaced, tilted at the floor.
-	var screen_y: float = wall_h - SCREEN_H * 0.32
+	# Screens: raised well above the rim on their tall housings like real
+	# stadium boards, evenly spaced, tilted at the floor.
+	var screen_y: float = wall_h - SCREEN_H * 0.32 + 10.0
 	var screen_r: float = wall_r - 1.35
 	for i in TV_COUNT:
 		var ang := TAU * (float(i) + 0.5) / float(TV_COUNT)
