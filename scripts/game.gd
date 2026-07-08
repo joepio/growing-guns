@@ -476,6 +476,12 @@ func _ready() -> void:
 		if NetworkManager.get_meta("iroh_host_announce_share", false):
 			_announce("MATCH ID COPIED TO CLIPBOARD\nShare with your friends!", 99.0)
 			NetworkManager.set_meta("iroh_host_announce_share", false)
+
+		# Peers who connected while we were still in the menu sent their
+		# _request_spawn into the void (no game.gd existed here to receive
+		# it). Now that the game scene is live, invite them to re-send.
+		if multiplayer.get_peers().size() > 0:
+			_host_game_ready.rpc()
 	else:
 		# Instantly show the client state — makes it obvious when you thought
 		# you were solo but actually joined an orphan on port 27015.
@@ -491,6 +497,16 @@ func _ready() -> void:
 		round_banner.visible = true
 		banner_timer.stop()
 		_client_request_spawn_when_ready()
+		# If we're connected but nothing arrives, the host is sitting in the
+		# menu and hasn't picked a game mode — say so instead of implying the
+		# connection is still being established. Self-heals via
+		# _host_game_ready once the host loads the game scene.
+		get_tree().create_timer(2.0).timeout.connect(func() -> void:
+			var peer := multiplayer.multiplayer_peer
+			if local_player == null and not multiplayer.is_server() \
+					and round_banner.visible and peer != null \
+					and peer.get_connection_status() == MultiplayerPeer.CONNECTION_CONNECTED:
+				round_banner.text = "CONNECTED — WAITING FOR HOST TO PICK A GAME MODE…")
 
 	_update_scoreboard()
 	# Splitscreen manager auto-builds its layer in its own _ready when enabled.
@@ -906,6 +922,17 @@ func _on_peer_disconnected(id: int) -> void:
 		_hide_card_pick.rpc()
 		_hide_rematch_overlay.rpc()
 
+# Host loaded the game scene after clients were already connected (they
+# joined while the host browsed the menu) — their spawn requests went
+# nowhere; ask them to re-send now that someone is listening.
+@rpc("authority", "call_local", "reliable")
+func _host_game_ready() -> void:
+	if multiplayer.is_server():
+		return
+	if local_player == null:
+		_request_spawn.rpc_id(1, NetworkManager.local_player_name)
+
+
 @rpc("any_peer", "call_local", "reliable")
 func _request_spawn(pname: String) -> void:
 	if not multiplayer.is_server():
@@ -913,6 +940,9 @@ func _request_spawn(pname: String) -> void:
 	var sender := multiplayer.get_remote_sender_id()
 	if sender == 0:
 		sender = 1
+	# Captured before _spawn_player: a re-request from an already-spawned
+	# peer (e.g. via _host_game_ready) must not hard-restart the match.
+	var already_spawned := players_root.has_node(str(sender))
 	# A real peer is joining — boot any SP fallback bots that are around.
 	if not is_coop_mode():
 		_despawn_all_bots()
@@ -944,7 +974,7 @@ func _request_spawn(pname: String) -> void:
 	_set_game_mode.rpc_id(sender, game_mode, coop_wave)
 	if is_coop_mode():
 		_set_coop_wave_progress.rpc_id(sender, _coop_wave_kills, _coop_wave_enemy_total)
-	if not is_coop_mode() and state != State.WAITING:
+	if not is_coop_mode() and state != State.WAITING and not already_spawned:
 		# A real player joined a versus match already underway (typically the
 		# host warming up against the SP fallback bot). Don't drop them into
 		# the middle of someone else's round — hard-restart: clear any live
