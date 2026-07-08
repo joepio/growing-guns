@@ -1,56 +1,26 @@
 class_name StadiumTV
 extends Node3D
 
-# Stadium jumbotrons: four screens on the colosseum's outer wall showing a
-# live broadcast feed of the arena. Built by ColosseumBuilder.build().
+# Stadium jumbotrons: four screens above the colosseum's outer wall showing
+# the "broadcast". Built by ColosseumBuilder.build().
 #
-# Cost discipline (measured, see AGENTS.md perf notes): all screens share ONE
-# ShaderMaterial; the feed is ONE 384x216 SubViewport whose camera slowly
-# orbits the arena like a broadcast crane. On this class of scene the extra
-# viewport doubles draw calls but doesn't move frame time; on machines where
-# it would, the PerfGovernor L1 shed (casings_enabled == false) switches the
-# feed off and the screens fall back to shader-drawn color bars.
+# The feed costs nothing: the shader samples the viewer's own previous frame
+# via hint_screen_texture (the main viewport's shared per-frame screen copy),
+# so there is no second scene render, no SubViewport, no extra draw calls —
+# each player sees their own POV up on the stadium screens, which is exactly
+# what the MORE ROUNDS! broadcast would show. All screens share ONE
+# ShaderMaterial; this node is pure static set dressing after setup().
 
 const TV_SHADER := preload("res://shaders/stadium_tv.gdshader")
 const TV_COUNT := 4
-const FEED_SIZE := Vector2i(384, 216)
 const SCREEN_W := 26.0
 const SCREEN_H := SCREEN_W * 9.0 / 16.0
-const TILT_DOWN := 0.22          # radians the screens pitch toward the floor
-const ORBIT_SPEED := 0.05        # rad/s broadcast-crane orbit
-const GOV_CHECK_INTERVAL := 0.5
-
-var _sub: SubViewport = null
-var _cam: Camera3D = null
-var _mat: ShaderMaterial = null
-var _orbit_r: float = 30.0
-var _orbit_h: float = 14.0
-var _orbit_t: float = 0.0
-var _feed_on: bool = false
-var _gov_timer: float = 0.0
+const TILT_DOWN := 0.22  # radians the screens pitch toward the floor
 
 # Called by ColosseumBuilder with the bowl's ring geometry.
-func setup(inner_r: float, base_y: float, wall_r: float, wall_h: float) -> void:
-	_mat = ShaderMaterial.new()
-	_mat.shader = TV_SHADER
-
-	# Broadcast camera path: high crane orbit looking DOWN at the castle — a
-	# steep angle keeps the arena floor as the backdrop; a shallow one filled
-	# the frame with hazy far-side stands and the feed read as fog.
-	_orbit_r = inner_r * 0.32
-	_orbit_h = base_y + 16.0
-	_sub = SubViewport.new()
-	_sub.size = FEED_SIZE
-	_sub.render_target_update_mode = SubViewport.UPDATE_DISABLED
-	_sub.positional_shadow_atlas_size = 0
-	add_child(_sub)
-	_cam = Camera3D.new()
-	_cam.fov = 50.0  # tight on the castle — wide angles fill the frame with haze
-	_sub.add_child(_cam)
-	_cam.make_current()
-	_update_cam_pose()
-	_mat.set_shader_parameter("feed_tex", _sub.get_texture())
-	_set_feed(true)
+func setup(_inner_r: float, _base_y: float, wall_r: float, wall_h: float) -> void:
+	var mat := ShaderMaterial.new()
+	mat.shader = TV_SHADER
 
 	# Screens: raised well above the rim like real stadium boards — the
 	# bottom edge must clear the canopy ring (wall_h + ~0.6) or the roof
@@ -68,7 +38,7 @@ func setup(inner_r: float, base_y: float, wall_r: float, wall_h: float) -> void:
 		var quad := QuadMesh.new()
 		quad.size = Vector2(SCREEN_W, SCREEN_H)
 		screen.mesh = quad
-		screen.material_override = _mat
+		screen.material_override = mat
 		screen.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		screen.position = dir * screen_r + Vector3(0.0, screen_y, 0.0)
 		add_child(screen)
@@ -90,8 +60,11 @@ func setup(inner_r: float, base_y: float, wall_r: float, wall_h: float) -> void:
 		housing.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		screen.add_child(housing)
 		housing.position = Vector3(0.0, -1.9, -0.45)
-		# Mount legs down to the roof line — the board sits, not floats.
+		# Mount legs down to the roof line. Their tops stop BELOW the screen's
+		# bottom edge — the tilted screen leans its top back past vertical, so
+		# taller legs visibly cross the picture from the arena floor.
 		var tangent := Vector3(-sin(ang), 0.0, cos(ang))
+		var leg_top: float = screen_y - SCREEN_H * 0.5 - 0.4
 		for side in [-1.0, 1.0]:
 			var leg := MeshInstance3D.new()
 			var lbox := BoxMesh.new()
@@ -100,32 +73,5 @@ func setup(inner_r: float, base_y: float, wall_r: float, wall_h: float) -> void:
 			leg.material_override = hmat
 			leg.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 			leg.position = dir * (screen_r + 0.3) + tangent * side * SCREEN_W * 0.3 \
-				+ Vector3(0.0, screen_y - 8.0, 0.0)
+				+ Vector3(0.0, leg_top - 8.0, 0.0)
 			add_child(leg)
-
-func _process(delta: float) -> void:
-	if _feed_on:
-		_orbit_t += delta * ORBIT_SPEED
-		_update_cam_pose()
-	# Governor poll: ride the L1 shed — if casings are off, this machine has
-	# no business rendering a vanity viewport either.
-	_gov_timer -= delta
-	if _gov_timer <= 0.0:
-		_gov_timer = GOV_CHECK_INTERVAL
-		var want: bool = PerfGovernor.casings_enabled if PerfGovernor else true
-		if want != _feed_on:
-			_set_feed(want)
-
-func _set_feed(on: bool) -> void:
-	_feed_on = on
-	if _sub:
-		_sub.render_target_update_mode = (
-			SubViewport.UPDATE_ALWAYS if on else SubViewport.UPDATE_DISABLED)
-	if _mat:
-		_mat.set_shader_parameter("feed_on", 1.0 if on else 0.0)
-
-func _update_cam_pose() -> void:
-	if _cam == null:
-		return
-	_cam.position = Vector3(cos(_orbit_t) * _orbit_r, _orbit_h, sin(_orbit_t) * _orbit_r)
-	_cam.look_at(Vector3(0.0, 1.5, 0.0), Vector3.UP)

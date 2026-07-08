@@ -3,18 +3,21 @@ shader_type spatial;
 // parchment at bowl distances — real jumbotrons punch through.
 render_mode unshaded, cull_back, fog_disabled;
 
-// Stadium jumbotron screen (see stadium_tv.gd). Shows the live broadcast
-// feed (a shared low-res SubViewport) dressed with scanlines, a rolling
-// flicker band, a blinking LIVE bug and a color ticker bar. When the feed is
-// off (perf shed), falls back to vibrant lore-palette color bars — the
-// screens always show *something*.
+// Stadium jumbotron screen (see stadium_tv.gd). The "broadcast" is the
+// viewer's own previous frame: hint_screen_texture reuses the main
+// viewport's shared per-frame screen copy, so there is NO second scene
+// render — each player sees their own POV on the stadium screens, dressed
+// with scanlines, a rolling flicker band, a blinking LIVE bug and a color
+// ticker bar. (Reading the screen moves this material to the transparent
+// pass, so the TV's own rectangle isn't in the copy — a TV seen on a TV
+// shows the wall behind it, not infinite recursion.)
 //
 // Unshaded on purpose: TVs stay lit during the blackout modifier, exactly
 // like real stadium screens (and per docs/lore.md, they're the venue's own
 // hardware). Palette rule: no red — teal/magenta/gold/lime.
 
-uniform sampler2D feed_tex : source_color, filter_linear;
-uniform float feed_on : hint_range(0.0, 1.0) = 0.0;
+uniform sampler2D screen_tex : hint_screen_texture, filter_linear;
+uniform float feed_on : hint_range(0.0, 1.0) = 1.0;
 uniform float brightness = 1.4;
 // Manual partial atmosphere: fog_disabled kills the engine fog entirely,
 // which made the screens look pasted onto the scene. Blend a *fraction* of
@@ -76,7 +79,7 @@ void fragment() {
 
 	vec3 content;
 	if (feed_on > 0.5) {
-		vec3 f = texture(feed_tex, uv).rgb;
+		vec3 f = texture(screen_tex, uv).rgb;
 		// Broadcast grade: contrast pivot above mid to cut the arena's
 		// atmospheric haze, plus a saturation push so the feed reads punchy
 		// at bowl distances.
