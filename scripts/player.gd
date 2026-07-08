@@ -123,6 +123,14 @@ var _flashlight: SpotLight3D = null
 var gun_barrel: MeshInstance3D = null
 var gun_magazine: MeshInstance3D = null
 var _procedural_gun: Node3D = null
+# Living-gun growth layers (see demon_growth.gd) — siblings of the procedural
+# guns, not children: ProceduralGun._rebuild frees all of its own children.
+var _demon_growth: DemonGrowth = null
+var _third_person_demon_growth: DemonGrowth = null
+# Card-growth moment bookkeeping: how many owned cards the gun's visual form
+# already reflects. rebuild_weapon_from_cards animates any newer cards.
+var _grown_card_count: int = 0
+var _gun_inspect: float = 0.0  # 0..1 "look at the growing gun" viewmodel blend
 var _ragdoll_pieces: Array[Node] = []
 var _blood_wounds: Array[Node] = []
 
@@ -270,7 +278,9 @@ const STEP_STRIDE := 2.2  # meters of ground travel between footstep SFX
 var _view_punch_rot: Vector3 = Vector3.ZERO
 var _view_punch_pos: Vector3 = Vector3.ZERO
 var _melee_tween: Tween = null
-var _ragdoll_head: RigidBody3D = null
+# PhysicsBody3D, not RigidBody3D: blob corpses hand us a RigidBody3D chunk,
+# knight corpses a PhysicalBone3D (the hips). Only global_transform is read.
+var _ragdoll_head: PhysicsBody3D = null
 var _suppress_next_death_sound := false
 var _suppress_next_death_ragdoll := false
 var _pending_lava_death := false
@@ -419,6 +429,14 @@ func _setup_third_person_gun() -> void:
 		if gun_root == null:
 			_third_person_procedural_gun.queue_free()
 			_third_person_procedural_gun = null
+		else:
+			# Growth shares the gun's mount offset so the flesh hugs the rifle.
+			_third_person_demon_growth = DemonGrowth.new()
+			_third_person_demon_growth.name = "DemonGrowth"
+			_third_person_demon_growth.gun_path = NodePath("../ThirdPersonProceduralGun")
+			_third_person_demon_growth.position = _third_person_procedural_gun.position
+			_third_person_demon_growth.rotation = _third_person_procedural_gun.rotation
+			gun_root.add_child(_third_person_demon_growth)
 	elif hand_anchor and (character_visual == null or not character_visual.enabled):
 		var gun := MeshInstance3D.new()
 		var body_mesh := BoxMesh.new()
@@ -954,6 +972,8 @@ func _sync_weapon_visibility() -> void:
 		muzzle.visible = show_fp
 	if _procedural_gun:
 		_procedural_gun.visible = show_fp
+	if _demon_growth:
+		_demon_growth.visible = show_fp
 	if _third_person_gun:
 		_third_person_gun.visible = show_tp
 
@@ -1877,6 +1897,26 @@ func _update_gun_feel(delta: float) -> void:
 	# Don't fight the melee tween while it's running.
 	if not (_melee_tween and _melee_tween.is_valid()):
 		muzzle.rotation.z = _gun_tilt_z
+	# Card-growth inspect: while the first-person gun is mid-growth, swing it
+	# toward screen center with its left flank (the eye side) facing the
+	# camera so the player actually sees the morph. Pure viewmodel motion on
+	# the gun nodes — the muzzle stays authoritative for fire direction.
+	var inspecting: bool = _show_first_person_gun() and _procedural_gun != null \
+		and _procedural_gun.has_method("is_growing") and _procedural_gun.is_growing()
+	_gun_inspect = lerpf(_gun_inspect, 1.0 if inspecting else 0.0, clampf(delta * 5.0, 0.0, 1.0))
+	if _procedural_gun:
+		var s: float = _gun_inspect if _gun_inspect > 0.001 else 0.0
+		# Pull toward screen center, pitch the muzzle up a touch, and ROLL
+		# around the barrel axis — classic weapon-inspect motion that tips the
+		# top/left flank (where the eye grows) toward the camera. A yaw swing
+		# here read as the gun pointing off sideways, not being looked at.
+		var inspect_pos := Vector3(-0.14, 0.05, 0.12) * s
+		var inspect_rot := Vector3(0.3, -0.2, 0.7) * s
+		_procedural_gun.position = inspect_pos
+		_procedural_gun.rotation = inspect_rot
+		if _demon_growth:
+			_demon_growth.position = inspect_pos
+			_demon_growth.rotation = inspect_rot
 	# Height scales with body_scale (and the per-axis Y warp) so the viewpoint
 	# follows the taller head — SLENDERMAN sees the world from way up high.
 	var cam_y: float = (_camera_rest_pos.y * maxf(0.1, weapon.body_scale) * maxf(0.1, weapon.body_scale_axes.y)) - _landing_bump_y
@@ -4408,6 +4448,10 @@ func apply_card(card_id: String) -> void:
 	var card := CardLibrary.by_id(card_id)
 	if card.is_empty():
 		return
+	# Mid-round card adds (dev panel / labs) grow the gun live. During the
+	# real card-pick screen (state == PICKING_CARD) the growth is deferred to
+	# the round-start rebuild so it plays during the sky drop instead.
+	var grow_from: Weapon = weapon.duplicate() if _is_round_playing() else null
 	card.apply.call(weapon)
 	_owned_cards.append(card_id)
 	weapon.applied_cards.append(card_id)
@@ -4419,6 +4463,9 @@ func apply_card(card_id: String) -> void:
 		_phoenix_charges_left = max(_phoenix_charges_left, weapon.phoenix_revives)
 	_update_gun_visuals()
 	_update_body_scale()
+	if grow_from != null:
+		_animate_gun_growth(grow_from)
+		_grown_card_count = _owned_cards.size()
 
 @rpc("any_peer", "call_local", "reliable")
 func rebuild_weapon_from_cards() -> void:
@@ -4437,6 +4484,12 @@ func rebuild_weapon_from_cards() -> void:
 	mag = weapon.get_mag_size()
 	_update_gun_visuals()
 	_update_body_scale()
+	# Round-start growth moment: a card was picked since the gun last showed
+	# its final form — morph from the previous form into the new one right as
+	# everyone drops back in.
+	if _owned_cards.size() > _grown_card_count:
+		_play_card_growth()
+	_grown_card_count = _owned_cards.size()
 
 
 @rpc("any_peer", "call_local", "reliable")
@@ -4477,6 +4530,7 @@ func _gravity_mult() -> float:
 func reset_weapon() -> void:
 	weapon.reset()
 	_owned_cards.clear()
+	_grown_card_count = 0
 	mag = weapon.get_mag_size()
 	_reset_weapon_combat_state()
 	_phoenix_charges_left = weapon.phoenix_revives
@@ -4508,6 +4562,11 @@ func _setup_gun_visuals() -> void:
 	_procedural_gun = preload("res://scripts/procedural_gun.gd").new()
 	_procedural_gun.name = "ProceduralGun"
 	muzzle.add_child(_procedural_gun)
+	_demon_growth = DemonGrowth.new()
+	_demon_growth.name = "DemonGrowth"
+	_demon_growth.gun_path = NodePath("../ProceduralGun")
+	_demon_growth.corruption = 0.0
+	muzzle.add_child(_demon_growth)
 
 func _update_gun_visuals() -> void:
 	# Push the current weapon stats into the procedural gun. All
@@ -4520,6 +4579,53 @@ func _update_gun_visuals() -> void:
 		var pull: float = clampf((bl - 0.5) * 0.3, 0.0, 0.3)
 		_gun_pull_back = Vector3(0.0, 0.0, pull)
 	_update_third_person_gun_visuals()
+	# Corruption tracks how far the weapon has mutated from stock — the gun
+	# grows more alive as cards stack. Set AFTER apply_weapon_stats on both
+	# guns: the growth reads the gun's final geometry when it rebuilds.
+	var corruption := DemonGrowth.corruption_from_weapon(weapon)
+	if _demon_growth:
+		_demon_growth.corruption = corruption
+	if _third_person_demon_growth:
+		_third_person_demon_growth.corruption = corruption
+
+# Rebuild the weapon as it was before the newest card, then animate both guns
+# (and their flesh) from that form into the current one — timed with the
+# round-start sky drop so the player watches their gun grow mid-fall.
+func _play_card_growth(duration: float = 1.5) -> void:
+	if _owned_cards.is_empty():
+		return
+	var from_w := Weapon.new()
+	for card_id in _owned_cards.slice(0, _owned_cards.size() - 1):
+		var card := CardLibrary.by_id(str(card_id))
+		if card.is_empty():
+			continue
+		card.apply.call(from_w)
+	_animate_gun_growth(from_w, duration)
+
+func _animate_gun_growth(from_w: Weapon, duration: float = 2.0) -> void:
+	if from_w == null:
+		return
+	if _procedural_gun and _procedural_gun.has_method("animate_weapon_growth"):
+		_procedural_gun.animate_weapon_growth(from_w, weapon, duration)
+	if _third_person_procedural_gun and _third_person_procedural_gun.has_method("animate_weapon_growth"):
+		_third_person_procedural_gun.animate_weapon_growth(from_w, weapon, duration)
+	var c_from := DemonGrowth.corruption_from_weapon(from_w)
+	var c_to := DemonGrowth.corruption_from_weapon(weapon)
+	if _demon_growth:
+		_demon_growth.animate_corruption(c_from, c_to, duration)
+	if _third_person_demon_growth:
+		_third_person_demon_growth.animate_corruption(c_from, c_to, duration)
+
+# True while a round is actively being played (or in a lab scene exposing
+# state == PLAYING). During PICKING_CARD we defer growth to round start.
+func _is_round_playing() -> bool:
+	var scene := get_tree().current_scene
+	if scene == null:
+		return true
+	var st: Variant = scene.get("state")
+	if st == null:
+		return true
+	return int(st) == 1  # Game.State.PLAYING
 
 func _update_body_scale() -> void:
 	# BodyModel holds the visual mesh parts; hitboxes are siblings under the
