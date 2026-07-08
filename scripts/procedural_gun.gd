@@ -229,6 +229,20 @@ var _bolt_back: float = 0.0
 var _bolt_travel: float = 0.0
 var _bolt_cycle_seconds: float = 0.08
 
+# --- Growth animation state ---
+# Card-pick "the gun grows" moment: lerp the previous Weapon's stats into the
+# new ones and re-run apply_weapon_stats at a bounded cadence, so barrels
+# stretch, receivers swell and new parts pop in over ~2s instead of snapping.
+# _grow_to is the player's LIVE Weapon (held by reference), so stat pushes
+# that land mid-animation (round modifiers) fold into the final form.
+var _grow_from: Weapon = null
+var _grow_to: Weapon = null
+var _grow_elapsed: float = 0.0
+var _grow_duration: float = 2.0
+var _grow_next_apply: float = 0.0
+var _grow_applying: bool = false
+const GROW_APPLY_INTERVAL := 1.0 / 24.0  # rebuild cadence — per-frame would thrash meshes
+
 func _ready() -> void:
 	_rebuild()
 	_request_preview()
@@ -249,6 +263,19 @@ func _process(delta: float) -> void:
 		_barrel_spin *= exp(-2.5 * delta)
 	if Engine.is_editor_hint():
 		return
+	# Growth animation — re-apply lerped stats at a bounded cadence.
+	if _grow_to != null:
+		_grow_elapsed += delta
+		if _grow_elapsed >= _grow_duration:
+			var final_w := _grow_to
+			_grow_from = null
+			_grow_to = null
+			apply_weapon_stats(final_w)
+		elif _grow_elapsed >= _grow_next_apply:
+			_grow_next_apply = _grow_elapsed + GROW_APPLY_INTERVAL
+			_grow_applying = true
+			apply_weapon_stats(_lerp_weapon(_grow_from, _grow_to, _grow_ease(_grow_elapsed / _grow_duration)))
+			_grow_applying = false
 	# Heat — exponential decay. Snappier than linear and matches how a hot
 	# object actually radiates away energy.
 	if heat > 0.0:
@@ -468,6 +495,11 @@ func _update_heat_visual() -> void:
 func apply_weapon_stats(w: Weapon) -> void:
 	if w == null:
 		return
+	if not _grow_applying and _grow_to != null:
+		if w == _grow_to:
+			return  # growth animation in flight — it lands on these stats
+		_grow_from = null
+		_grow_to = null  # retargeted to a different weapon — cancel the morph
 	_suppress_rebuild = true
 
 	# Barrel length curve: a steep power so the default gun stays modest and
@@ -542,6 +574,53 @@ func apply_weapon_stats(w: Weapon) -> void:
 
 func get_muzzle_exit_local() -> Vector3:
 	return _muzzle_exit_local
+
+# Start a ~2s morph from one weapon's visual form into another's (see the
+# growth-animation state block above). Pass the player's live Weapon as
+# `to_w` so late stat pushes retarget instead of cancelling.
+func animate_weapon_growth(from_w: Weapon, to_w: Weapon, duration: float = 2.0) -> void:
+	if from_w == null or to_w == null or Engine.is_editor_hint():
+		return
+	_grow_from = from_w
+	_grow_to = to_w
+	_grow_duration = maxf(0.1, duration)
+	_grow_elapsed = 0.0
+	_grow_next_apply = 0.0
+	# Snap to the OLD form right now — callers apply the final stats before
+	# arming the morph, and even one rendered frame of the finished gun
+	# spoils the reveal.
+	_grow_applying = true
+	apply_weapon_stats(_lerp_weapon(from_w, to_w, 0.0))
+	_grow_applying = false
+
+func is_growing() -> bool:
+	return _grow_to != null
+
+# easeInOutBack — anticipation squash below zero at the start (the gun
+# tenses), rapid growth through the middle of the fall, ~9% overshoot near
+# the end, settled just before landing. easeOutBack was wrong here: it hits
+# ~100% at t≈0.4, so the morph looked already-finished by the time the
+# player's screen caught up with the round transition.
+static func _grow_ease(t: float) -> float:
+	t = clampf(t, 0.0, 1.0)
+	var c2: float = 1.70158 * 1.525
+	if t < 0.5:
+		return (4.0 * t * t * ((c2 + 1.0) * 2.0 * t - c2)) * 0.5
+	var u: float = 2.0 * t - 2.0
+	return (u * u * ((c2 + 1.0) * u + c2) + 2.0) * 0.5
+
+# Blend only the fields apply_weapon_stats reads; everything else stays at
+# Weapon defaults. The ease overshoots (t > 1), so clamp hard floors.
+static func _lerp_weapon(a: Weapon, b: Weapon, t: float) -> Weapon:
+	var w := Weapon.new()
+	w.spread = maxf(0.0, lerpf(a.spread, b.spread, t))
+	w.bullet_scale = maxf(0.05, lerpf(a.bullet_scale, b.bullet_scale, t))
+	w.damage_mult = maxf(0.05, lerpf(a.damage_mult, b.damage_mult, t))
+	w.fire_rate_mult = maxf(0.05, lerpf(a.fire_rate_mult, b.fire_rate_mult, t))
+	w.mag_size_bonus = int(round(lerpf(float(a.mag_size_bonus), float(b.mag_size_bonus), t)))
+	w.extra_projectiles = maxi(0, int(round(lerpf(float(a.extra_projectiles), float(b.extra_projectiles), t))))
+	w.explosive_radius = maxf(0.0, lerpf(a.explosive_radius, b.explosive_radius, t))
+	return w
 
 # ---- Build ----
 # Forward is local -Z (Godot convention); +Y up; +X right.

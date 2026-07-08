@@ -1170,17 +1170,17 @@ func get_coop_revive_channel(reviver_id: int) -> Dictionary:
 	return coop_revive_channels.get(reviver_id, {})
 
 
-func _sky_drop_spawn(preferred_ground: Vector3, player_id: int, avoid: Array[Vector3] = []) -> Dictionary:
-	var yaw := 0.0
-	var p := players_root.get_node_or_null(str(player_id))
-	if p:
-		yaw = p.rotation.y
+func _sky_drop_spawn(preferred_ground: Vector3, player_id: int, avoid: Array[Vector3] = [], height: float = 60.0) -> Dictionary:
 	var ground := preferred_ground
 	if not _spawn_is_valid(ground):
 		var pick := _pick_spawn(avoid if not avoid.is_empty() else _current_player_positions())
 		ground = pick["pos"]
-		yaw = pick["yaw"]
-	return {"pos": ground + Vector3(0.0, 60.0, 0.0), "yaw": yaw, "ground": ground}
+	# Always face the arena center on the way down — inheriting the player's
+	# stale yaw from last round left them staring at the crowd wall.
+	var arena: Node = get_node_or_null("Arena")
+	var arena_origin: Vector3 = (arena as Node3D).global_position if arena and arena is Node3D else Vector3.ZERO
+	var yaw := _spawn_yaw_at(ground, arena_origin)
+	return {"pos": ground + Vector3(0.0, height, 0.0), "yaw": yaw, "ground": ground}
 
 
 func _coop_reviver_for(victim_id: int, corpse_pos: Vector3) -> int:
@@ -2140,11 +2140,12 @@ func _start_round_now() -> void:
 		var pick := _pick_spawn(used)
 		used.append(pick["pos"])
 		p.set_ghost_mode.rpc(false)
-		# Rocket-spawn: catch the player ~60m above the landing spot already
-		# moving at terminal speed (80 m/s constant — no gravity ramp). 0.75s
-		# from spawn to impact. Each player auto-ends their launch on first
+		# Rocket-spawn: catch the player ~120m above the landing spot already
+		# moving at terminal speed (80 m/s constant — no gravity ramp), ~1.5s
+		# from spawn to impact — long enough to watch the card-growth morph
+		# finish on the way down. Each player auto-ends their launch on first
 		# floor contact, so there's no central timer gating the round start.
-		var drop := _sky_drop_spawn(pick["pos"], int(p.get("player_id")), used)
+		var drop := _sky_drop_spawn(pick["pos"], int(p.get("player_id")), used, 120.0)
 		p.server_respawn.rpc(drop["pos"], drop["yaw"])
 		_apply_coop_spawn_health(p)
 		# Clear any leftover freeze (e.g. losers were frozen during card-pick
