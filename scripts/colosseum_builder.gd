@@ -237,6 +237,60 @@ static func _build_roof(root: Node3D, inner_r: float, base_y: float, stone: Colo
 	mmi.material_override = mat
 	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	root.add_child(mmi)
+	_build_roof_lamps(root, inner_r, wall_h, roof_len)
+
+
+# Lamp ring under the canopy's inner lip: warm emissive housings every other
+# segment (one MultiMesh — they bloom via the arena env glow) plus a handful
+# of real shadowless OmniLights spread around the ring so the upper bowl and
+# crowd are actually lit, not just decorated.
+static func _build_roof_lamps(root: Node3D, inner_r: float, wall_h: float, roof_len: float) -> void:
+	var seg_ang := TAU / float(SEGMENTS)
+	var lip_r_base := inner_r + float(ROWS) * ROW_DEPTH + 1.0 - roof_len
+	var lip_y := wall_h + 0.6 - ROOF_DROP - 0.7
+	var xforms: Array[Transform3D] = []
+	for i in SEGMENTS:
+		if i % 2 != 0:
+			continue
+		var ang := seg_ang * (float(i) + 0.5)
+		var dir := Vector3(cos(ang), 0.0, sin(ang))
+		var yaw := -ang + PI * 0.5
+		xforms.append(_box_xform(
+			dir * (lip_r_base * _sq(ang)) + Vector3(0.0, lip_y, 0.0),
+			Vector3(1.6, 0.55, 0.55), yaw))
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.mesh = BoxMesh.new()
+	mm.instance_count = xforms.size()
+	for i in xforms.size():
+		mm.set_instance_transform(i, xforms[i])
+	var mmi := MultiMeshInstance3D.new()
+	mmi.name = "RoofLamps"
+	mmi.multimesh = mm
+	var lamp_mat := StandardMaterial3D.new()
+	lamp_mat.albedo_color = Color(1.0, 0.9, 0.7)
+	lamp_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	lamp_mat.emission_enabled = true
+	lamp_mat.emission = Color(1.0, 0.85, 0.6)
+	lamp_mat.emission_energy_multiplier = 5.5
+	mmi.material_override = lamp_mat
+	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	root.add_child(mmi)
+	if Engine.is_editor_hint():
+		return
+	# Real light: 8 warm omnis around the ring (shadowless — cheap in the
+	# forward+ cluster next to the arena's existing torch omnis).
+	for i in 8:
+		var ang := TAU * (float(i) + 0.5) / 8.0
+		var dir := Vector3(cos(ang), 0.0, sin(ang))
+		var light := OmniLight3D.new()
+		light.position = dir * (lip_r_base * _sq(ang) - 2.0) + Vector3(0.0, lip_y - 1.0, 0.0)
+		light.light_color = Color(1.0, 0.87, 0.65)
+		light.light_energy = 1.8
+		light.omni_range = 30.0
+		light.shadow_enabled = false
+		light.light_specular = 0.2
+		root.add_child(light)
 
 
 # Floodlight towers on the four squircle corners: a shaft up past the roof
@@ -254,7 +308,7 @@ static func _build_light_towers(root: Node3D, inner_r: float, base_y: float) -> 
 	bank_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	bank_mat.emission_enabled = true
 	bank_mat.emission = Color(1.0, 0.96, 0.85)
-	bank_mat.emission_energy_multiplier = 2.6
+	bank_mat.emission_energy_multiplier = 6.5  # hot enough to bloom via env glow
 	for i in LIGHT_TOWER_COUNT:
 		var ang := TAU * (float(i) + 0.5) / float(LIGHT_TOWER_COUNT)  # corners
 		var s := _sq(ang)
@@ -283,8 +337,8 @@ static func _build_light_towers(root: Node3D, inner_r: float, base_y: float) -> 
 			var spot := SpotLight3D.new()
 			spot.position = bank.position
 			spot.spot_range = r + 30.0
-			spot.spot_angle = 32.0
-			spot.light_energy = 3.0
+			spot.spot_angle = 38.0
+			spot.light_energy = 5.0
 			spot.light_color = Color(1.0, 0.96, 0.86)
 			spot.shadow_enabled = false
 			spot.light_specular = 0.2
