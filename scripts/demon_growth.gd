@@ -33,10 +33,10 @@ var _iris: MeshInstance3D = null
 var _pupil: MeshInstance3D = null
 var _lid: MeshInstance3D = null
 var _eye_r: float = 0.03
-# Default gaze: out of the eye's (-X) side, tilted back toward the wielder —
+# Default gaze: out of the eye's (+X) side, tilted back toward the wielder —
 # reads as an eye from frame one, and "it watches you" is the right flavor.
-var _look_current := Vector3(-0.75, 0.1, 0.45).normalized()
-var _look_target := Vector3(-0.75, 0.1, 0.45).normalized()
+var _look_current := Vector3(0.75, 0.1, 0.45).normalized()
+var _look_target := Vector3(0.75, 0.1, 0.45).normalized()
 var _next_look: float = 1.0
 var _blink: float = 0.0        # 0 open .. 1 closed
 var _blink_phase: float = -1.0 # <0 idle, else progresses 0..1 over blink
@@ -174,11 +174,11 @@ func rebuild() -> void:
 
 	# --- Stage 3 (c > 0.35): the eye ---
 	if c > 0.35:
-		# Left (-X) side: that's the face the player sees in FPV (gun sits
-		# right of screen center) and the spectator-side in kill cams.
+		# Right (+X) side: the flank the inspect pose turns toward the camera
+		# (the muzzle yaws LEFT during the card-growth moment).
 		_eye_r = lerpf(0.022, 0.04, c)
-		var eye_pos := Vector3(-(rs.x * 0.5 + _eye_r * 0.55), rs.y * 0.18, -rs.z * 0.1)
-		_add_flesh_sphere("Socket", _eye_r * 1.5, eye_pos + Vector3(_eye_r * 0.45, 0, 0), Vector3(0.7, 1.1, 1.1))
+		var eye_pos := Vector3(rs.x * 0.5 + _eye_r * 0.55, rs.y * 0.18, -rs.z * 0.1)
+		_add_flesh_sphere("Socket", _eye_r * 1.5, eye_pos + Vector3(-_eye_r * 0.45, 0, 0), Vector3(0.7, 1.1, 1.1))
 		_eye_root = Node3D.new()
 		_eye_root.name = "Eye"
 		_eye_root.position = eye_pos
@@ -251,7 +251,7 @@ func _process(delta: float) -> void:
 	if _next_look <= 0.0:
 		_next_look = randf_range(0.6, 2.6)
 		_look_target = Vector3(
-			randf_range(-1.0, 0.3),  # biased outward from the receiver
+			randf_range(-0.3, 1.0),  # biased outward from the receiver (+X side)
 			randf_range(-0.5, 0.5),
 			randf_range(-1.0, 0.6)).normalized()  # +Z glances = looks at its wielder
 	_look_current = _look_current.lerp(_look_target, 1.0 - exp(-10.0 * delta)).normalized()

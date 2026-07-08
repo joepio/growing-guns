@@ -1767,6 +1767,7 @@ func _physics_process(delta: float) -> void:
 
 	if frozen:
 		velocity = Vector3.ZERO
+		_update_gun_inspect(delta)
 		return
 
 	if _phoenix_ascending:
@@ -1878,6 +1879,27 @@ func _apply_camera_aim_rotation() -> void:
 	camera.rotation.y = _view_punch_rot.y
 	camera.rotation.z = deg_to_rad(tilt_z) + _view_punch_rot.z
 
+# Card-growth inspect: while the first-person gun is mid-growth, pull it
+# toward screen center and yaw the muzzle LEFT so the right flank (where the
+# eye grows) squares up to the camera. Pure viewmodel motion on the gun
+# nodes — the muzzle stays authoritative for fire direction. Called from
+# _update_gun_feel AND from the frozen branch of _physics_process: the morph
+# plays inside the spawn cage, where the player is frozen and normal gun
+# feel is skipped.
+func _update_gun_inspect(delta: float) -> void:
+	var inspecting: bool = _show_first_person_gun() and _procedural_gun != null \
+		and _procedural_gun.has_method("is_growing") and _procedural_gun.is_growing()
+	_gun_inspect = lerpf(_gun_inspect, 1.0 if inspecting else 0.0, clampf(delta * 5.0, 0.0, 1.0))
+	if _procedural_gun:
+		var s: float = _gun_inspect if _gun_inspect > 0.001 else 0.0
+		var inspect_pos := Vector3(-0.14, 0.04, 0.14) * s
+		var inspect_rot := Vector3(0.12, 1.0, 0.08) * s
+		_procedural_gun.position = inspect_pos
+		_procedural_gun.rotation = inspect_rot
+		if _demon_growth:
+			_demon_growth.position = inspect_pos
+			_demon_growth.rotation = inspect_rot
+
 func _update_gun_feel(delta: float) -> void:
 	# --- Gun feel: walk bob, jump bump, strafe tilt ---
 	# Phase advances by π per STEP_STRIDE meters travelled — one bob per
@@ -1904,26 +1926,7 @@ func _update_gun_feel(delta: float) -> void:
 	# Don't fight the melee tween while it's running.
 	if not (_melee_tween and _melee_tween.is_valid()):
 		muzzle.rotation.z = _gun_tilt_z
-	# Card-growth inspect: while the first-person gun is mid-growth, swing it
-	# toward screen center with its left flank (the eye side) facing the
-	# camera so the player actually sees the morph. Pure viewmodel motion on
-	# the gun nodes — the muzzle stays authoritative for fire direction.
-	var inspecting: bool = _show_first_person_gun() and _procedural_gun != null \
-		and _procedural_gun.has_method("is_growing") and _procedural_gun.is_growing()
-	_gun_inspect = lerpf(_gun_inspect, 1.0 if inspecting else 0.0, clampf(delta * 5.0, 0.0, 1.0))
-	if _procedural_gun:
-		var s: float = _gun_inspect if _gun_inspect > 0.001 else 0.0
-		# Pull toward screen center and yaw the muzzle to the RIGHT so the
-		# gun's LEFT flank (where the eye grows) squares up to the camera.
-		# Rolling around the barrel axis showed the top instead — roll can
-		# never bring a side flank to face the viewer.
-		var inspect_pos := Vector3(-0.16, 0.04, 0.12) * s
-		var inspect_rot := Vector3(0.12, -1.0, -0.08) * s
-		_procedural_gun.position = inspect_pos
-		_procedural_gun.rotation = inspect_rot
-		if _demon_growth:
-			_demon_growth.position = inspect_pos
-			_demon_growth.rotation = inspect_rot
+	_update_gun_inspect(delta)
 	# Height scales with body_scale (and the per-axis Y warp) so the viewpoint
 	# follows the taller head — SLENDERMAN sees the world from way up high.
 	var cam_y: float = (_camera_rest_pos.y * maxf(0.1, weapon.body_scale) * maxf(0.1, weapon.body_scale_axes.y)) - _landing_bump_y
