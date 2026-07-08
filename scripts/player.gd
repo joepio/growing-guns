@@ -4531,6 +4531,10 @@ func apply_card(card_id: String) -> void:
 	# real card-pick screen (state == PICKING_CARD) the growth is deferred to
 	# the round-start rebuild so it plays during the sky drop instead.
 	var grow_from: Weapon = weapon.duplicate() if _is_round_playing() else null
+	if grow_from != null:
+		# duplicate() shares Array references — snapshot the card list before
+		# the append below mutates it, or the growth delta reads as zero.
+		grow_from.applied_cards = weapon.applied_cards.duplicate()
 	card.apply.call(weapon)
 	_owned_cards.append(card_id)
 	weapon.applied_cards.append(card_id)
@@ -4679,6 +4683,8 @@ func _play_card_growth(duration: float = 1.5) -> void:
 		if card.is_empty():
 			continue
 		card.apply.call(from_w)
+		# corruption_from_weapon paces flesh by card count — keep it honest.
+		from_w.applied_cards.append(str(card_id))
 	_animate_gun_growth(from_w, duration)
 
 func _animate_gun_growth(from_w: Weapon, duration: float = 2.0) -> void:
