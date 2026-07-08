@@ -136,6 +136,7 @@ var _grown_card_count: int = 0
 # the whole animation before the player's first visible frame.
 var _pending_card_growth: bool = false
 var _gun_inspect: float = 0.0  # 0..1 "look at the growing gun" viewmodel blend
+var _spawn_cage: Node3D = null  # round-start cage (spawn_cage.gd), lives in players_root
 var _ragdoll_pieces: Array[Node] = []
 var _blood_wounds: Array[Node] = []
 
@@ -4288,6 +4289,55 @@ func set_frozen(f: bool) -> void:
 		velocity = Vector3.ZERO
 	elif is_multiplayer_authority() and not is_bot:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+
+# Round-start gladiator cage: freeze in place inside a hanging cage while the
+# card-growth morph plays; game.gd releases everyone together a beat later.
+# Frozen physics means the cage needs no collision — it's pure set dressing,
+# built locally on every peer from this broadcast.
+@rpc("any_peer", "call_local", "reliable")
+func enter_spawn_cage() -> void:
+	var sender := multiplayer.get_remote_sender_id()
+	if sender != 1 and sender != 0:
+		return
+	frozen = true
+	velocity = Vector3.ZERO
+	_clear_spawn_cage()
+	var cage := SpawnCage.new()
+	cage.name = "SpawnCage_%d" % player_id
+	get_parent().add_child(cage)
+	# Player origin is capsule-center; the cage floor sits just under the feet.
+	cage.global_position = global_position + Vector3(0.0, -1.1, 0.0)
+	_spawn_cage = cage
+	# The gun grows while the crowd waits for the floor to drop.
+	if _pending_card_growth:
+		_pending_card_growth = false
+		_play_card_growth()
+
+
+@rpc("any_peer", "call_local", "reliable")
+func release_spawn_cage() -> void:
+	var sender := multiplayer.get_remote_sender_id()
+	if sender != 1 and sender != 0:
+		return
+	frozen = false
+	if is_multiplayer_authority() and not is_bot:
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	if _spawn_cage and is_instance_valid(_spawn_cage):
+		_spawn_cage.open()  # cage frees itself after the winch-up
+	_spawn_cage = null
+
+
+func _clear_spawn_cage() -> void:
+	if _spawn_cage and is_instance_valid(_spawn_cage):
+		_spawn_cage.queue_free()
+	_spawn_cage = null
+
+
+func _exit_tree() -> void:
+	# The cage lives in players_root, not under us — free it when this player
+	# despawns mid-hold so it doesn't dangle from the sky forever.
+	_clear_spawn_cage()
 
 
 @rpc("any_peer", "call_local", "reliable")
