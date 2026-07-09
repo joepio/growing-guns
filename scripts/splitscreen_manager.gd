@@ -49,6 +49,46 @@ func enable(primary_device: int = -1) -> void:
 	update_views.call_deferred()
 
 
+# Tear splitscreen back down to plain single-view play: kick every joined
+# splitscreen player (remote peers and the host survive), free the grid /
+# renderers / listener, restore the host to first-person, and bring back the
+# game's normal single renderer.
+func disable() -> void:
+	if not _enabled:
+		return
+	for device in _players_by_device.keys().duplicate():
+		_leave_player(int(device))
+	_enabled = false
+	NetworkManager.set_meta("splitscreen_on_start", false)
+	NetworkManager.set_meta("splitscreen_primary_device", -1)
+	_primary_device = -1
+	for id in _renderers_by_player.keys().duplicate():
+		_remove_renderer(int(id))
+	if _audio_listener and is_instance_valid(_audio_listener):
+		_audio_listener.queue_free()
+	_audio_listener = null
+	if _layer and is_instance_valid(_layer):
+		_layer.queue_free()
+	_layer = null
+	_grid = null
+	_join_label = null
+	_pause_menu = null
+	_pause_buttons.clear()
+	var primary_id := multiplayer.get_unique_id()
+	var player: Node = _game.players_root.get_node_or_null(str(primary_id))
+	if player:
+		player.set("split_screen_local", false)
+		player.set("local_input_device", -1)
+		if player.has_method("_refresh_authority_view"):
+			player._refresh_authority_view()
+		if player.has_method("_sync_weapon_visibility"):
+			player._sync_weapon_visibility()
+	if _game.has_method("_ensure_render_player"):
+		_game._ensure_render_player(primary_id, -1)
+	if _game.has_method("_update_scoreboard"):
+		_game._update_scoreboard()
+
+
 func _ready() -> void:
 	_enabled = NetworkManager.has_meta("splitscreen_on_start") \
 		and NetworkManager.get_meta("splitscreen_on_start")

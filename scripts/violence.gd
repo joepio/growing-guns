@@ -354,7 +354,13 @@ static func gib_explode(
 	var out: Array[RigidBody3D] = []
 	if mesh == null or scene == null:
 		return out
+	# Bucketed separately from death_gibs: a non-zero gib_bake means the
+	# Voronoi cache MISSED and we baked synchronously mid-death — i.e. this
+	# mesh was never warmed (or was regenerated after its warm).
+	var _tv := Time.get_ticks_usec() if Trace.enabled else 0
 	var variants: Array = _gib_get_variants(mesh, chunk_count)
+	if Trace.enabled:
+		Trace.prof("gib_bake", Time.get_ticks_usec() - _tv)
 	if variants.is_empty():
 		return out
 	var chunks: Array = variants.pick_random()

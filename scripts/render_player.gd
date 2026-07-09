@@ -11,6 +11,12 @@ const HUD_ICON_SCRIPT := preload("res://scripts/hud_icon.gd")
 const PICKUP_ITEM_SCRIPT := preload("res://scripts/pickup_item.gd")
 const ROUND_MODIFIERS_SCRIPT := preload("res://scripts/round_modifiers.gd")
 const PLAYER_VISUAL_LAYER_BASE := 8
+# Per-view first-person gun layers (render layer bits 1..7). Each local
+# view's camera includes ONLY its own FP-gun bit, so every splitscreen player
+# sees their own first-person rig and nobody else's floating gun. Body layers
+# use bits 8..18 (above), the stadium TV screens bit 19.
+const FP_GUN_LAYER_BASE := 1
+const FP_GUN_LAYER_MASK := 0b11111110  # bits 1..7
 # Higher than the gameplay look-deadzone — casual stick drift shouldn't
 # advance the selection while the card pick UI is up.
 const CARD_NAV_STICK_DEADZONE := 0.55
@@ -1263,7 +1269,13 @@ func _player() -> Node3D:
 func _apply_owner_cull(player: Node) -> void:
 	var owner_bit := _player_layer_bit(player_id)
 	_assign_player_visual_layer(player, owner_bit)
-	camera.cull_mask = 0xfffff & ~owner_bit
+	# FP rig onto this view's gun layer. Re-walked every frame (writes only on
+	# change) because the procedural gun rebuilds its meshes on every card.
+	var fp_bit := _fp_gun_layer_bit(player_id)
+	var fp_rig := player.get_node_or_null("Camera/Muzzle")
+	if fp_rig:
+		_set_fp_layer_recursive(fp_rig, fp_bit)
+	camera.cull_mask = (0xfffff & ~owner_bit & ~FP_GUN_LAYER_MASK) | fp_bit
 
 
 func _assign_player_visual_layer(player: Node, layer_bit: int) -> void:
@@ -1288,3 +1300,18 @@ func _player_layer_bit(id: int) -> int:
 	if id >= 10000:
 		return 1 << (PLAYER_VISUAL_LAYER_BASE + 1 + posmod(id - 10000, 10))
 	return 1 << PLAYER_VISUAL_LAYER_BASE
+
+
+func _fp_gun_layer_bit(id: int) -> int:
+	if id >= 10000:
+		return 1 << (FP_GUN_LAYER_BASE + 1 + posmod(id - 10000, 6))
+	return 1 << FP_GUN_LAYER_BASE
+
+
+func _set_fp_layer_recursive(node: Node, layer_bit: int) -> void:
+	if node is VisualInstance3D:
+		var vi := node as VisualInstance3D
+		if vi.layers != layer_bit:
+			vi.layers = layer_bit
+	for child in node.get_children():
+		_set_fp_layer_recursive(child, layer_bit)

@@ -1575,6 +1575,9 @@ func _do_spawn(
 	# being in-tree.
 	p.global_position = pos
 	p.rotation.y = yaw
+	# Physics interpolation would otherwise smear the spawn across one frame
+	# (interpolating from wherever the node was before the position write).
+	p.reset_physics_interpolation()
 	# Match the freshly-spawned player's flashlight to the active round modifier.
 	if p.has_method("set_flashlight_active"):
 		p.set_flashlight_active(current_round_modifier == "blackout")
@@ -2046,6 +2049,9 @@ func _broadcast_ping_ms(pings: Dictionary) -> void:
 
 @rpc("authority", "call_local", "reliable")
 func _set_game_state(new_state: int) -> void:
+	# Client-side breadcrumb: state changes land in every peer's log file, so
+	# a frozen/crashed client's godot.log shows where its round flow stopped.
+	Trace.mark("state -> %d (round %d, wave %d)" % [new_state, current_round, coop_wave])
 	state = new_state
 
 
@@ -4217,6 +4223,10 @@ func _update_explosion_sidechain(delta: float) -> void:
 	_sidechain_pressure = move_toward(_sidechain_pressure, 0.0, SIDECHAIN_PRESSURE_DECAY * delta)
 
 func show_death_effect_for(player_id: int, show: bool) -> void:
+	# Breadcrumb for the stuck-red-screen class of client freezes: if a log
+	# ends with show=true and never hides, the death overlay was the last
+	# thing standing when the render thread died.
+	Trace.mark("death effect %s (player %d)" % ["SHOW" if show else "hide", player_id])
 	if _splitscreen and _splitscreen.is_enabled() and _splitscreen.has_method("show_death_effect_for"):
 		if _splitscreen.show_death_effect_for(player_id, show):
 			return
@@ -4593,6 +4603,7 @@ func _toggle_pause_menu() -> void:
 		_update_join_form()
 		_refresh_bot_counter()
 		_refresh_pause_mode_buttons()
+		_refresh_pause_splitscreen_btn()
 		_sync_mouse_mode()
 		MenuHelpers.grab_first_menu_focus(_pause_menu)
 		# Pause the world if this is a solo match (local player + bots only).
@@ -4796,8 +4807,9 @@ func _build_pause_menu() -> void:
 	var splitscreen_btn := Button.new()
 	splitscreen_btn.text = "SPLITSCREEN"
 	splitscreen_btn.custom_minimum_size = Vector2(0, 32)
-	splitscreen_btn.pressed.connect(_pause_start_splitscreen)
+	splitscreen_btn.pressed.connect(_pause_toggle_splitscreen)
 	vb.add_child(splitscreen_btn)
+	_pause_splitscreen_btn = splitscreen_btn
 
 	var settings_btn := Button.new()
 	settings_btn.text = "SETTINGS"
@@ -4851,6 +4863,7 @@ func _build_pause_menu() -> void:
 # below so we don't need to walk the scene tree to find them.
 var _pause_versus_btn: Button = null
 var _pause_wave_btn: Button = null
+var _pause_splitscreen_btn: Button = null
 var _pause_id_field: LineEdit = null
 var _pause_host_button: Button = null
 var _pause_copy_button: Button = null
@@ -5054,6 +5067,26 @@ func _pause_join() -> void:
 			_on_network_status_changed(NetworkManager.last_network_error, true)
 		return
 	get_tree().change_scene_to_file("res://scenes/game.tscn")
+
+
+func _refresh_pause_splitscreen_btn() -> void:
+	if _pause_splitscreen_btn:
+		_pause_splitscreen_btn.text = (
+			"STOP SPLITSCREEN" if (_splitscreen and _splitscreen.is_enabled())
+			else "SPLITSCREEN")
+
+
+func _pause_toggle_splitscreen() -> void:
+	if _splitscreen and _splitscreen.is_enabled():
+		_splitscreen.disable()
+		_refresh_pause_splitscreen_btn()
+		if _pause_menu and _pause_menu.visible:
+			_toggle_pause_menu()
+		get_tree().paused = false
+		_sync_mouse_mode()
+		_announce("SPLITSCREEN OFF", 2.0)
+		return
+	_pause_start_splitscreen()
 
 
 func _pause_start_splitscreen() -> void:
