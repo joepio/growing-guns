@@ -967,14 +967,21 @@ func _update_blob_motion(delta: float) -> void:
 		hand_anchor.position = hand_anchor.position.lerp(hand_target, clampf(delta * 10.0, 0.0, 1.0))
 
 func _show_first_person_gun() -> bool:
-	return is_multiplayer_authority() and not is_bot and not split_screen_local
+	# Splitscreen locals included: render_player.gd puts the FP rig on a
+	# per-view gun layer that ONLY the owning view's camera renders, so rigs
+	# never bleed across splitscreen views (which is why this used to exclude
+	# split_screen_local — leaving those players with no visible gun at all).
+	return is_multiplayer_authority() and not is_bot
 
 
 func _sync_weapon_visibility() -> void:
 	var blocked := ghost_mode or coop_downed or _coop_phoenix_held \
 		or _phoenix_ascending or _hell_emerging or health <= 0
 	var show_fp := _show_first_person_gun() and not blocked
-	var show_tp := not show_fp and not blocked
+	# Splitscreen locals show BOTH rigs: FP for their own view (per-view gun
+	# layer) and third-person on the body for everyone else's views (the body
+	# layer is culled from their own camera).
+	var show_tp := (not show_fp or split_screen_local) and not blocked
 	if muzzle:
 		muzzle.visible = show_fp
 	if _procedural_gun:
@@ -986,7 +993,9 @@ func _sync_weapon_visibility() -> void:
 
 
 func _update_third_person_aim_pitch(delta: float) -> void:
-	if _third_person_gun == null or _show_first_person_gun():
+	# Visibility, not _show_first_person_gun(): splitscreen locals run BOTH
+	# rigs, and their third-person gun (seen by other views) must keep aiming.
+	if _third_person_gun == null or not _third_person_gun.visible:
 		return
 	var pitch := _aim_pitch()
 	var want_x := _third_person_gun_rest_rot.x + pitch
@@ -2118,6 +2127,7 @@ func _handle_fell_off_map() -> void:
 		return
 	if ghost_mode:
 		global_position = Vector3(0, 5, 0)
+		reset_physics_interpolation()
 		velocity = Vector3.ZERO
 		_last_sync_pos = Vector3.INF
 	else:
@@ -2376,7 +2386,6 @@ func _rifle_fired(
 		shooter_id == multiplayer.get_unique_id()
 		and is_multiplayer_authority()
 		and not is_bot
-		and not split_screen_local
 	)
 	var visual_anchor := muzzle if local_first_person else _third_person_shot_anchor()
 	if visual_anchor == null:
@@ -3201,6 +3210,7 @@ func _use_teleport() -> void:
 	var from: Vector3 = global_position
 	_teleport_fx.rpc(from, target)
 	global_position = target
+	reset_physics_interpolation()  # hard jump — don't smear across one frame
 	velocity = Vector3.ZERO
 	if weapon.teleport_blast_radius > 0.0:
 		_request_special_blast.rpc_id(1, from, weapon.teleport_blast_radius, 55.0, player_id, weapon.bullet_color)

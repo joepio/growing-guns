@@ -63,6 +63,22 @@ func _ready() -> void:
 	set_physics_process(true)
 	if enabled:
 		print("[trace] enabled — t0 set, spike threshold=%.1fms" % spike_ms)
+	# Machine fingerprint for crash forensics — file logging is on, so this
+	# header identifies whose log we're reading and on what GPU/driver.
+	# Deferred: the video adapter name can be empty before the first frame.
+	_print_fingerprint.call_deferred()
+
+
+func _print_fingerprint() -> void:
+	print("[boot] v%s | %s %s | %s | adapter=%s (%s, api %s) | headless=%s" % [
+		str(ProjectSettings.get_setting("application/config/version", "?")),
+		OS.get_name(), OS.get_version(),
+		OS.get_model_name(),
+		RenderingServer.get_video_adapter_name(),
+		RenderingServer.get_video_adapter_vendor(),
+		RenderingServer.get_video_adapter_api_version(),
+		str(DisplayServer.get_name() == "headless"),
+	])
 
 
 func _now() -> int:
