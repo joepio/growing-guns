@@ -2087,7 +2087,7 @@ func _maybe_start_match() -> void:
 		var p := players_root.get_node_or_null(str(pid))
 		if p:
 			p.reset_weapon.rpc()
-	_start_round_now()
+	_start_round_flashed()
 
 func get_gravity_mult() -> float:
 	return ROUND_MODIFIERS_SCRIPT.gravity_mult(current_round_modifier)
@@ -3412,7 +3412,7 @@ func _maybe_finish_card_picks() -> void:
 		current_round = coop_wave
 		_set_game_mode.rpc(game_mode, coop_wave)
 		_set_game_state.rpc(State.PLAYING)
-		_start_round_now()
+		_start_round_flashed()
 		return
 	for raw_loser_id in eliminated_players.keys():
 		var loser_id := int(raw_loser_id)
@@ -3420,7 +3420,7 @@ func _maybe_finish_card_picks() -> void:
 			return
 	current_round += 1
 	_set_game_state.rpc(State.PLAYING)
-	_start_round_now()
+	_start_round_flashed()
 
 func _peer_for_player(pid: int) -> int:
 	var p := players_root.get_node_or_null(str(pid))
@@ -3868,6 +3868,53 @@ func _build_retro_filter() -> void:
 	var built := RetroFilter.build(self)
 	_retro_layer = built["layer"] as CanvasLayer
 	_retro_material = built["material"] as ShaderMaterial
+
+# --- Round-start flash --------------------------------------------------
+# A deliberate camera-flash bumper covering the two long frames of the arena
+# swap (~100ms synchronous regeneration + ~110ms first-render buffer upload).
+# The white pops BEFORE the heavy frame and fades over 0.6s, so the hitch
+# happens behind an intentional broadcast flash instead of a visible freeze.
+var _round_flash_overlay: ColorRect = null
+var _round_flash_tween: Tween = null
+
+
+func _ensure_round_flash_overlay() -> void:
+	if _round_flash_overlay != null and is_instance_valid(_round_flash_overlay):
+		return
+	var flash_layer := CanvasLayer.new()
+	flash_layer.name = "RoundFlashLayer"
+	flash_layer.layer = 51  # above HUD and the explosion flash
+	add_child(flash_layer)
+	_round_flash_overlay = ColorRect.new()
+	_round_flash_overlay.name = "RoundFlashOverlay"
+	_round_flash_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_round_flash_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_round_flash_overlay.color = Color(1.0, 0.98, 0.94, 0.0)
+	flash_layer.add_child(_round_flash_overlay)
+
+
+@rpc("authority", "call_local", "reliable")
+func _round_start_flash() -> void:
+	_ensure_round_flash_overlay()
+	if _round_flash_tween != null and _round_flash_tween.is_valid():
+		_round_flash_tween.kill()
+	_round_flash_overlay.color.a = 1.0
+	_round_flash_tween = create_tween()
+	# Brief full-white hold covers the swap + first-render frames, then fade.
+	_round_flash_tween.tween_interval(0.25)
+	_round_flash_tween.tween_property(_round_flash_overlay, "color:a", 0.0, 0.45)\
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
+
+
+# Server-side round start with the flash on screen BEFORE the heavy frame:
+# flash everyone (reliable RPC ordering puts it ahead of the swap RPC on
+# clients too), render one frame so the white is actually visible, then run
+# the synchronous swap. Fire-and-forget coroutine — callers don't await.
+func _start_round_flashed() -> void:
+	_round_start_flash.rpc()
+	await get_tree().process_frame
+	_start_round_now()
+
 
 func _build_explosion_flash_overlay() -> void:
 	# Dedicated CanvasLayer above HUD so the flash covers ability bars, health,
