@@ -4550,8 +4550,16 @@ static func spawn_ragdoll(
 		if Trace.enabled:
 			Trace.prof("death_gore", Time.get_ticks_usec() - _tg)
 		var srcs: Array[MeshInstance3D] = []
+		# Never chunk the mounted weapon: the procedural gun's dozens of part
+		# meshes are regenerated as UNIQUE resources on every card pick, so
+		# the Voronoi cache has never seen them — chunking them baked
+		# synchronously mid-death (measured gib_bake ~25ms/frame over six
+		# frames). Gun shrapnel added nothing visually; flesh gibs are the show.
+		var tp_gun: Node = player.get("_third_person_gun") as Node
 		for src in meshes:
 			if src.mesh == null or _gib_is_cosmetic_mesh(src):
+				continue
+			if tp_gun != null and is_instance_valid(tp_gun) and tp_gun.is_ancestor_of(src):
 				continue
 			srcs.append(src)
 		# First batch synchronously — the death cam needs a chunk to follow
