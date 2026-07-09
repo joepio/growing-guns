@@ -52,6 +52,69 @@ var _anim_duration: float = 2.0
 var _anim_next: float = 0.0
 const ANIM_APPLY_INTERVAL := 1.0 / 20.0
 
+# --- Rebuild-invariant resource caches (static, process-wide) --------------
+# The growth morph rebuilds at 20 Hz during the card-pick cage descent, and
+# creating fresh meshes/materials every pass churned GPU buffer uploads hard
+# enough to visibly hitch the gun (and ~100ms on the big pick-time jump).
+# The layout is seeded — same corruption produces the same part sizes — so
+# quantized-key caches hit 100% after the first build.
+static var _shared_flesh_mat: ShaderMaterial = null
+static var _shared_bone_mat: StandardMaterial3D = null
+static var _mesh_cache: Dictionary = {}
+static var _eye_mat_cache: Dictionary = {}
+
+
+static func _cached_sphere(r: float, height: float = -1.0) -> SphereMesh:
+	var h := height if height > 0.0 else r * 2.0
+	var key := ["s", snappedf(r, 0.0005), snappedf(h, 0.0005)]
+	var m: SphereMesh = _mesh_cache.get(key)
+	if m == null:
+		m = SphereMesh.new()
+		m.radius = r
+		m.height = h
+		_mesh_cache[key] = m
+	return m
+
+
+static func _cached_cone(r: float, h: float) -> CylinderMesh:
+	var key := ["c", snappedf(r, 0.0005), snappedf(h, 0.0005)]
+	var m: CylinderMesh = _mesh_cache.get(key)
+	if m == null:
+		m = CylinderMesh.new()
+		m.top_radius = 0.0
+		m.bottom_radius = r
+		m.height = h
+		m.radial_segments = 6
+		_mesh_cache[key] = m
+	return m
+
+
+static func _cached_capsule(r: float, h: float) -> CapsuleMesh:
+	var key := ["t", snappedf(r, 0.0005), snappedf(h, 0.0005)]
+	var m: CapsuleMesh = _mesh_cache.get(key)
+	if m == null:
+		m = CapsuleMesh.new()
+		m.radius = r
+		m.height = h
+		_mesh_cache[key] = m
+	return m
+
+
+static func _cached_eye_mat(col: Color, emission_energy: float, rough: float) -> StandardMaterial3D:
+	var key := ["em", col.to_rgba32(), snappedf(emission_energy, 0.01), snappedf(rough, 0.01)]
+	var m: StandardMaterial3D = _eye_mat_cache.get(key)
+	if m == null:
+		m = StandardMaterial3D.new()
+		m.albedo_color = col
+		m.roughness = rough
+		if emission_energy > 0.0:
+			m.emission_enabled = true
+			m.emission = col
+			m.emission_energy_multiplier = emission_energy
+		_eye_mat_cache[key] = m
+	return m
+
+
 func _set_corruption(v: float) -> void:
 	corruption = clampf(v, 0.0, 1.0)
 	if is_inside_tree():
@@ -79,6 +142,13 @@ static func corruption_from_weapon(w: Weapon) -> float:
 	return clampf(cards / 10.0 + minf(d, 0.15), 0.0, 1.0)
 
 func rebuild() -> void:
+	var _pt := Time.get_ticks_usec() if Trace.enabled else 0
+	_rebuild_body()
+	if Trace.enabled:
+		Trace.prof("growth", Time.get_ticks_usec() - _pt)
+
+
+func _rebuild_body() -> void:
 	for c in get_children():
 		remove_child(c)
 		c.queue_free()
@@ -93,13 +163,16 @@ func rebuild() -> void:
 	# Deterministic layout: same corruption → same growth pattern, so cards
 	# make the demon *grow*, not reshuffle.
 	_rng.seed = 0xF1E5
-	_flesh_mat = ShaderMaterial.new()
-	_flesh_mat.shader = FLESH_SHADER
-	_bone_mat = StandardMaterial3D.new()
-	_bone_mat.albedo_color = Color(0.7, 0.62, 0.48)
-	_bone_mat.roughness = 0.7
-	_bone_mat.diffuse_mode = BaseMaterial3D.DIFFUSE_TOON
-	_bone_mat.specular_mode = BaseMaterial3D.SPECULAR_DISABLED
+	if _shared_flesh_mat == null:
+		_shared_flesh_mat = ShaderMaterial.new()
+		_shared_flesh_mat.shader = FLESH_SHADER
+		_shared_bone_mat = StandardMaterial3D.new()
+		_shared_bone_mat.albedo_color = Color(0.7, 0.62, 0.48)
+		_shared_bone_mat.roughness = 0.7
+		_shared_bone_mat.diffuse_mode = BaseMaterial3D.DIFFUSE_TOON
+		_shared_bone_mat.specular_mode = BaseMaterial3D.SPECULAR_DISABLED
+	_flesh_mat = _shared_flesh_mat
+	_bone_mat = _shared_bone_mat
 
 	var c: float = corruption
 	var rs: Vector3 = gun.get("receiver_size")
@@ -188,14 +261,9 @@ func rebuild() -> void:
 		add_child(_eye_root)
 		var sclera := MeshInstance3D.new()
 		sclera.name = "Sclera"
-		var sm := SphereMesh.new()
-		sm.radius = _eye_r
-		sm.height = _eye_r * 2.0
-		sclera.mesh = sm
-		var scm := StandardMaterial3D.new()
-		scm.albedo_color = Color(0.5, 0.3, 0.22)  # bloodshot, not porcelain
-		scm.roughness = 0.08
-		sclera.material_override = scm
+		sclera.mesh = _cached_sphere(_eye_r)
+		# Bloodshot, not porcelain.
+		sclera.material_override = _cached_eye_mat(Color(0.5, 0.3, 0.22), 0.0, 0.08)
 		_eye_root.add_child(sclera)
 		_iris = _make_eye_disc("Iris", _eye_r * 0.62, Color(1.0, 0.55, 0.1), 2.2)
 		_pupil = _make_eye_disc("Pupil", _eye_r * 0.26, Color(0.02, 0.0, 0.0), 0.0)
@@ -203,10 +271,7 @@ func rebuild() -> void:
 		# it down over the sclera (animated in _process).
 		_lid = MeshInstance3D.new()
 		_lid.name = "Lid"
-		var lm := SphereMesh.new()
-		lm.radius = _eye_r * 1.12
-		lm.height = _eye_r * 2.24
-		_lid.mesh = lm
+		_lid.mesh = _cached_sphere(_eye_r * 1.12)
 		_lid.material_override = _flesh_mat
 		_lid.set_instance_shader_parameter("phase", _rng.randf_range(0.0, 8.0))
 		_eye_root.add_child(_lid)
@@ -288,10 +353,7 @@ func _apply_eye_pose() -> void:
 func _add_flesh_sphere(part_name: String, r: float, pos: Vector3, squash: Vector3 = Vector3.ONE) -> MeshInstance3D:
 	var mi := MeshInstance3D.new()
 	mi.name = part_name
-	var sm := SphereMesh.new()
-	sm.radius = r
-	sm.height = r * 2.0
-	mi.mesh = sm
+	mi.mesh = _cached_sphere(r)
 	mi.material_override = _flesh_mat
 	mi.position = pos
 	mi.scale = squash
@@ -303,12 +365,7 @@ func _add_flesh_sphere(part_name: String, r: float, pos: Vector3, squash: Vector
 func _add_cone(part_name: String, r: float, h: float, pos: Vector3, mat: Material) -> MeshInstance3D:
 	var mi := MeshInstance3D.new()
 	mi.name = part_name
-	var cm := CylinderMesh.new()
-	cm.top_radius = 0.0
-	cm.bottom_radius = r
-	cm.height = h
-	cm.radial_segments = 6
-	mi.mesh = cm
+	mi.mesh = _cached_cone(r, h)
 	mi.material_override = mat
 	mi.position = pos
 	add_child(mi)
@@ -318,10 +375,7 @@ func _add_cone(part_name: String, r: float, h: float, pos: Vector3, mat: Materia
 func _add_tendon(part_name: String, a: Vector3, b: Vector3, r: float) -> MeshInstance3D:
 	var mi := MeshInstance3D.new()
 	mi.name = part_name
-	var cm := CapsuleMesh.new()
-	cm.radius = r
-	cm.height = maxf(a.distance_to(b), r * 2.1)
-	mi.mesh = cm
+	mi.mesh = _cached_capsule(r, maxf(a.distance_to(b), r * 2.1))
 	mi.material_override = _flesh_mat
 	mi.position = (a + b) * 0.5
 	var dir := (b - a).normalized()
@@ -335,18 +389,9 @@ func _add_tendon(part_name: String, a: Vector3, b: Vector3, r: float) -> MeshIns
 func _make_eye_disc(part_name: String, r: float, col: Color, emission_energy: float) -> MeshInstance3D:
 	var mi := MeshInstance3D.new()
 	mi.name = part_name
-	var sm := SphereMesh.new()
-	sm.radius = r
-	sm.height = r * 0.7  # flattened cap sitting on the sclera surface
-	mi.mesh = sm
-	var m := StandardMaterial3D.new()
-	m.albedo_color = col
-	m.roughness = 0.15
-	if emission_energy > 0.0:
-		m.emission_enabled = true
-		m.emission = col
-		m.emission_energy_multiplier = emission_energy
-	mi.material_override = m
+	# Flattened cap sitting on the sclera surface.
+	mi.mesh = _cached_sphere(r, r * 0.7)
+	mi.material_override = _cached_eye_mat(col, emission_energy, 0.15)
 	_eye_root.add_child(mi)
 	_own(mi)
 	return mi
