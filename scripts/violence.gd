@@ -401,28 +401,33 @@ static func _gib_instantiate_chunk(
 	if verts.is_empty():
 		return null
 
-	var chunk_mesh: ArrayMesh = ArrayMesh.new()
-	var shell: Array = []
-	shell.resize(Mesh.ARRAY_MAX)
-	shell[Mesh.ARRAY_VERTEX] = verts
-	var norms: PackedVector3Array = chunk["norms"]
-	if norms.size() == verts.size():
-		shell[Mesh.ARRAY_NORMAL] = norms
-	var uvs: PackedVector2Array = chunk["uvs"]
-	if uvs.size() == verts.size():
-		shell[Mesh.ARRAY_TEX_UV] = uvs
-	shell[Mesh.ARRAY_INDEX] = chunk["indices"]
-	chunk_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, shell)
-
-	var cap_verts: PackedVector3Array = chunk["cap_verts"]
-	var has_cap: bool = not cap_verts.is_empty()
-	if has_cap:
-		var cap: Array = []
-		cap.resize(Mesh.ARRAY_MAX)
-		cap[Mesh.ARRAY_VERTEX] = cap_verts
-		cap[Mesh.ARRAY_COLOR] = chunk["cap_colors"]
-		cap[Mesh.ARRAY_INDEX] = chunk["cap_indices"]
-		chunk_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, cap)
+	var has_cap: bool = not (chunk["cap_verts"] as PackedVector3Array).is_empty()
+	# Build the ArrayMesh ONCE per cached variant chunk and reuse it for every
+	# later death — rebuilding from raw arrays per kill (two surface uploads
+	# per chunk, x chunks x body meshes) was a measured slice of the
+	# death-frame spike. Materials stay per-instance via surface overrides.
+	var chunk_mesh: ArrayMesh = chunk.get("built_mesh")
+	if chunk_mesh == null:
+		chunk_mesh = ArrayMesh.new()
+		var shell: Array = []
+		shell.resize(Mesh.ARRAY_MAX)
+		shell[Mesh.ARRAY_VERTEX] = verts
+		var norms: PackedVector3Array = chunk["norms"]
+		if norms.size() == verts.size():
+			shell[Mesh.ARRAY_NORMAL] = norms
+		var uvs: PackedVector2Array = chunk["uvs"]
+		if uvs.size() == verts.size():
+			shell[Mesh.ARRAY_TEX_UV] = uvs
+		shell[Mesh.ARRAY_INDEX] = chunk["indices"]
+		chunk_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, shell)
+		if has_cap:
+			var cap: Array = []
+			cap.resize(Mesh.ARRAY_MAX)
+			cap[Mesh.ARRAY_VERTEX] = chunk["cap_verts"]
+			cap[Mesh.ARRAY_COLOR] = chunk["cap_colors"]
+			cap[Mesh.ARRAY_INDEX] = chunk["cap_indices"]
+			chunk_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, cap)
+		chunk["built_mesh"] = chunk_mesh
 
 	var centroid_src: Vector3 = chunk["centroid"]
 	var chunk_aabb: AABB = chunk["aabb"]
@@ -2003,7 +2008,7 @@ static func _get_blast_projectile_shader() -> Shader:
 		_blast_projectile_shader.code = _BLAST_PROJECTILE_CODE
 	return _blast_projectile_shader
 
-static func _finish_projectile_layer(scene: Node, mm: MultiMesh, pos: Vector3, tint: Color, brightness: float, life: float, aabb_extent: float, size_scale: float, elong_max: float) -> void:
+static func _finish_projectile_layer(scene: Node, mm: MultiMesh, pos: Vector3, tint: Color, brightness: float, life: float, aabb_extent: float, size_scale: float, elong_max: float) -> MultiMeshInstance3D:
 	var mmi := MultiMeshInstance3D.new()
 	mmi.multimesh = mm
 	mmi.custom_aabb = AABB(Vector3.ONE * (-aabb_extent), Vector3.ONE * (2.0 * aabb_extent))
@@ -2019,6 +2024,7 @@ static func _finish_projectile_layer(scene: Node, mm: MultiMesh, pos: Vector3, t
 	var tw := mmi.create_tween()
 	tw.tween_property(mat, "shader_parameter/anim", 1.0, life).set_trans(Tween.TRANS_LINEAR)
 	tw.tween_callback(mmi.queue_free)
+	return mmi
 
 
 static func spawn_blast_flame_shards(scene: Node, pos: Vector3, radius: float, color: Color) -> void:
@@ -2067,7 +2073,11 @@ static func spawn_blast_embers(scene: Node, pos: Vector3, radius: float, color: 
 		# CUSTOM = (travel.xyz, delay)
 		mm.set_instance_custom_data(i, Color(travel.x, travel.y, travel.z, rng.randf_range(0.0, 0.15)))
 	var hot := color.lerp(Color(1.0, 0.86, 0.5), 0.4)
-	_finish_projectile_layer(scene, mm, pos, hot, 5.0, 0.3 + radius * 0.03, radius * 3.5, size_scale, 8.0)
+	var ember_mmi := _finish_projectile_layer(
+		scene, mm, pos, hot, 5.0, 0.3 + radius * 0.03, radius * 3.5, size_scale, 8.0)
+	if ember_mmi:
+		_enroll_alive_capped(_live_accent_billows, ember_mmi,
+			maxi(8, int(round(MAX_LIVE_ACCENT_BILLOWS * vfx_quality_scale()))))
 
 
 # Orthonormal basis whose +Y axis aligns with `dir` (for orienting the shard cone).
@@ -2326,6 +2336,17 @@ static func _spawn_blast_billow(scene: Node, pos: Vector3, radius: float, count:
 	var atw := host.create_tween()
 	atw.tween_property(mat, "shader_parameter/anim", 1.0, layer_life).set_trans(Tween.TRANS_LINEAR)
 	atw.tween_callback(host.queue_free)
+	# Everything outside the pushable smoke-layer cap gets alive-bounded, or
+	# sustained blast rates pile up hundreds of live MultiMesh nodes. Round
+	# fire billows (the fireball itself) go to the protected fire pool;
+	# stretched tongues (flame shards, stretch > 1) and unpushable clouds
+	# (blood mist) are accents.
+	if is_fire and stretch <= 1.01:
+		_enroll_alive_capped(_live_fire_billows, host,
+			maxi(10, int(round(MAX_LIVE_FIRE_BILLOWS * vfx_quality_scale()))))
+	elif is_fire or not pushable:
+		_enroll_alive_capped(_live_accent_billows, host,
+			maxi(8, int(round(MAX_LIVE_ACCENT_BILLOWS * vfx_quality_scale()))))
 	if rise > 0.0:
 		var rise_tw := host.create_tween()
 		rise_tw.tween_property(host, "global_position", base + Vector3.UP * rise, layer_life)\
@@ -2513,6 +2534,41 @@ static func spawn_blast_fire_clouds(scene: Node, pos: Vector3, radius: float, co
 	_spawn_blast_billow(scene, pos, radius, count, true, color, 0.35 + radius * 0.055, 0.3, 0.7, radius * 0.3)
 
 
+# ---- Alive-population caps (new evicts oldest) ----------------------------
+# The per-frame claim limiters bound SPAWNS; these bound the LIVE population
+# under sustained fire. Lab attribution (Jul 2026, M5, 400 booms/s sweep,
+# explosion_lab --benchmark --only=X): heat distortion ~58ms, blast lights
+# ~52ms, fire billows/embers ~50ms, shockwaves ~23ms, smoke ~0.5ms. All
+# resolution-independent costs (clustered-light binning, backbuffer copies,
+# per-node vertex/tween churn) — the collapse showed a near-idle CPU and
+# didn't respond to render scale. Caps scale with quality_scale; evicting
+# the oldest is visually masked by the newest blast.
+const MAX_LIVE_BLAST_LIGHTS := 10
+const MAX_LIVE_HEAT_SHELLS := 3
+const MAX_LIVE_SHOCK_SHELLS := 3
+# Fireballs are THE explosion visual — they get their own generous pool so
+# accents can never evict them (each is ONE MultiMesh node; the 400/s melt
+# was ~280 live nodes, so two dozen is cheap). Flame tongues, embers and
+# blood mist are accents: separate, tighter pool, evicted first.
+const MAX_LIVE_FIRE_BILLOWS := 24
+const MAX_LIVE_ACCENT_BILLOWS := 20
+
+static var _live_blast_lights: Array[Node] = []
+static var _live_heat_shells: Array[Node] = []
+static var _live_shock_shells: Array[Node] = []
+static var _live_fire_billows: Array[Node] = []
+static var _live_accent_billows: Array[Node] = []
+
+
+static func _enroll_alive_capped(pool: Array[Node], node: Node, cap: int) -> void:
+	pool.append(node)
+	node.tree_exiting.connect(func() -> void: pool.erase(node))
+	while pool.size() > cap:
+		var old: Node = pool.pop_front()
+		if is_instance_valid(old):
+			old.queue_free()
+
+
 const BLAST_LIGHT_FLASH_HOLD := 0.045   # ~1–3 rendered frames before decay
 const BLAST_LIGHT_FLASH_DECAY := 0.09
 const BLAST_LIGHT_HOT := Color(1.0, 0.995, 0.98)
@@ -2557,6 +2613,8 @@ static func _spawn_blast_flash_light(scene: Node, pos: Vector3, radius: float) -
 	flash.shadow_enabled = false
 	_attach_world_3d(scene, flash, pos)
 	_tween_blast_light_pop(flash, peak, hold, decay)
+	_enroll_alive_capped(_live_blast_lights, flash,
+		maxi(4, int(round(MAX_LIVE_BLAST_LIGHTS * vfx_quality_scale()))))
 
 
 static func _blast_fireball_light_peak(radius: float, energy_mult: float = 1.0) -> float:
@@ -2624,6 +2682,8 @@ static func _spawn_blast_fireball_light(scene: Node, pos: Vector3, radius: float
 	glow.shadow_enabled = false
 	_attach_world_3d(scene, glow, pos)
 	_tween_blast_fireball_light(glow, radius, color, energy_mult, range_start, range_end)
+	_enroll_alive_capped(_live_blast_lights, glow,
+		maxi(4, int(round(MAX_LIVE_BLAST_LIGHTS * vfx_quality_scale()))))
 
 
 static func _spawn_bullet_blast_immediate_visuals(
@@ -2694,6 +2754,13 @@ static func _spawn_cheap_blast_flare(scene: Node, pos: Vector3, radius: float, c
 	_spawn_blast_fireball_light(scene, pos, radius, color, 0.65)
 	if _claim_cheap_light():
 		_spawn_blast_flash_light(scene, pos, radius)
+	# A blast with no fireball reads as a misfire. The budget flare gets the
+	# FULL original fireball (spawn_blast_fire_clouds — one MultiMesh node
+	# regardless of puff count, protected by the fire-billow pool); what the
+	# flare skips is the trimmings: smoke, distortion, shards, embers. Added
+	# after a playtest where governor shed 2 stripped every fireball from a
+	# whole fight.
+	spawn_blast_fire_clouds(scene, pos, radius, color)
 
 
 # Bigger blasts expand further, hold a hotter core, and pump a brighter
@@ -2933,6 +3000,11 @@ static func spawn_heat_distortion(scene: Node, pos: Vector3, radius: float, dura
 	mat.set_shader_parameter("falloff", 1.0)
 	shell.material_override = mat
 	_attach_world_3d(scene, shell, pos)
+	# Each shell forces a backbuffer copy (hint_screen_texture) — the single
+	# most expensive blast component under sustained fire. Overlapping heat
+	# shimmer is visual mush anyway; hard-cap the live population.
+	_enroll_alive_capped(_live_heat_shells, shell,
+		maxi(1, int(round(MAX_LIVE_HEAT_SHELLS * vfx_quality_scale()))))
 
 	var target_scale := Vector3.ONE * maxf(0.01, (radius * 2.2) / _heat_mesh.radius)
 	var tw := shell.create_tween().set_parallel(true)
@@ -2991,6 +3063,8 @@ static func spawn_shockwave_ring(scene: Node, pos: Vector3, radius: float) -> vo
 	mat.set_shader_parameter("opacity", 0.95)
 	shell.material_override = mat
 	_attach_world_3d(scene, shell, pos)
+	_enroll_alive_capped(_live_shock_shells, shell,
+		maxi(1, int(round(MAX_LIVE_SHOCK_SHELLS * vfx_quality_scale()))))
 	# Roughly sound-speed expansion, slowed a touch + 0.12s floor so the shock
 	# front is actually visible rather than a single-frame flicker.
 	var dur: float = maxf(0.3, radius / 343.0 * 3.5)
@@ -4271,6 +4345,94 @@ static func do_ragdoll(
 		body_model.visible = false
 	set_dead_visuals(player, true)
 
+# How many body meshes get chunked per frame during a full disintegration.
+# The whole-body blob is 12-14 meshes (~40 rigid bodies); doing them all in
+# the death tick was a measured 10-19ms frame spike. The first batch runs
+# synchronously, the rest one batch per frame — chunks arriving 1-3 frames
+# late hide inside the blast flash.
+const GIB_DISINTEGRATE_MESHES_PER_FRAME := 4
+
+
+# Chunk ONE body mesh; returns the updated `first` flag (death cam target +
+# death effect fire on the first successful mesh for the local human).
+static func _gib_one_death_mesh(
+	src: MeshInstance3D,
+	scene: Node,
+	player: Node,
+	ragdoll_pieces: Array,
+	base_vel: Vector3,
+	burst_strength: float,
+	chunk_count: int,
+	force_origin: Vector3,
+	impact_blood_strength: float,
+	first: bool,
+	local_is_authority: bool,
+) -> bool:
+	var _tp := Time.get_ticks_usec() if Trace.enabled else 0
+	# Blob meshes carry material_override; the knight's FBX materials live on
+	# the mesh surfaces — get_active_material resolves both (override wins).
+	var chunks: Array[RigidBody3D] = gib_explode(
+		src.mesh,
+		src.global_transform,
+		scene,
+		src.get_active_material(0),
+		base_vel + Vector3(randf_range(-1.5, 1.5), 0, randf_range(-1.5, 1.5)),
+		burst_strength,
+		chunk_count,
+		14.0,
+		force_origin,
+		impact_blood_strength,
+	)
+	if Trace.enabled:
+		Trace.prof("death_gibs", Time.get_ticks_usec() - _tp)
+	if chunks.is_empty():
+		return first
+	if first and local_is_authority:
+		player.set("_ragdoll_head", chunks[0])
+		if scene.has_method("show_death_effect_for"):
+			scene.show_death_effect_for(int(player.get("player_id")), true)
+		elif scene.has_method("show_death_effect"):
+			scene.show_death_effect(true)
+	for c in chunks:
+		ragdoll_pieces.append(c)
+	return false
+
+
+# Fire-and-forget coroutine: chunk the remaining death meshes in per-frame
+# batches. Guards every step — the round can reset (scene freed) or the
+# player can be freed mid-spread.
+static func _spread_death_gibs(
+	srcs: Array[MeshInstance3D],
+	scene: Node,
+	player: Node,
+	ragdoll_pieces: Array,
+	base_vel: Vector3,
+	burst_strength: float,
+	chunk_count: int,
+	force_origin: Vector3,
+	impact_blood_strength: float,
+	first: bool,
+	local_is_authority: bool,
+) -> void:
+	var tree: SceneTree = scene.get_tree()
+	var i := 0
+	while i < srcs.size():
+		await tree.process_frame
+		if not is_instance_valid(scene) or not is_instance_valid(player):
+			return
+		var end := mini(i + GIB_DISINTEGRATE_MESHES_PER_FRAME, srcs.size())
+		while i < end:
+			var src := srcs[i]
+			i += 1
+			if not is_instance_valid(src):
+				continue
+			first = _gib_one_death_mesh(
+				src, scene, player, ragdoll_pieces, base_vel, burst_strength,
+				chunk_count, force_origin, impact_blood_strength,
+				first, local_is_authority,
+			)
+
+
 static func spawn_ragdoll(
 	player: Node,
 	push_dir: Vector3,
@@ -4359,6 +4521,7 @@ static func spawn_ragdoll(
 		if blast_radius > 0.0:
 			gore_int = maxf(gore_int, blast_severity * 1.15)
 		var skip_mist := overkill_disintegrate and blast_radius <= 0.0
+		var _tg := Time.get_ticks_usec() if Trace.enabled else 0
 		var extra_gibs: Array = spawn_disintegrate_gore(
 			scene,
 			mist_origin,
@@ -4378,36 +4541,34 @@ static func spawn_ragdoll(
 			if overkill_disintegrate:
 				splat_sev = maxf(splat_sev, overkill_severity)
 			spawn_overkill_blood_splats_after_destruction(scene, mist_origin, dir_n, splat_sev)
-		var first: bool = true
+		if Trace.enabled:
+			Trace.prof("death_gore", Time.get_ticks_usec() - _tg)
+		var srcs: Array[MeshInstance3D] = []
 		for src in meshes:
 			if src.mesh == null or _gib_is_cosmetic_mesh(src):
 				continue
-			var chunks: Array[RigidBody3D] = gib_explode(
-				src.mesh,
-				src.global_transform,
-				scene,
-				# Blob meshes carry material_override; the knight's FBX
-				# materials live on the mesh surfaces — get_active_material
-				# resolves both (override wins when set).
-				src.get_active_material(0),
-				base_vel + Vector3(randf_range(-1.5, 1.5), 0, randf_range(-1.5, 1.5)),
-				burst_strength,
-				chunk_count,
-				14.0,
-				force_origin,
-				impact_blood_strength,
+			srcs.append(src)
+		# First batch synchronously — the death cam needs a chunk to follow
+		# THIS frame and the explosion must read as instant; the remaining
+		# meshes spread over the following frames so a 12-mesh body doesn't
+		# burn one long frame on ~40 rigid-body spawns.
+		var sync_n := mini(GIB_DISINTEGRATE_MESHES_PER_FRAME, srcs.size())
+		var first: bool = true
+		for i: int in sync_n:
+			first = _gib_one_death_mesh(
+				srcs[i], scene, player, ragdoll_pieces, base_vel, burst_strength,
+				chunk_count, force_origin, impact_blood_strength,
+				first, local_is_authority,
 			)
-			if chunks.is_empty():
-				continue
-			if first and local_is_authority:
-				player.set("_ragdoll_head", chunks[0])
-				if scene.has_method("show_death_effect_for"):
-					scene.show_death_effect_for(int(player.get("player_id")), true)
-				elif scene.has_method("show_death_effect"):
-					scene.show_death_effect(true)
-				first = false
-			for c in chunks:
-				ragdoll_pieces.append(c)
+		if sync_n < srcs.size():
+			var rest: Array[MeshInstance3D] = []
+			for i: int in range(sync_n, srcs.size()):
+				rest.append(srcs[i])
+			_spread_death_gibs(
+				rest, scene, player, ragdoll_pieces, base_vel, burst_strength,
+				chunk_count, force_origin, impact_blood_strength,
+				first, local_is_authority,
+			)
 	elif use_knight:
 		# Soft ragdoll: the knight clone gets per-limb PhysicalBone3D physics
 		# (a single-rigid-body clone of skinned meshes tumbles as a hard

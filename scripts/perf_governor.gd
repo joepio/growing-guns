@@ -81,6 +81,7 @@ var shed_level: int = 0                   # 0 = none, 1, 2
 var _avg_frame_ms: float = 1000.0 / 240.0
 var _avg_cpu_ms: float = 2.0     # script process + physics, EMA
 var _avg_gpu_ms: float = 2.0     # measured root-viewport render time, EMA
+var _avg_rcpu_ms: float = 0.0    # measured render-thread CPU (draw submission), EMA
 var _gpu_time_supported: bool = false
 var _rscale_idx: int = 0
 var _rscale_cooldown: float = 0.0
@@ -91,6 +92,9 @@ var _headless: bool = false
 
 func _ready() -> void:
 	_headless = DisplayServer.get_name() == "headless"
+	_probe_on = OS.has_environment("GG_PERF_PROBE")
+	if _probe_on:
+		print("[perf-probe] enabled — cycling %s every 6s" % str(_PROBE_STATES))
 	if not _headless:
 		# Ask the renderer to time the root viewport so we can tell CPU-bound
 		# from GPU-bound frames. Costs a couple of timestamp queries per frame.
@@ -114,7 +118,10 @@ func _process(delta: float) -> void:
 
 	_measure_cpu_gpu()
 	_update_shed_tiers(fps, delta)
-	_update_render_scale(fps, delta)
+	if _probe_on:
+		_probe_tick(delta)  # probe owns render scale while active
+	else:
+		_update_render_scale(fps, delta)
 
 
 func _measure_cpu_gpu() -> void:
@@ -129,6 +136,8 @@ func _measure_cpu_gpu() -> void:
 		_gpu_time_supported = true
 	if _gpu_time_supported:
 		_avg_gpu_ms = lerpf(_avg_gpu_ms, minf(gpu_ms, MAX_FRAME_MS), FRAME_EMA)
+	var rcpu_ms := RenderingServer.viewport_get_measured_render_time_cpu(rid)
+	_avg_rcpu_ms = lerpf(_avg_rcpu_ms, minf(rcpu_ms, MAX_FRAME_MS), FRAME_EMA)
 
 
 func is_gpu_bound() -> bool:
@@ -181,6 +190,34 @@ func _update_render_scale(fps: float, delta: float) -> void:
 	_rscale_cooldown = RSCALE_DWELL_SEC
 
 
+# --- In-game bottleneck probe (GG_PERF_PROBE=1, debug diagnostics only) ----
+# The lab can't reproduce the carved-late-round frame cost, so this cycles
+# the suspects LIVE during a real match, 6s per state, and prints each
+# switch. Read the [trace] 1s lines per state: whichever toggle moves
+# avg frame time names the bottleneck (draws/shadows vs fill vs neither).
+const _PROBE_STATES: Array[String] = ["normal", "no-shadows", "rscale-0.5", "normal2"]
+var _probe_on: bool = false
+var _probe_i: int = -1
+var _probe_t: float = 0.0
+
+
+func _probe_tick(delta: float) -> void:
+	_probe_t -= delta
+	if _probe_t > 0.0:
+		return
+	_probe_t = 6.0
+	_probe_i = (_probe_i + 1) % _PROBE_STATES.size()
+	var state := _PROBE_STATES[_probe_i]
+	var suns: Array[Node] = []
+	var scene := get_tree().current_scene
+	if scene:
+		suns = scene.find_children("", "DirectionalLight3D", true, false)
+	for s in suns:
+		(s as DirectionalLight3D).shadow_enabled = state != "no-shadows"
+	get_viewport().scaling_3d_scale = 0.5 if state == "rscale-0.5" else 1.0
+	print("[perf-probe] state=%s (frame avg follows in trace 1s lines)" % state)
+
+
 # Smoothed fps estimate — handy for HUD/debug readouts.
 func smoothed_fps() -> float:
 	return 1000.0 / maxf(_avg_frame_ms, 0.001)
@@ -198,8 +235,8 @@ func bound_label() -> String:
 
 # One-line state dump for trace lines / debugging.
 func debug_state() -> String:
-	return "fps=%.0f cpu=%.1f gpu=%s bnd=%s qs=%.2f rs=%.2f shed=%d" % [
-		smoothed_fps(), _avg_cpu_ms,
+	return "fps=%.0f cpu=%.1f rcpu=%.1f gpu=%s bnd=%s qs=%.2f rs=%.2f shed=%d" % [
+		smoothed_fps(), _avg_cpu_ms, _avg_rcpu_ms,
 		("%.1f" % _avg_gpu_ms) if _gpu_time_supported else "n/a",
 		bound_label(), quality_scale, render_scale(), shed_level,
 	]

@@ -12,7 +12,7 @@ config_version=5
 
 config/name="Growing Guns"
 config/description="High-paced multiplayer arena shooter"
-config/version="0.3.1"
+config/version="0.3.2"
 run/main_scene="res://scenes/start_screen.tscn"
 config/features=PackedStringArray("4.6", "Forward Plus")
 run/max_fps=360
@@ -123,7 +123,6 @@ tab={
 
 [physics]
 
-common/physics_ticks_per_second=60
 common/max_physics_steps_per_frame=6
 
 [raytraced_audio]

@@ -64,9 +64,16 @@ var _perf_accum: float = 0.0
 # Automated sweep (run with `--benchmark`): cycles through stress rates, samples
 # steady-state perf for each, prints a table, then quits.
 var _bench := false
-var _bench_rates := [0.0, 20.0, 50.0, 100.0, 200.0, 400.0]
+# Trailing 0-rate stages are the LEAK DETECTOR: after the 400/s stage, fps
+# must recover to the opening 0-rate figure once VFX lifetimes expire (~8s of
+# cooldown across both stages). A final-0 much slower than the first-0 means
+# something accumulated instead of dying.
+var _bench_rates := [0.0, 20.0, 50.0, 100.0, 200.0, 400.0, 0.0, 0.0]
 var _bench_stage := 0
 var _bench_t := 0.0
+# --carve: let bench booms actually carve terrain, so cooldown rows measure
+# the DRAW cost of a heavily damaged arena (draw-reduction A/Bs).
+var _bench_carve := false
 const _BENCH_WARM := 2.0     # let each rate reach steady state
 const _BENCH_SAMPLE := 2.0   # then average over this window
 var _bs_fps := 0.0
@@ -89,6 +96,18 @@ func _ready() -> void:
 	if not cap.is_empty():
 		await _capture_explosion(cap)
 		return
+	# --rscale=0.5: halve 3D render resolution — the GPU-fill A/B lever. If a
+	# workload's fps scales with this, it's fill-bound, not CPU.
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with("--rscale="):
+			get_viewport().scaling_3d_scale = clampf(float(a.substr(9)), 0.25, 1.0)
+			print("[exlab] render scale = ", get_viewport().scaling_3d_scale)
+	# --no-dirshadow: kill directional shadows — measures the shadow-pass
+	# share of the draws column (each caster renders again per cascade).
+	if "--no-dirshadow" in OS.get_cmdline_user_args():
+		for sun in find_children("", "DirectionalLight3D", true, false):
+			(sun as DirectionalLight3D).shadow_enabled = false
+		print("[exlab] directional shadows OFF")
 	if "--ray-probe" in OS.get_cmdline_user_args():
 		_run_ray_probe.call_deferred()
 		return
@@ -97,7 +116,20 @@ func _ready() -> void:
 		_radius = 10.0
 		_stress_rate = _bench_rates[0]
 		Violence.reset_smoke_push_bench()
-		print("[exlab] benchmark sweep starting (radius=%.0f, smoke_push=on)" % _radius)
+		# Subsystem isolation for the sweep: `--only=smoke` keeps ONE fx key,
+		# `--only=none` disables all; `--fx-off=smoke,shards` disables a list.
+		for a in OS.get_cmdline_user_args():
+			if a.begins_with("--only="):
+				var only := a.substr(7)
+				for k in _fx:
+					_fx[k] = (k == only)
+			elif a.begins_with("--fx-off="):
+				for k in a.substr(9).split(","):
+					if _fx.has(k):
+						_fx[k] = false
+			elif a == "--carve":
+				_bench_carve = true
+		print("[exlab] benchmark sweep starting (radius=%.0f, fx=%s)" % [_radius, str(_fx)])
 
 func _exit_tree() -> void:
 	Engine.time_scale = 1.0
@@ -403,7 +435,7 @@ func _boom() -> void:
 	# Actually destroy terrain (skipped in the --benchmark sweep so 400/s rates
 	# don't erase the arena mid-measurement). Same radius/damage mapping as an
 	# explosive bullet hit; the coordinator inside the arena scene flushes it.
-	if _fx.carve and not _bench:
+	if _fx.carve and (not _bench or _bench_carve):
 		# 160: enough to remove chunks near the centre (~53-97 HP each), not just
 		# deform them — removals are what trigger the debris burst.
 		DestructibleManager.apply_blast(pos, _radius * 0.52, 160.0)

@@ -51,7 +51,11 @@ var _prof: Dictionary = {}
 
 func _ready() -> void:
 	_t0_ms = Time.get_ticks_msec()
-	enabled = OS.is_debug_build() or OS.has_environment("GG_TRACE")
+	# GG_NO_TRACE opts out even in debug builds — for A/B-measuring the
+	# tracer's own per-frame cost (_scene_counts walks several node groups
+	# every rendered frame).
+	enabled = (OS.is_debug_build() or OS.has_environment("GG_TRACE")) \
+		and not OS.has_environment("GG_NO_TRACE")
 	if OS.has_environment("GG_TRACE_SPIKE_MS"):
 		spike_ms = maxf(1.0, float(OS.get_environment("GG_TRACE_SPIKE_MS")))
 	process_priority = 1000
@@ -119,9 +123,13 @@ func _physics_process(_delta: float) -> void:
 
 
 func _scene_counts(tree: SceneTree) -> Dictionary:
-	var cas := tree.get_nodes_in_group("brass_casings").size()
-	var gib := tree.get_nodes_in_group("gib_chunks").size()
-	var corp := tree.get_nodes_in_group("corpses").size()
+	# get_node_count_in_group, NOT get_nodes_in_group().size(): the latter
+	# allocates a full node array per call — 13 of them here, every rendered
+	# frame, measured ~5 ms/frame with the crowd-era group sizes (85 vs
+	# 145 fps idle). The count variant reads the group's size allocation-free.
+	var cas := tree.get_node_count_in_group(&"brass_casings")
+	var gib := tree.get_node_count_in_group(&"gib_chunks")
+	var corp := tree.get_node_count_in_group(&"corpses")
 	var rb := int(Performance.get_monitor(Performance.PHYSICS_3D_ACTIVE_OBJECTS))
 	return {
 		"cas": cas,
@@ -129,20 +137,20 @@ func _scene_counts(tree: SceneTree) -> Dictionary:
 		"corp": corp,
 		"rb": rb,
 		"rb_other": maxi(0, rb - cas - gib - corp),
-		"plr": tree.get_nodes_in_group("players").size(),
-		"proj": tree.get_nodes_in_group("projectiles").size(),
-		"dbr": tree.get_nodes_in_group("destruction_debris").size(),
+		"plr": tree.get_node_count_in_group(&"players"),
+		"proj": tree.get_node_count_in_group(&"projectiles"),
+		"dbr": tree.get_node_count_in_group(&"destruction_debris"),
 		"blood": (
-			tree.get_nodes_in_group("blood_splats").size()
-			+ tree.get_nodes_in_group("player_blood_wounds").size()
+			tree.get_node_count_in_group(&"blood_splats")
+			+ tree.get_node_count_in_group(&"player_blood_wounds")
 		),
-		"crat": tree.get_nodes_in_group("craters").size(),
+		"crat": tree.get_node_count_in_group(&"craters"),
 		"smk": (
-			tree.get_nodes_in_group("smoke_puffs").size()
-			+ tree.get_nodes_in_group("blast_smoke_layers").size()
+			tree.get_node_count_in_group(&"smoke_puffs")
+			+ tree.get_node_count_in_group(&"blast_smoke_layers")
 		),
-		"dest": tree.get_nodes_in_group("destructible").size(),
-		"expm": tree.get_nodes_in_group("destructible_exposed_mm").size(),
+		"dest": tree.get_node_count_in_group(&"destructible"),
+		"expm": tree.get_node_count_in_group(&"destructible_exposed_mm"),
 	}
 
 
@@ -165,13 +173,18 @@ func _process(delta: float) -> void:
 	var tree := get_tree()
 	var sc: Dictionary = _scene_counts(tree) if tree else {}
 	var draws := int(Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME))
+	# Per-frame render-thread CPU (live, unlike the 1Hz-stale proc/phys1
+	# monitors). When a spike shows tiny cpu[] buckets AND tiny rcpu, the
+	# cost is GPU/present/engine-main — not script, not draw submission.
+	var rcpu_ms: float = RenderingServer.viewport_get_measured_render_time_cpu(
+		get_viewport().get_viewport_rid())
 
 	if dt_ms >= spike_ms:
 		print((
 			"[trace] SPIKE %6.1fms +%6dms proc=%4.1f phys1=%4.1f physSum=%5.1f psteps=%d "
 			+ "fps=%3.0f draws=%5d rb=%d cas=%d gib=%d corp=%d rb?=%d plr=%d "
 			+ "proj=%d dbr=%d blood=%d smk=%d qs=%.2f bnd=%s rs=%.2f shd=%d "
-			+ "dest=%d exp=%d expm=%d cpuTot=%4.1f%s"
+			+ "dest=%d exp=%d expm=%d rcpu=%.1f cpuTot=%4.1f%s"
 		) % [
 			dt_ms, _now(),
 			Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0,
@@ -197,6 +210,7 @@ func _process(delta: float) -> void:
 			sc.get("dest", 0),
 			DestructibleManager.debug_exposed_chunk_count(),
 			sc.get("expm", 0),
+			rcpu_ms,
 			_prof_total_ms(),
 			_prof_str(),
 		])

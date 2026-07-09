@@ -25,6 +25,17 @@ const TILT_DOWN := 0.22  # radians the screens pitch toward the floor
 # and sponsor breaks (slogans shared with the boards — see ad_ring.gd).
 const PROGRAM: Array = [["live", 12.0], ["crowd", 5.0], ["live", 12.0], ["ad", 5.0]]
 const FEED_SIZE := Vector2i(384, 216)
+# The feed re-submits every scene draw call (measured ~4 ms / +1.1k draws per
+# refresh in a heavy lab scene), so it refreshes at broadcast rate instead of
+# every frame: UPDATE_ONCE pumped from _process. The cost lands only on
+# refresh frames — a periodic ~4 ms bump in 1-of-N frames instead of on all
+# of them — which stays inside normal combat frame variance.
+const FEED_FPS := 30.0
+# Governor shed >= 1: broadcast at studio-B quality. Each refresh re-submits
+# every scene draw call, and heavy late-round scenes (~6k draws) are exactly
+# where that hurts most — a real playtest showed the feed adding ~3k draws
+# every other frame while the governor was already shedding VFX.
+const FEED_FPS_SHED := 10.0
 const SCREEN_LAYER := 1 << 19  # render layer 20: screens only
 
 var _mat: ShaderMaterial = null
@@ -35,6 +46,8 @@ var _timer: float = 12.0
 var _kind: String = "live"
 var _sub: SubViewport = null
 var _feed_cam: Camera3D = null
+var _feed_accum: float = 0.0
+var _feed_frames_since: int = 99
 var _inner_r: float = 50.0
 var _base_y: float = 12.0
 
@@ -49,7 +62,7 @@ func setup(inner_r: float, base_y: float, wall_r: float, wall_h: float) -> void:
 	# during ad breaks.
 	_sub = SubViewport.new()
 	_sub.size = FEED_SIZE
-	_sub.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	_sub.render_target_update_mode = SubViewport.UPDATE_ONCE  # then 30 Hz pump
 	_sub.positional_shadow_atlas_size = 0
 	add_child(_sub)
 	_feed_cam = Camera3D.new()
@@ -125,13 +138,29 @@ func setup(inner_r: float, base_y: float, wall_r: float, wall_h: float) -> void:
 			add_child(leg)
 
 func _process(delta: float) -> void:
-	# POV segment: mirror whatever camera is live for this viewer (player
-	# eye, spectator, splitscreen view) onto the feed camera.
-	if _kind == "live" and _feed_cam:
-		var active := get_viewport().get_camera_3d()
-		if active:
-			_feed_cam.global_transform = active.global_transform
-			_feed_cam.fov = active.fov
+	# 30 Hz feed pump (ad segments show pure shader content — no 3D render).
+	if _kind != "ad" and _sub:
+		_feed_accum += delta
+		_feed_frames_since += 1
+		var feed_fps := FEED_FPS
+		if PerfGovernor and PerfGovernor.shed_level >= 1:
+			feed_fps = FEED_FPS_SHED
+		# Min 2 rendered frames between refreshes: below 60 fps the 30 Hz
+		# timer alone would refresh EVERY frame — exactly when the extra
+		# draws hurt most. This guarantees no two consecutive heavy frames;
+		# the broadcast just drops to half frame rate under load.
+		if _feed_accum >= 1.0 / feed_fps and _feed_frames_since >= 2:
+			_feed_accum = fmod(_feed_accum, 1.0 / feed_fps)
+			_feed_frames_since = 0
+			# POV segment: mirror whatever camera is live for this viewer
+			# (player eye, spectator, splitscreen view) — glued on refresh
+			# frames only, so the rendered frame uses the current pose.
+			if _kind == "live" and _feed_cam:
+				var active := get_viewport().get_camera_3d()
+				if active:
+					_feed_cam.global_transform = active.global_transform
+					_feed_cam.fov = active.fov
+			_sub.render_target_update_mode = SubViewport.UPDATE_ONCE
 	_timer -= delta
 	if _timer > 0.0:
 		return
@@ -140,8 +169,10 @@ func _process(delta: float) -> void:
 	_timer = float(segment[1])
 	_kind = str(segment[0])
 	_mat.set_shader_parameter("ad_mode", 1.0 if _kind == "ad" else 0.0)
-	_sub.render_target_update_mode = (
-		SubViewport.UPDATE_DISABLED if _kind == "ad" else SubViewport.UPDATE_ALWAYS)
+	# Live/crowd segments render via the 30 Hz UPDATE_ONCE pump above; prime
+	# the accumulator so a fresh segment refreshes on its first frame.
+	_sub.render_target_update_mode = SubViewport.UPDATE_DISABLED
+	_feed_accum = 1.0 / FEED_FPS
 	for lbl in _ad_labels:
 		lbl.visible = _kind == "ad"
 	match _kind:

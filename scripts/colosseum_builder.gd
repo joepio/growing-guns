@@ -92,6 +92,13 @@ static func build(
 	root.name = "Colosseum"
 	parent.add_child(root)
 
+	# Bench isolation (explosion_lab A/B sweeps): `--no-colosseum` skips the
+	# whole bowl, `--no-tv` / `--no-ads` skip just those subsystems, so their
+	# cost can be attributed. No effect unless passed after `--` on the CLI.
+	var user_args := OS.get_cmdline_user_args()
+	if "--no-colosseum" in user_args:
+		return root
+
 	var inner_r := arena_size * 0.82
 	var base_y := wall_height + BASE_ABOVE_WALLS if has_perimeter_walls else BASE_NO_WALLS
 
@@ -104,20 +111,22 @@ static func build(
 	# Jumbotrons on the outer wall — live broadcast feed of the arena
 	# (stadium_tv.gd). Skipped in editor previews like the crowd controller.
 	if not Engine.is_editor_hint():
-		var tvs := StadiumTV.new()
-		tvs.name = "StadiumTVs"
-		root.add_child(tvs)
-		tvs.setup(
-			inner_r,
-			base_y,
-			inner_r + float(ROWS) * ROW_DEPTH + 1.4,
-			base_y + float(ROWS) * ROW_RISE + BACK_WALL_EXTRA,
-		)
+		if not ("--no-tv" in user_args):
+			var tvs := StadiumTV.new()
+			tvs.name = "StadiumTVs"
+			root.add_child(tvs)
+			tvs.setup(
+				inner_r,
+				base_y,
+				inner_r + float(ROWS) * ROW_DEPTH + 1.4,
+				base_y + float(ROWS) * ROW_RISE + BACK_WALL_EXTRA,
+			)
 		# Sponsor ribbon around the barrier — see ad_ring.gd.
-		var ads := AdRing.new()
-		ads.name = "AdRing"
-		root.add_child(ads)
-		ads.setup(inner_r, base_y, _sq)
+		if not ("--no-ads" in user_args):
+			var ads := AdRing.new()
+			ads.name = "AdRing"
+			root.add_child(ads)
+			ads.setup(inner_r, base_y, _sq)
 	# Hand the ring geometry + crowd material to the reaction system: bullets
 	# and blasts landing in this band scare the crowd, kills make it roar, and
 	# CrowdAudio drives the shader's excitement/panic uniforms. Editor preview
