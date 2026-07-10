@@ -6,10 +6,11 @@ extends Node3D
 #
 #   godot --path . res://scenes/flesh_lab.tscn                    # interactive (guns slowly turn)
 #   godot --path . res://scenes/flesh_lab.tscn -- capture=/tmp/flesh.png
+#   godot --path . res://scenes/flesh_lab.tscn -- levels=0.08,0.17,0.25,0.33  # custom corruption row
 
 const GUN_SCRIPT := preload("res://scripts/procedural_gun.gd")
 const GROWTH_SCRIPT := preload("res://scripts/demon_growth.gd")
-const LEVELS: Array[float] = [0.0, 0.35, 0.65, 1.0]
+var LEVELS: Array[float] = [0.0, 0.35, 0.65, 1.0]
 const ROW_Y := 1.2
 const SPACING := 0.95
 
@@ -17,6 +18,11 @@ var _cam: Camera3D
 var _holders: Array[Node3D] = []
 
 func _ready() -> void:
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with("levels="):
+			LEVELS.clear()
+			for s in a.substr(7).split(","):
+				LEVELS.append(clampf(float(s), 0.0, 1.0))
 	_build_env()
 	for i in LEVELS.size():
 		var holder := Node3D.new()
