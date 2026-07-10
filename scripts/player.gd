@@ -336,6 +336,13 @@ const BOT_AIR_STRIKE_FLEE_RADIUS := 40.0
 const BOT_AIR_STRIKE_PANIC_RADIUS := 22.0
 const BOT_GAP_JUMP_MIN_LANDING := 4.5
 const BOT_GAP_JUMP_MAX_LANDING := 12.0
+const BOT_REACTION_MIN := 0.2            # seconds of LOS before the first shot
+const BOT_REACTION_MAX := 0.55
+const BOT_AIM_TURN_SPEED := 3.2          # rad/s crosshair slew — close strafers outrun it
+const BOT_PICKUP_RANGE := 22.0
+const BOT_PICKUP_NOTICE_CHANCE := 0.55   # per ~2s scan — bots miss pickups sometimes
+const BOT_CLIMB_MIN_HEIGHT := 1.0        # ledge heights worth a deliberate climb
+const BOT_CLIMB_MAX_HEIGHT := 2.6        # jump (~1.35m) + double jump (~1.2m)
 const EXPLOSION_EDGE_FALLOFF := 0.2
 
 var _bot_target: Node3D = null
@@ -346,6 +353,27 @@ var _bot_approach: float = 1.0           # -1 retreat, 0 hold, +1 chase
 var _bot_jump_cooldown: float = 0.0
 var _bot_stuck_timer: float = 0.0
 var _bot_dash_cooldown: float = 0.0
+# --- Bot humanization ---
+# Aim error is a slow random walk (correlated across shots, like a wobbling
+# hand) plus a reaction delay after (re)acquiring line of sight — white noise
+# per shot reads as a machine.
+var _bot_aim_wander := Vector3.ZERO
+var _bot_aim_wander_target := Vector3.ZERO
+var _bot_aim_retarget: float = 0.0
+var _bot_aim_point := Vector3.ZERO       # where the "mouse hand" currently points
+var _bot_los_time: float = 0.0
+var _bot_reaction: float = 0.35
+var _bot_special_think: float = 0.0      # RMB decision cadence
+var _bot_pickup_target: Node3D = null
+var _bot_pickup_scan: float = 0.0
+var _bot_pickup_give_up: float = 0.0
+var _bot_climb_probe: float = 0.0
+var _bot_climb_until: float = 0.0        # >0: mid-climb, may spend the double jump
+var _bot_climb_target_y: float = 0.0
+# Lava "mistake" is a timed lapse, not per-call dice — fresh dice on every
+# safety probe meant dozens of independent chances per second to stroll in.
+var _bot_lava_risk_timer: float = 0.0
+var _bot_lava_risk_roll: float = 0.0
 var _prev_local_actions: Dictionary = {}
 
 var health: int = MAX_HEALTH
@@ -4771,6 +4799,8 @@ func _bot_physics(delta: float) -> void:
 		velocity = Vector3.ZERO
 		_bot_target = null
 		_bot_shoot_cooldown = 999.0
+		_bot_aim_point = Vector3.ZERO
+		_bot_los_time = 0.0
 		_trace_bot_phys(_pt)
 		return
 	if launching:
@@ -4800,7 +4830,31 @@ func _bot_physics(delta: float) -> void:
 	_bot_shoot_cooldown = maxf(0.0, _bot_shoot_cooldown - delta)
 	_bot_jump_cooldown = maxf(0.0, _bot_jump_cooldown - delta)
 	_bot_dash_cooldown = maxf(0.0, _bot_dash_cooldown - delta)
-	rifle_cooldown = maxf(0.0, rifle_cooldown - delta)
+	# Ticks rifle + grenade + melee — bots return before the human cooldown
+	# path, and a frozen grenade_cooldown meant bots could never use RMB.
+	_tick_weapon_cooldowns(delta)
+	_bot_special_think = maxf(0.0, _bot_special_think - delta)
+	_bot_climb_probe = maxf(0.0, _bot_climb_probe - delta)
+	_bot_climb_until = maxf(0.0, _bot_climb_until - delta)
+	_bot_pickup_scan -= delta
+	_bot_pickup_give_up -= delta
+	# Lava lapse window (see var comment): roll once a second, and a failed
+	# roll opens a short window where every safety check agrees to be wrong.
+	_bot_lava_risk_timer = maxf(0.0, _bot_lava_risk_timer - delta)
+	_bot_lava_risk_roll -= delta
+	if _bot_lava_risk_roll <= 0.0:
+		_bot_lava_risk_roll = 1.0
+		if randf() < BOT_LAVA_MISTAKE_CHANCE:
+			_bot_lava_risk_timer = 0.6
+	# Aim wobble drifts like a hand: retarget at irregular intervals, chase
+	# exponentially (same recipe as the demon eye's gaze walk).
+	_bot_aim_retarget -= delta
+	if _bot_aim_retarget <= 0.0:
+		_bot_aim_retarget = randf_range(0.25, 0.7)
+		_bot_aim_wander_target = Vector3(
+			randf_range(-1.0, 1.0), randf_range(-0.6, 0.6), randf_range(-1.0, 1.0)
+		) * randf_range(0.1, 0.9)
+	_bot_aim_wander = _bot_aim_wander.lerp(_bot_aim_wander_target, 1.0 - exp(-5.0 * delta))
 
 	if reloading and rifle_cooldown <= 0.0:
 		mag = weapon.get_mag_size()
@@ -4854,6 +4908,24 @@ func _bot_physics(delta: float) -> void:
 	if move_dir.length() > 1.0:
 		move_dir = move_dir.normalized()
 
+	# Pickup seeking: notice a grounded pickup every couple of seconds (not
+	# always — bots are allowed to miss them) and drift toward it while still
+	# fighting. Skipped in co-op, where pickups ignore bots anyway.
+	if _bot_pickup_target != null and (not is_instance_valid(_bot_pickup_target) or _bot_pickup_give_up <= 0.0):
+		_bot_pickup_target = null
+	if _bot_pickup_target == null and _bot_pickup_scan <= 0.0:
+		_bot_pickup_scan = randf_range(1.4, 2.8)
+		var coop: bool = game_scene != null and game_scene.has_method("is_coop_mode") and game_scene.is_coop_mode()
+		if not coop and randf() < BOT_PICKUP_NOTICE_CHANCE:
+			_bot_pickup_target = _bot_find_pickup()
+			_bot_pickup_give_up = randf_range(4.0, 7.0)
+	if _bot_pickup_target != null:
+		var to_pick: Vector3 = _bot_pickup_target.global_position - global_position
+		to_pick.y = 0.0
+		if to_pick.length() > 0.3:
+			# Blend, don't beeline — the bot keeps strafing and fighting.
+			move_dir = (to_pick.normalized() * 0.85 + move_dir * 0.45).normalized()
+
 	var strike_dist := _bot_nearest_strike_flat_dist()
 	var flee_dir := Vector3.ZERO
 	if strike_dist < BOT_AIR_STRIKE_FLEE_RADIUS:
@@ -4899,12 +4971,41 @@ func _bot_physics(delta: float) -> void:
 			if not ghost_mode:
 				SFX.jump(global_position)
 
+	# Climb buildings: when a wall blocks the way (or the target holds high
+	# ground), look for a mountable rooftop and jump; the mid-air block below
+	# spends the double jump to finish the climb.
+	if not gap_jump_started and is_on_floor() and _bot_climb_probe <= 0.0 \
+			and move_dir.length_squared() > 0.01:
+		if to_target.y > 1.6 or randf() < 0.35:
+			var ledge_h := _bot_climbable_ledge_height(move_dir)
+			if ledge_h > 0.0:
+				velocity.y = JUMP_VELOCITY
+				jumps_left = 1 + weapon.extra_jumps
+				_bot_climb_until = 1.4
+				_bot_climb_target_y = global_position.y + ledge_h
+				_bot_jump_cooldown = randf_range(0.8, 1.6)
+				gap_jump_started = true
+				if not ghost_mode:
+					SFX.jump(global_position)
+		_bot_climb_probe = randf_range(1.2, 2.8)
+	# Mid-climb: the first jump tops out below the ledge — spend the double
+	# jump at the apex to mount it.
+	if _bot_climb_until > 0.0 and not is_on_floor() and velocity.y < 1.0 \
+			and jumps_left > 0 and global_position.y < _bot_climb_target_y - 0.2:
+		velocity.y = DOUBLE_JUMP_VELOCITY
+		jumps_left -= 1
+		if not ghost_mode:
+			SFX.jump(global_position)
+
 	# Occasional hop — keeps the bot moving vertically, harder to track.
 	var hop_chance := BOT_LAVA_JUMP_CHANCE if _bot_on_lava_map() else BOT_JUMP_CHANCE
 	if not gap_jump_started and is_on_floor() and _bot_jump_cooldown <= 0.0 and randf() < hop_chance:
-		velocity.y = JUMP_VELOCITY
-		_bot_jump_cooldown = randf_range(2.0, 4.5)
-		if not ghost_mode: SFX.jump(global_position)
+		# Never hop toward lava — the jump carries current momentum, so the
+		# probable landing must be safe even during a lapse window.
+		if not _bot_on_lava_map() or _bot_move_is_lava_safe(move_dir, _bot_edge_probe_dist() + 1.5):
+			velocity.y = JUMP_VELOCITY
+			_bot_jump_cooldown = randf_range(2.0, 4.5)
+			if not ghost_mode: SFX.jump(global_position)
 
 	# Occasional dash — usually in the current move direction, sometimes sideways.
 	var dash_ok := move_dir.length_squared() > 0.01
@@ -4971,16 +5072,54 @@ func _bot_physics(delta: float) -> void:
 	# Fell off map.
 	_handle_fell_off_map()
 
-	if health > 0 and not ghost_mode and _bot_shoot_cooldown <= 0.0 and not reloading and _bot_has_los(_bot_target):
+	# --- Aim tracking: the "mouse hand" ---
+	# The aim point chases the target at a capped angular speed, so a close
+	# strafing player outruns the crosshair (huge deg/sec) while a distant or
+	# standing one is easy to keep centered. Shots aim at THIS point, not at
+	# the target's true position.
+	var eye: Vector3 = global_position + Vector3.UP * 0.7
+	var want_aim: Vector3 = _bot_target.global_position + Vector3.UP * 0.4
+	var want_dir: Vector3 = want_aim - eye
+	var aim_range: float = maxf(want_dir.length(), 0.5)
+	var cur_dir: Vector3 = _bot_aim_point - eye
+	if cur_dir.length_squared() < 0.01:
+		cur_dir = -global_transform.basis.z * aim_range
+	var aim_ang: float = cur_dir.angle_to(want_dir)
+	var max_turn: float = BOT_AIM_TURN_SPEED * delta
+	if aim_ang > max_turn and aim_ang > 0.0001:
+		var axis: Vector3 = cur_dir.cross(want_dir)
+		if axis.length_squared() < 0.000001:
+			axis = Vector3.UP
+		cur_dir = cur_dir.rotated(axis.normalized(), max_turn)
+	else:
+		cur_dir = want_dir
+	_bot_aim_point = eye + cur_dir.normalized() * aim_range
+
+	# Reaction time: hold fire briefly after (re)acquiring line of sight.
+	var has_los: bool = _bot_has_los(_bot_target)
+	if has_los:
+		_bot_los_time += delta
+	else:
+		if _bot_los_time > 0.0:
+			_bot_reaction = randf_range(BOT_REACTION_MIN, BOT_REACTION_MAX)
+		_bot_los_time = 0.0
+
+	if health > 0 and not ghost_mode and has_los and _bot_los_time >= _bot_reaction:
 		# Round must be live (no shooting at corpses during card pick / match
 		# over), and the dev toggle in the F1 panel can hold fire entirely.
 		var game_scene_shoot: Node = get_tree().current_scene
 		var is_playing: bool = game_scene_shoot and int(game_scene_shoot.get("state")) == 1  # State.PLAYING == 1
 		if is_playing:
-			if _bot_shoot():
-				# Bots auto-fire at the weapon's natural cadence, but now obey
-				# the same magazine and reload gates as humans.
-				_bot_shoot_cooldown = weapon.get_fire_interval()
+			if _bot_shoot_cooldown <= 0.0 and not reloading:
+				if _bot_shoot():
+					# Bots auto-fire at the weapon's natural cadence, but now obey
+					# the same magazine and reload gates as humans.
+					_bot_shoot_cooldown = weapon.get_fire_interval()
+			# RMB: consider the special once the cooldown is up, on a lazy
+			# think cadence so it fires when it makes sense, not on refresh.
+			if grenade_cooldown <= 0.0 and _bot_special_think <= 0.0:
+				_bot_special_think = randf_range(1.2, 3.2)
+				_bot_try_special(dist)
 
 	_trace_bot_phys(_pt)
 
@@ -5010,7 +5149,9 @@ func _bot_is_lava_safe_at(world_pos: Vector3) -> bool:
 
 
 func _bot_may_take_lava_risk() -> bool:
-	return randf() < BOT_LAVA_MISTAKE_CHANCE
+	# Timed lapse window set in _bot_physics — every safety probe within one
+	# maneuver agrees, instead of each call rolling its own dice.
+	return _bot_lava_risk_timer > 0.0
 
 
 func _bot_edge_probe_dist() -> float:
@@ -5210,6 +5351,98 @@ func _bot_has_los(target: Node3D) -> bool:
 	q.exclude = get_hitbox_rids()
 	return get_world_3d().direct_space_state.intersect_ray(q).is_empty()
 
+
+func _bot_find_pickup() -> Node3D:
+	# Nearest landed, uncollected pickup within notice range and roughly on
+	# our level. Lava-unsafe drop spots are ignored outright.
+	var best: Node3D = null
+	var best_d := BOT_PICKUP_RANGE * BOT_PICKUP_RANGE
+	for node in get_tree().get_nodes_in_group("pickups"):
+		var p := node as Node3D
+		if p == null or not is_instance_valid(p):
+			continue
+		if p.get("_grounded") != true or p.get("_collected") == true:
+			continue
+		var dy: float = p.global_position.y - global_position.y
+		if dy > 3.0 or dy < -6.0:
+			continue
+		if not _bot_is_lava_safe_at(p.global_position):
+			continue
+		var d: float = global_position.distance_squared_to(p.global_position)
+		if d < best_d:
+			best_d = d
+			best = p
+	return best
+
+
+# A wall within ~2.2m at chest height whose top is reachable with jump +
+# double jump → return the ledge height (0 = nothing mountable). Too-tall
+# walls fail naturally: the roof probe starts inside the building and rays
+# don't hit from inside.
+func _bot_climbable_ledge_height(move_dir: Vector3) -> float:
+	var dir: Vector3 = move_dir.normalized()
+	var space := get_world_3d().direct_space_state
+	var from: Vector3 = global_position + Vector3.UP * 0.9
+	var q := PhysicsRayQueryParameters3D.create(from, from + dir * 2.2, 1)
+	q.exclude = [get_rid()]
+	var wall: Dictionary = space.intersect_ray(q)
+	if wall.is_empty():
+		return 0.0
+	var wall_pos: Vector3 = wall.get("position", from)
+	var over := Vector3(wall_pos.x, global_position.y + BOT_CLIMB_MAX_HEIGHT + 0.8, wall_pos.z) + dir * 0.6
+	var q2 := PhysicsRayQueryParameters3D.create(over, over + Vector3.DOWN * (BOT_CLIMB_MAX_HEIGHT + 1.2), 1)
+	q2.exclude = [get_rid()]
+	var roof: Dictionary = space.intersect_ray(q2)
+	if roof.is_empty():
+		return 0.0
+	var h: float = float((roof.get("position") as Vector3).y) - global_position.y
+	if h < BOT_CLIMB_MIN_HEIGHT or h > BOT_CLIMB_MAX_HEIGHT:
+		return 0.0
+	if _bot_on_lava_map() and not _bot_is_lava_safe_at((roof.get("position") as Vector3) + Vector3.UP * 0.9):
+		return 0.0
+	return h
+
+
+# RMB: cast the special when it makes sense for its kind. Called on a lazy
+# think cadence with cooldown ready and line of sight held.
+func _bot_try_special(dist: float) -> void:
+	var sp: String = weapon.special
+	if _air_strike_charges > 0:
+		sp = Weapon.SPECIAL_AIR_STRIKE  # pickup charge overrides the equipped special
+	match sp:
+		Weapon.SPECIAL_ZOOM:
+			return  # aiming aid — nothing for a bot to cast
+		Weapon.SPECIAL_SWORD:
+			if dist > 4.5:
+				return
+		Weapon.SPECIAL_TELEPORT:
+			# Blink toward far targets. Skipped on lava maps — the destination
+			# ray is blind to what it lands on.
+			if dist < 13.0 or _bot_on_lava_map() or randf() < 0.4:
+				return
+		Weapon.SPECIAL_AIR_STRIKE, Weapon.SPECIAL_ION_CANNON:
+			if dist < 9.0 or randf() < 0.35:
+				return
+		_:
+			# Grenade / cluster — lob at mid range.
+			if dist < 5.0 or dist > 30.0 or randf() < 0.35:
+				return
+	_bot_aim_camera_at_target(sp)
+	_use_special()
+
+
+# Specials aim along the camera; bots park theirs on the tracked aim point
+# (same wobble as gunfire), lofted for grenade arcs.
+func _bot_aim_camera_at_target(sp: String) -> void:
+	if camera == null or _bot_target == null or not is_instance_valid(_bot_target):
+		return
+	var aim: Vector3 = _bot_aim_point if _bot_aim_point != Vector3.ZERO \
+		else _bot_target.global_position + Vector3.UP * 0.4
+	if sp == Weapon.SPECIAL_GRENADE or sp == Weapon.SPECIAL_CLUSTER_GRENADE:
+		aim += Vector3.UP * global_position.distance_to(aim) * 0.22
+	if camera.global_position.distance_squared_to(aim) > 0.01:
+		camera.look_at(aim, Vector3.UP)
+
 func _bot_shoot() -> bool:
 	if _bot_target == null or not is_instance_valid(_bot_target):
 		return false
@@ -5221,7 +5454,11 @@ func _bot_shoot() -> bool:
 	mag -= 1
 	var last_in_mag := mag <= 0
 	var from := global_position + Vector3.UP * 0.7
-	var to: Vector3 = _bot_target.global_position + Vector3.UP * 0.4
+	# Shoot at where the crosshair IS (the slew-limited aim point tracked in
+	# _bot_physics), not at the target's true position — a fast close strafe
+	# means the bullets land behind the strafe, like a human losing the track.
+	var to: Vector3 = _bot_aim_point if _bot_aim_point != Vector3.ZERO \
+		else _bot_target.global_position + Vector3.UP * 0.4
 	var dist := from.distance_to(to)
 
 	# --- Target Leading (Projectiles) ---
@@ -5238,17 +5475,24 @@ func _bot_shoot() -> bool:
 	var lead_multiplier := randf_range(0.55, 1.15)
 	var predicted_pos := to + target_vel * time_to_hit * lead_multiplier
 
+	# Error scales with how fast the target is moving — a standing player is
+	# an easy shot, a dashing one genuinely hard to track — and shrinks the
+	# longer the bot has held line of sight (settling in).
+	var speed_err: float = clampf(target_vel.length() / 7.0, 0.2, 1.4)
+	var settle: float = clampf(1.6 - _bot_los_time * 0.45, 0.6, 1.6)
+	predicted_pos += _bot_aim_wander * clampf(dist / 16.0, 0.5, 2.2) * settle * speed_err
+
 	var dir := (predicted_pos - from).normalized()
 
 	# --- Refined Spread ---
-	# Even at point-blank the bot has visible wobble; spread climbs sharply
-	# with distance so long-range fights don't feel like a sniper duel.
-	var base_spread := 0.04 # ~2.3 degrees
+	# Wobble grows with target speed and distance so long-range fights don't
+	# feel like a sniper duel, but a stationary target gets punished.
+	var base_spread := 0.018 + 0.03 * speed_err
 	var dist_factor := clampf(dist / 40.0, 0.0, 2.0)
-	var spread := base_spread + (BOT_SPREAD * 0.7 * dist_factor)
+	var spread := base_spread + (BOT_SPREAD * 0.7 * dist_factor) * (0.4 + 0.6 * speed_err)
 
-	# Every so often the bot whiffs harder — keeps it from feeling laser-accurate.
-	if randf() < BOT_MISS_CHANCE:
+	# Every so often the bot whiffs harder — mostly against movers.
+	if randf() < BOT_MISS_CHANCE * speed_err:
 		spread *= randf_range(2.5, 5.0)
 
 	var shots := weapon.get_shots_per_trigger()
