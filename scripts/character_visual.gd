@@ -3,6 +3,18 @@ extends Node3D
 
 const KNIGHT_SCENE := preload("res://assets/models/knight.fbx")
 
+# Character variants — Mixamo-rigged humanoids. Any FBX with a Mixamo
+# skeleton drops in unmodified: bone lookups are prefix-tolerant (plain,
+# mixamorig_*, mixamorig5_*, …) and animation clips are retargeted onto the
+# actual rig at import time (_retarget_clip_to_skeleton). Ragdolls, gibs and
+# wounds are generated from the skeleton, so variants inherit all of it.
+const VARIANT_SCENES: Array[PackedScene] = [
+	preload("res://assets/models/knight.fbx"),
+	preload("res://assets/models/paladin.fbx"),
+	preload("res://assets/models/zombie.fbx"),
+	preload("res://assets/models/ch10.fbx"),
+]
+
 const ANIM_FILES := {
 	"pistol_idle": "res://assets/animations/Pistol Idle.fbx",
 	"pistol_run": "res://assets/animations/Pistol Run.fbx",
@@ -22,10 +34,14 @@ const WEAPON_MOUNT_ROTATION_DEGREES := Vector3(89.46, -9.10, 0.00)
 const FOOT_OFFSET_Y := -0.9
 
 @export var foot_align_capsule: bool = true
+# -1 = derive from the owning player's player_id, so every peer independently
+# picks the same skin with zero netcode. Set explicitly in labs/tools.
+@export var variant: int = -1
 
 var enabled: bool = true
 var ready_ok: bool = false
 
+var _model_scene: PackedScene = KNIGHT_SCENE
 var _model: Node3D
 var _skeleton: Skeleton3D
 var _anim_player: AnimationPlayer
@@ -186,17 +202,51 @@ func collect_meshes(out: Array[MeshInstance3D]) -> void:
 
 func get_camera_pivot() -> Vector3:
 	if _skeleton != null:
-		var hips_idx := _skeleton.find_bone("Hips")
+		var hips_idx := find_bone_any(_skeleton, "Hips")
 		if hips_idx >= 0:
 			var local := _skeleton.get_bone_global_pose(hips_idx).origin
 			return _skeleton.global_transform * local
 	return global_position + Vector3(0.0, 1.0, 0.0)
 
 
+# Case-exact bone lookup first, then tolerate Mixamo namespace prefixes
+# ("mixamorig:Hips" imports as "mixamorig_Hips", numbered rigs as
+# "mixamorig5_Hips"). Suffix match is safe: "_Spine" never matches "Spine1".
+static func find_bone_any(skel: Skeleton3D, plain: String) -> int:
+	var idx := skel.find_bone(plain)
+	if idx >= 0:
+		return idx
+	var suffix := "_" + plain
+	for i in skel.get_bone_count():
+		if skel.get_bone_name(i).ends_with(suffix):
+			return i
+	return -1
+
+
+func get_model_scene() -> PackedScene:
+	return _model_scene
+
+
+func _derive_variant() -> int:
+	# Walk up to the owning Player for its player_id — same id on every peer,
+	# so everyone renders the same skin. Bots have consecutive ids and cycle
+	# through the roster.
+	var n: Node = get_parent()
+	while n != null:
+		var pid: Variant = n.get("player_id")
+		if typeof(pid) == TYPE_INT:
+			return posmod(int(pid), VARIANT_SCENES.size())
+		n = n.get_parent()
+	return randi() % VARIANT_SCENES.size()
+
+
 func _build() -> void:
-	_model = (KNIGHT_SCENE.instantiate() as Node3D)
+	if variant < 0:
+		variant = _derive_variant()
+	_model_scene = VARIANT_SCENES[variant % VARIANT_SCENES.size()]
+	_model = (_model_scene.instantiate() as Node3D)
 	if _model == null:
-		push_warning("CharacterVisual: failed to instance knight.fbx")
+		push_warning("CharacterVisual: failed to instance character variant %d" % variant)
 		return
 	_model.name = "KnightModel"
 	add_child(_model)
@@ -257,9 +307,34 @@ func _import_anim_clip(loco_lib: AnimationLibrary, slot_name: String, path: Stri
 			anim.loop_mode = (
 				Animation.LOOP_NONE if slot_name in ONE_SHOT_CLIPS else Animation.LOOP_LINEAR
 			)
+			_retarget_clip_to_skeleton(anim)
 			loco_lib.add_animation(slot_name, anim)
 			break
 	inst.free()
+
+
+# Anim FBXs address bones as "Armature/Skeleton3D:PlainName" (the knight's
+# layout). Other rigs park the skeleton elsewhere and prefix bone names, so
+# rewrite every track to THIS model's skeleton path + actual bone names.
+# Tracks whose bone doesn't exist on this rig (e.g. the knight's extra
+# "root" bone) are dropped.
+func _retarget_clip_to_skeleton(anim: Animation) -> void:
+	if _model == null or _skeleton == null:
+		return
+	var skel_path := str(_model.get_path_to(_skeleton))
+	for t in range(anim.get_track_count() - 1, -1, -1):
+		var p := str(anim.track_get_path(t))
+		var colon := p.find(":")
+		if colon < 0:
+			continue
+		var bone := p.substr(colon + 1)
+		var idx := find_bone_any(_skeleton, bone)
+		if idx < 0:
+			anim.remove_track(t)
+			continue
+		var want := skel_path + ":" + _skeleton.get_bone_name(idx)
+		if p != want:
+			anim.track_set_path(t, NodePath(want))
 
 
 func _setup_anim_tree() -> void:
@@ -317,7 +392,8 @@ func _on_animation_finished(anim_name: StringName) -> void:
 func _attach_weapon_anchor() -> void:
 	var attach := BoneAttachment3D.new()
 	attach.name = "WeaponBoneAttachment"
-	attach.bone_name = "RightHand"
+	var hand_idx := find_bone_any(_skeleton, "RightHand")
+	attach.bone_name = _skeleton.get_bone_name(hand_idx) if hand_idx >= 0 else "RightHand"
 	_skeleton.add_child(attach)
 	_weapon_anchor = Node3D.new()
 	_weapon_anchor.name = "WeaponAnchor"

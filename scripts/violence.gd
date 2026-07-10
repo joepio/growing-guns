@@ -817,7 +817,8 @@ static func spawn_knight_ragdoll(
 	var src_skel: Skeleton3D = knight._skeleton
 	if src_model == null or src_skel == null:
 		return null
-	var model := CharacterVisual.KNIGHT_SCENE.instantiate() as Node3D
+	# Clone the SAME variant the dead player wore, not a hardcoded knight.
+	var model := knight.get_model_scene().instantiate() as Node3D
 	if model == null:
 		return null
 	var root := Node3D.new()
@@ -842,7 +843,7 @@ static func spawn_knight_ragdoll(
 	var head_pb: PhysicalBone3D = null
 	var pbs: Array[PhysicalBone3D] = []
 	for spec: Array in _KNIGHT_RAGDOLL_BONES:
-		var idx: int = skel.find_bone(str(spec[0]))
+		var idx: int = CharacterVisual.find_bone_any(skel, str(spec[0]))
 		if idx < 0:
 			continue
 		var bone_pose: Transform3D = skel.get_bone_global_pose(idx)
@@ -850,7 +851,7 @@ static func spawn_knight_ragdoll(
 		# space). Head has no target: give it a stub straight up the bone.
 		var v := Vector3(0.0, 0.2, 0.0)
 		if str(spec[1]) != "":
-			var cidx: int = skel.find_bone(str(spec[1]))
+			var cidx: int = CharacterVisual.find_bone_any(skel, str(spec[1]))
 			if cidx < 0:
 				continue
 			v = bone_pose.affine_inverse() * skel.get_bone_global_pose(cidx).origin
@@ -862,7 +863,7 @@ static func spawn_knight_ragdoll(
 		off.origin = off.basis * Vector3(0.0, 0.0, -length * 0.5)
 		var pb := PhysicalBone3D.new()
 		pb.name = "PB_%s" % str(spec[0])
-		pb.bone_name = str(spec[0])
+		pb.bone_name = skel.get_bone_name(idx)  # actual (possibly prefixed) name
 		pb.mass = float(spec[3])
 		pb.joint_type = PhysicalBone3D.JOINT_TYPE_PIN
 		pb.angular_damp = 2.0
@@ -1209,14 +1210,14 @@ static func _knight_wound_attach(knight: CharacterVisual, hit_pos: Vector3) -> B
 	var best := ""
 	var best_d := INF
 	for spec: Array in _KNIGHT_RAGDOLL_BONES:
-		var idx: int = skel.find_bone(str(spec[0]))
+		var idx: int = CharacterVisual.find_bone_any(skel, str(spec[0]))
 		if idx < 0:
 			continue
 		var p: Vector3 = skel.global_transform * skel.get_bone_global_pose(idx).origin
 		var d := p.distance_squared_to(hit_pos)
 		if d < best_d:
 			best_d = d
-			best = str(spec[0])
+			best = skel.get_bone_name(idx)
 	if best == "":
 		return null
 	return _bone_wound_attachment(skel, best)
@@ -1392,8 +1393,17 @@ static func _free_ragdoll_blood_wounds(rb: RigidBody3D) -> void:
 # -------------------- baking (thread-safe) --------------------
 
 static func _gib_build_variants(mesh: Mesh, chunk_count: int) -> Array:
+	# Big skinned meshes (character rigs, ~13k tris) get one layout — baking
+	# is O(tris × seeds) and three variants of a whole body buys little: the
+	# physics scatter is what reads as variety.
+	var n: int = _GIB_VARIANTS_PER_MESH
+	if mesh.get_surface_count() > 0:
+		var arr: Array = mesh.surface_get_arrays(0)
+		var idx: Variant = arr[Mesh.ARRAY_INDEX]
+		if idx != null and (idx as PackedInt32Array).size() > 15000:  # ~5k tris
+			n = 1
 	var variants: Array = []
-	for _i in _GIB_VARIANTS_PER_MESH:
+	for _i in n:
 		variants.append(_gib_bake_one(mesh, chunk_count))
 	return variants
 
@@ -1455,9 +1465,13 @@ static func _gib_bake_one(mesh: Mesh, chunk_count: int) -> Array:
 				best_c = c
 		seeds.append(best_c)
 
+	# Plain Arrays here, NOT PackedInt32Array: packed arrays are value types,
+	# so the old copy-out/append/copy-back dance memcpy'd the whole bucket
+	# once per triangle — O(tris²), minutes on a 13k-tri character mesh.
+	# Reference-semantics Arrays append in place; pack once at the end.
 	var buckets: Array = []
 	for _i in chunk_count:
-		buckets.append(PackedInt32Array())
+		buckets.append([])
 	for t in tri_count:
 		var i0: int = indices[t * 3 + 0]
 		var i1: int = indices[t * 3 + 1]
@@ -1470,14 +1484,13 @@ static func _gib_bake_one(mesh: Mesh, chunk_count: int) -> Array:
 			if d < best_d:
 				best_d = d
 				best = s
-		var bucket: PackedInt32Array = buckets[best]
+		var bucket: Array = buckets[best]
 		bucket.append(i0)
 		bucket.append(i1)
 		bucket.append(i2)
-		buckets[best] = bucket
 
 	for b in chunk_count:
-		var bucket_indices: PackedInt32Array = buckets[b]
+		var bucket_indices := PackedInt32Array(buckets[b])
 		if bucket_indices.size() < 3:
 			continue
 		var chunk_dict: Dictionary = _gib_bake_chunk(bucket_indices, src_verts, src_norms, src_uvs)
@@ -1573,16 +1586,17 @@ static func _gib_build_cap(
 		var ia: int = new_indices[t * 3 + 0]
 		var ib: int = new_indices[t * 3 + 1]
 		var ic: int = new_indices[t * 3 + 2]
-		var pairs: Array = [[ia, ib], [ib, ic], [ic, ia]]
-		for pair in pairs:
-			var a: int = pair[0]
-			var b: int = pair[1]
+		# Unrolled edges — the old per-triangle nested-Array literal allocated
+		# four Arrays per tri, a measurable slice of big-mesh bakes.
+		for e in 3:
+			var a: int = ia if e == 0 else (ib if e == 1 else ic)
+			var b: int = ib if e == 0 else (ic if e == 1 else ia)
 			var ca: int = canon[a]
 			var cb: int = canon[b]
 			var key := Vector2i(mini(ca, cb), maxi(ca, cb))
 			edge_counts[key] = int(edge_counts.get(key, 0)) + 1
 			if not edge_repr.has(key):
-				edge_repr[key] = [a, b]
+				edge_repr[key] = Vector2i(a, b)
 
 	var boundary: Array = []
 	for key: Vector2i in edge_counts.keys():
