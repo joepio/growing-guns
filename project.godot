@@ -124,8 +124,8 @@ tab={
 [physics]
 
 common/max_physics_steps_per_frame=6
-common/physics_interpolation=true
 common/physics_jitter_fix=0.0
+common/physics_interpolation=true
 
 [raytraced_audio]
 
