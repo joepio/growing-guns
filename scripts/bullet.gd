@@ -49,6 +49,11 @@ var _trail_inst: MeshInstance3D = null
 var _trail_mat: ShaderMaterial = null
 var _max_trail_length: float = 2.0
 var _trail_thickness: float = 0.04
+# GROW card: body/nose meshes swell in flight as the damage ramps with
+# distance (null unless grow_damage_per_meter > 0).
+var _grow_body: MeshInstance3D = null
+var _grow_nose: MeshInstance3D = null
+var _grow_base_scale: float = 1.0
 
 # Shared visual resources — one mesh + material set for all in-flight bullets.
 static var _bullet_body_mesh: CylinderMesh = null
@@ -214,6 +219,11 @@ func setup(origin: Vector3, dir: Vector3, shooter: int, w: Weapon, p_last_in_mag
 	nose_inst.scale = Vector3.ONE * s
 	add_child(nose_inst)
 
+	if weapon_stats.grow_damage_per_meter > 0.0:
+		_grow_body = body_inst
+		_grow_nose = nose_inst
+		_grow_base_scale = s
+
 	_trail_thickness = 0.04 * s
 	_trail_inst = MeshInstance3D.new()
 	_trail_inst.mesh = _get_trail_box_mesh()
@@ -329,6 +339,15 @@ func _physics_process(delta: float) -> void:
 		_trail_mat.set_shader_parameter("head_world", head_world)
 		_trail_mat.set_shader_parameter("tail_world", tail_world)
 		_trail_mat.set_shader_parameter("trail_radius", _trail_thickness * 0.5)
+
+	# GROW rounds visibly swell as their damage ramps up — same curve as
+	# _current_damage, capped so long flights don't become blimps.
+	if _grow_body != null:
+		var gf: float = minf(1.0 + distance_traveled * weapon_stats.grow_damage_per_meter, 3.0)
+		_grow_body.scale = Vector3.ONE * (_grow_base_scale * gf)
+		_grow_body.position.z = _body_len * 0.5 * gf
+		_grow_nose.scale = Vector3.ONE * (_grow_base_scale * gf)
+		_grow_nose.position.z = -_nose_len * 0.5 * gf
 
 	_maybe_zip_by()
 
