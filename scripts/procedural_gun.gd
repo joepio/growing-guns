@@ -89,6 +89,7 @@ extends Node3D
 # FIFO of this gun's live casings (oldest first). Casings live in current_scene,
 # so we free them on _exit_tree to avoid leaking when the player respawns.
 var _live_casings: Array[RigidBody3D] = []
+var _casing_mat: StandardMaterial3D = null  # shared by this gun's casings
 
 @export_group("Heat")
 # Barrels glow when fired a lot. add_heat() pumps in per-shot heat (Player
@@ -340,17 +341,13 @@ func eject_casing() -> void:
 	# Mesh — slight nose taper for shell look. Rotated so the cylinder's
 	# long axis lies along local Z (matches the rotated collision shape).
 	var mi := MeshInstance3D.new()
-	var cm := CylinderMesh.new()
-	cm.top_radius = c_radius * 0.85
-	cm.bottom_radius = c_radius
-	cm.height = c_length
-	cm.radial_segments = 6
-	mi.mesh = cm
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = casing_color
-	mat.metallic = 0.9
-	mat.roughness = 0.35
-	mi.material_override = mat
+	mi.mesh = _cached_cylinder_mesh(c_radius * 0.85, c_radius, c_length, 6)
+	if _casing_mat == null:
+		_casing_mat = StandardMaterial3D.new()
+		_casing_mat.albedo_color = casing_color
+		_casing_mat.metallic = 0.9
+		_casing_mat.roughness = 0.35
+	mi.material_override = _casing_mat
 	mi.rotation = Vector3(PI * 0.5, 0, 0)
 	rb.add_child(mi)
 
@@ -635,6 +632,17 @@ static func _lerp_weapon(a: Weapon, b: Weapon, t: float) -> Weapon:
 func _rebuild() -> void:
 	if _suppress_rebuild:
 		return
+	# Bucketed separately from "gun" (which is _process bolt animation): the
+	# pick-time rebuild cost was invisible to every trace bucket for weeks.
+	var _pt := 0
+	if not Engine.is_editor_hint() and Trace.enabled:
+		_pt = Time.get_ticks_usec()
+	_rebuild_impl()
+	if _pt != 0:
+		Trace.prof("gun_rebuild", Time.get_ticks_usec() - _pt)
+
+
+func _rebuild_impl() -> void:
 	# remove_child is synchronous; queue_free is deferred. Detach first so
 	# new children added below don't collide with old names (which would
 	# auto-rename them to @MeshInstance3D@N and break get_node lookups).
@@ -761,12 +769,7 @@ func _rebuild() -> void:
 		var drum_y: float = -effective_receiver_size.y * 0.5 - drum_radius
 		var drum := MeshInstance3D.new()
 		drum.name = "Magazine"
-		var dm := CylinderMesh.new()
-		dm.top_radius = drum_radius
-		dm.bottom_radius = drum_radius
-		dm.height = drum_thickness
-		dm.radial_segments = 8
-		drum.mesh = dm
+		drum.mesh = _cached_cylinder_mesh(drum_radius, drum_radius, drum_thickness)
 		drum.material_override = darker_metal
 		# Cylinder default axis = Y; rotate 90° around X so the axis lies along Z
 		# (drum face visible from the front, thin edge from the side).
@@ -992,6 +995,43 @@ func _add_barrel_shroud(
 			_add_box("Rib%d" % i, rib_size, Vector3(0.0, plate_y, rib_z), mat, side)
 
 # ---- Helpers ----
+
+# Shared mesh cache: _rebuild() runs on every card pick (for BOTH gun rigs)
+# and every inspector tweak; creating ~40 fresh Box/Cylinder meshes per pass
+# re-uploaded GPU buffers each time — measured ~100ms engine-side at
+# pick-confirm. Part dims derive from weapon stats, so quantized keys re-hit
+# across rebuilds. Materials deliberately stay per-rebuild: heat glow and
+# the indicator mutate them per gun instance.
+static var _mesh_cache: Dictionary = {}
+
+
+static func _cached_box_mesh(size: Vector3) -> BoxMesh:
+	var key := ["b",
+		snappedf(size.x, 0.0005), snappedf(size.y, 0.0005), snappedf(size.z, 0.0005)]
+	var m: BoxMesh = _mesh_cache.get(key)
+	if m == null:
+		m = BoxMesh.new()
+		m.size = size
+		_mesh_cache[key] = m
+	return m
+
+
+static func _cached_cylinder_mesh(
+	top_r: float, bottom_r: float, height: float, segments: int = 8
+) -> CylinderMesh:
+	var key := ["c", snappedf(top_r, 0.0005), snappedf(bottom_r, 0.0005),
+		snappedf(height, 0.0005), segments]
+	var m: CylinderMesh = _mesh_cache.get(key)
+	if m == null:
+		m = CylinderMesh.new()
+		m.top_radius = top_r
+		m.bottom_radius = bottom_r
+		m.height = height
+		m.radial_segments = segments
+		_mesh_cache[key] = m
+	return m
+
+
 func _make_material(col: Color, metallic: float, roughness: float) -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
 	m.albedo_color = col.lightened(0.06)
@@ -1004,9 +1044,7 @@ func _make_material(col: Color, metallic: float, roughness: float) -> StandardMa
 func _add_box(part_name: String, size: Vector3, pos: Vector3, mat: Material, parent: Node3D = null) -> MeshInstance3D:
 	var mi := MeshInstance3D.new()
 	mi.name = part_name
-	var bm := BoxMesh.new()
-	bm.size = size
-	mi.mesh = bm
+	mi.mesh = _cached_box_mesh(size)
 	mi.material_override = mat
 	mi.position = pos
 	var p: Node3D = parent if parent != null else self
@@ -1017,12 +1055,7 @@ func _add_box(part_name: String, size: Vector3, pos: Vector3, mat: Material, par
 func _add_cylinder(part_name: String, top_r: float, bottom_r: float, height: float, pos: Vector3, mat: Material, parent: Node3D = null) -> MeshInstance3D:
 	var mi := MeshInstance3D.new()
 	mi.name = part_name
-	var cm := CylinderMesh.new()
-	cm.top_radius = top_r
-	cm.bottom_radius = bottom_r
-	cm.height = height
-	cm.radial_segments = 8
-	mi.mesh = cm
+	mi.mesh = _cached_cylinder_mesh(top_r, bottom_r, height)
 	mi.material_override = mat
 	mi.position = pos
 	# Cylinder height is along local Y. Rotate 90° around X so it lies along Z.
