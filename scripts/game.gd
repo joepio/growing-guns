@@ -3296,8 +3296,11 @@ func _begin_card_pick_for_loser(loser_id: int) -> void:
 	var peer := _peer_for_player(loser_id)
 	if peer != 0 and not _is_bot_id(loser_id):
 		_show_card_pick.rpc_id(peer, loser_id, cards)
-		# Bots resolve via _bot_auto_pick; humans get a 7s countdown.
-		pending_pick_deadlines[loser_id] = CARD_PICK_TIMEOUT
+		# Bots resolve via _bot_auto_pick. Humans get a pick countdown, but
+		# only when another HUMAN is waiting on them — the timeout exists to
+		# stop players stalling each other, and bots don't mind waiting.
+		if _human_count() > 1:
+			pending_pick_deadlines[loser_id] = CARD_PICK_TIMEOUT
 	if _is_bot_id(loser_id):
 		_bot_auto_pick.call_deferred(loser_id)
 
