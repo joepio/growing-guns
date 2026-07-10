@@ -8,6 +8,10 @@ const DestructibleManager = preload("res://scripts/destructible_manager.gd")
 # RigidBody chunks, and active rigid bodies are the #1 driver of in-game frame
 # hitches (a single overkill used to spawn ~60 bodies).
 const GIB_CHUNK_COUNT := 3
+# The knight rig is ONE big skinned mesh (the blob was 12-14 small primitives,
+# each split by GIB_CHUNK_COUNT). Three cells on a whole humanoid leaves a
+# giant T-pose torso slab — the knight needs a much finer split.
+const KNIGHT_GIB_CHUNK_COUNT := 12
 # Killing blow that would leave health here or lower → full body disintegrate.
 const OVERKILL_DISINTEGRATE_HEALTH := -50
 # Screen-space heat-shimmer + shockwave distortion read the framebuffer (a
@@ -707,8 +711,9 @@ static func hit_corpse(rb: RigidBody3D, hit_pos: Vector3, dir: Vector3, dmg: flo
 	spawn_blood(scene, hit_pos, dir, 0.7)
 	var splash_dir: Vector3 = dir.normalized() if dir.length_squared() > 0.001 else Vector3.UP
 	_gib_spawn_blood_splat(scene, hit_pos, -splash_dir, splash_dir, 0.5)
-	# Push the body slightly so heavy rounds visibly shove the corpse.
-	rb.apply_central_impulse(splash_dir * clampf(dmg * 0.05, 0.5, 4.0))
+	# Push the body slightly so heavy rounds visibly shove the corpse —
+	# positioned at the wound so it tumbles rather than translating.
+	rb.apply_impulse(splash_dir * clampf(dmg * 0.05, 0.5, 4.0), hit_pos - rb.global_position)
 	var taken: float = float(rb.get_meta("dmg_taken", 0.0)) + dmg
 	rb.set_meta("dmg_taken", taken)
 	if taken >= CORPSE_DISINTEGRATE_DMG:
@@ -803,6 +808,7 @@ static func spawn_knight_ragdoll(
 	base_velocity: Vector3,
 	push_dir: Vector3,
 	is_head: bool,
+	hit_pos: Vector3 = Vector3.INF,
 	lifetime: float = 14.0,
 ) -> PhysicalBone3D:
 	if knight == null or scene == null:
@@ -888,10 +894,38 @@ static func spawn_knight_ragdoll(
 		return null
 	root.set_meta("hips_pb", hips)
 	sim.physical_bones_start_simulation()
-	# Impulse = velocity * mass on every bone → uniform launch velocity; the
-	# extra head kick sells headshots even though the head stays attached.
+	# Kill impulse. A uniform velocity on every bone read as the whole statue
+	# sliding backward; instead, most of the momentum lands as a POSITIONED
+	# impulse concentrated on the bones nearest the bullet hole, so the body
+	# folds and spins around the wound and only drifts with the remainder.
+	var drift_frac: float = 0.35 if hit_pos != Vector3.INF else 1.0
 	for pb in pbs:
-		pb.apply_central_impulse(base_velocity * pb.mass)
+		pb.apply_central_impulse(base_velocity * pb.mass * drift_frac)
+	if hit_pos != Vector3.INF:
+		var total_mass: float = 0.0
+		for pb in pbs:
+			total_mass += pb.mass
+		# ~30 cm falloff: the struck limb takes the brunt, its neighbours a
+		# shove, the far side of the body almost nothing.
+		var weights: Array[float] = []
+		var wsum: float = 0.0
+		for pb in pbs:
+			var d: float = hit_pos.distance_to(pb.global_position)
+			var w: float = 1.0 / (1.0 + (d / 0.3) * (d / 0.3))
+			weights.append(w)
+			wsum += w
+		var speed: float = maxf(base_velocity.length(), 0.001)
+		var kick_dir: Vector3 = base_velocity / speed
+		var point_momentum: float = speed * total_mass * (1.0 - drift_frac)
+		for i in pbs.size():
+			var pb := pbs[i]
+			# Cap the resulting bone velocity so a hand hit whips hard
+			# without launching the forearm into orbit.
+			var j: float = minf(point_momentum * weights[i] / wsum, pb.mass * speed * 4.0)
+			var at: Vector3 = hit_pos - pb.global_position
+			if at.length() > 0.35:
+				at = at.normalized() * 0.35
+			pb.apply_impulse(kick_dir * j, at)
 	if is_head and head_pb:
 		head_pb.apply_central_impulse((push_dir + Vector3.UP * 0.6) * head_pb.mass * 5.0)
 	scene.get_tree().create_timer(lifetime).timeout.connect(root.queue_free)
@@ -919,7 +953,9 @@ static func hit_corpse_any(body: Node, hit_pos: Vector3, dir: Vector3, dmg: floa
 	spawn_blood(scene, hit_pos, dir, 0.7)
 	var splash_dir: Vector3 = dir.normalized() if dir.length_squared() > 0.001 else Vector3.UP
 	_gib_spawn_blood_splat(scene, hit_pos, -splash_dir, splash_dir, 0.5)
-	pb.apply_central_impulse(splash_dir * clampf(dmg * 0.05, 0.5, 4.0))
+	# Positioned impulse at the bullet hole so the limb twists around the
+	# hit instead of the whole bone translating.
+	pb.apply_impulse(splash_dir * clampf(dmg * 0.05, 0.5, 4.0), hit_pos - pb.global_position)
 	var root := pb.get_meta("knight_corpse_root", null) as Node3D
 	if root == null or not is_instance_valid(root):
 		return
@@ -961,7 +997,7 @@ static func disintegrate_knight_corpse(root: Node3D, push_dir: Vector3) -> void:
 			mi.get_active_material(0),
 			push_n * 4.0 + Vector3(randf_range(-1.0, 1.0), randf_range(0.6, 1.6), randf_range(-1.0, 1.0)),
 			3.2,
-			GIB_CHUNK_COUNT,
+			KNIGHT_GIB_CHUNK_COUNT,
 			14.0,
 			origin,
 			0.6,
@@ -1392,13 +1428,32 @@ static func _gib_bake_one(mesh: Mesh, chunk_count: int) -> Array:
 	for v in src_verts:
 		aabb = aabb.expand(v)
 
+	# Seed cells from random points ON the surface (triangle centroids), not
+	# uniform points in the AABB: for spread-out shapes (humanoid in bind
+	# pose) empty-corner seeds carved degenerate splits — one huge center
+	# slab plus slivers. A few placement attempts keep seeds apart so cells
+	# stay roughly even.
+	var min_sep: float = aabb.get_longest_axis_size() * 0.12
 	var seeds: Array[Vector3] = []
 	for _i in chunk_count:
-		seeds.append(Vector3(
-			aabb.position.x + randf() * aabb.size.x,
-			aabb.position.y + randf() * aabb.size.y,
-			aabb.position.z + randf() * aabb.size.z,
-		))
+		var best_c: Vector3 = Vector3.ZERO
+		var best_sep: float = -1.0
+		for _attempt in 4:
+			var t: int = randi() % tri_count
+			var c: Vector3 = (
+				src_verts[indices[t * 3 + 0]]
+				+ src_verts[indices[t * 3 + 1]]
+				+ src_verts[indices[t * 3 + 2]]) / 3.0
+			var sep: float = INF
+			for s in seeds:
+				sep = minf(sep, c.distance_to(s))
+			if sep >= min_sep:
+				best_c = c
+				break
+			if sep > best_sep:
+				best_sep = sep
+				best_c = c
+		seeds.append(best_c)
 
 	var buckets: Array = []
 	for _i in chunk_count:
@@ -4458,7 +4513,11 @@ static func spawn_ragdoll(
 	var inferred_force: float = push_dir.length()
 	if gib_force > 0.0:
 		inferred_force = maxf(inferred_force, gib_force)
-	var kb_mag: float = clampf(sqrt(maxf(inferred_force, 1.0)), 1.0, 2.6)
+	# ×0.7 with a lower floor: the point-impulse ragdoll launch reads far more
+	# violent than the old statue-slide at equal momentum, so the stock gun
+	# was suddenly sending bodies flying. Weak hits soften ~30%; sqrt + the
+	# 2.6 cap keep heavy weapons nearly unchanged.
+	var kb_mag: float = clampf(sqrt(maxf(inferred_force, 1.0)) * 0.7, 0.8, 2.6)
 	var dir_n: Vector3 = push_dir.normalized() if push_dir.length_squared() > 0.01 else Vector3.UP
 	var chaos := 0.0
 	if blast_radius > 0.0:
@@ -4509,7 +4568,8 @@ static func spawn_ragdoll(
 		if blast_radius > 0.0:
 			spawn_blast_blood_splash(scene, mist_origin, dir_n, blast_severity)
 	# Fixed chunk_count so the gib cache stays at one key per source mesh.
-	var chunk_count: int = GIB_CHUNK_COUNT
+	# The knight's single skinned mesh gets a much finer split (see const).
+	var chunk_count: int = KNIGHT_GIB_CHUNK_COUNT if use_knight else GIB_CHUNK_COUNT
 	var impact_blood_strength := clampf(0.18 + kb_mag * 0.12 + chaos * 0.22, 0.15, 1.0)
 	if overkill_disintegrate:
 		impact_blood_strength = clampf(impact_blood_strength + overkill_severity * 0.18, 0.45, 1.0)
@@ -4591,7 +4651,7 @@ static func spawn_ragdoll(
 		var hips: PhysicalBone3D = spawn_knight_ragdoll(
 			knight, scene,
 			base_vel + Vector3(randf_range(-0.6, 0.6), 0, randf_range(-0.6, 0.6)),
-			dir_n, is_head, 14.0,
+			dir_n, is_head, force_origin, 14.0,
 		)
 		if hips:
 			ragdoll_pieces.append(hips.get_meta("knight_corpse_root"))

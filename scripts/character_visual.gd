@@ -210,6 +210,11 @@ func _build() -> void:
 		_model = null
 		return
 
+	# Pre-bake this rig's gib variants off-thread so the first disintegration
+	# doesn't Voronoi a many-thousand-tri skinned mesh synchronously mid-death.
+	# All knights share the FBX's mesh resources, so this warms once per process.
+	Violence.gib_warm_tree(_model, Violence.KNIGHT_GIB_CHUNK_COUNT)
+
 	_anim_player = AnimationPlayer.new()
 	_anim_player.name = "AnimationPlayer"
 	add_child(_anim_player)
