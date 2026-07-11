@@ -3,9 +3,11 @@
 importer="texture"
 type="CompressedTexture2D"
 uid="uid://h3uipidt0r3d"
-path="res://.godot/imported/zombie_1.png-7f85c9009ad9319d59ed97eae4d8ab62.ctex"
+path.s3tc="res://.godot/imported/zombie_1.png-7f85c9009ad9319d59ed97eae4d8ab62.s3tc.ctex"
+path.etc2="res://.godot/imported/zombie_1.png-7f85c9009ad9319d59ed97eae4d8ab62.etc2.ctex"
 metadata={
-"vram_texture": false
+"imported_formats": ["s3tc_bptc", "etc2_astc"],
+"vram_texture": true
 }
 generator_parameters={
 "md5": "7b0ce9d2a9f3601e68a9a84b49a60601"
@@ -14,11 +16,11 @@ generator_parameters={
 [deps]
 
 source_file="res://assets/models/zombie_1.png"
-dest_files=["res://.godot/imported/zombie_1.png-7f85c9009ad9319d59ed97eae4d8ab62.ctex"]
+dest_files=["res://.godot/imported/zombie_1.png-7f85c9009ad9319d59ed97eae4d8ab62.s3tc.ctex", "res://.godot/imported/zombie_1.png-7f85c9009ad9319d59ed97eae4d8ab62.etc2.ctex"]
 
 [params]
 
-compress/mode=0
+compress/mode=2
 compress/high_quality=false
 compress/lossy_quality=0.7
 compress/uastc_level=0
@@ -40,4 +42,4 @@ process/normal_map_invert_y=false
 process/hdr_as_srgb=false
 process/hdr_clamp_exposure=false
 process/size_limit=0
-detect_3d/compress_to=1
+detect_3d/compress_to=0

@@ -3,9 +3,11 @@
 importer="texture"
 type="CompressedTexture2D"
 uid="uid://b8lwyfjvrv86m"
-path="res://.godot/imported/paladin_0.png-380f979b6cb7eba918f4c3f4f585b41d.ctex"
+path.s3tc="res://.godot/imported/paladin_0.png-380f979b6cb7eba918f4c3f4f585b41d.s3tc.ctex"
+path.etc2="res://.godot/imported/paladin_0.png-380f979b6cb7eba918f4c3f4f585b41d.etc2.ctex"
 metadata={
-"vram_texture": false
+"imported_formats": ["s3tc_bptc", "etc2_astc"],
+"vram_texture": true
 }
 generator_parameters={
 "md5": "08dad13d18a3ee6dc4be544f4a8a7e42"
@@ -14,11 +16,11 @@ generator_parameters={
 [deps]
 
 source_file="res://assets/models/paladin_0.png"
-dest_files=["res://.godot/imported/paladin_0.png-380f979b6cb7eba918f4c3f4f585b41d.ctex"]
+dest_files=["res://.godot/imported/paladin_0.png-380f979b6cb7eba918f4c3f4f585b41d.s3tc.ctex", "res://.godot/imported/paladin_0.png-380f979b6cb7eba918f4c3f4f585b41d.etc2.ctex"]
 
 [params]
 
-compress/mode=0
+compress/mode=2
 compress/high_quality=false
 compress/lossy_quality=0.7
 compress/uastc_level=0
@@ -40,4 +42,4 @@ process/normal_map_invert_y=false
 process/hdr_as_srgb=false
 process/hdr_clamp_exposure=false
 process/size_limit=0
-detect_3d/compress_to=1
+detect_3d/compress_to=0
