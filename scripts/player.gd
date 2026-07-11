@@ -4798,8 +4798,20 @@ func _update_body_scale() -> void:
 		maxf(0.1, weapon.body_scale_axes.z),
 	)
 	body_model.scale = axes * bs
-	# head_scale does not change the blob mesh itself; it only scales the head
-	# hitbox below, so cards like BIG HEAD still change how easy the head is to hit.
+	if character_visual:
+		# Foot pinning: BodyModel's scale drags the model's -0.9 foot offset
+		# down with it, burying CHONKY feet in the floor. Counter-divide so
+		# the feet stay planted at the capsule bottom at any scale.
+		if character_visual.foot_align_capsule:
+			character_visual.position.y = CharacterVisual.FOOT_OFFSET_Y / (bs * axes.y)
+		# Per-bone warps: BIG HEAD grows the actual head (matching the head
+		# hitbox below), plus whatever bone scales cards put on the weapon.
+		var warps: Dictionary = weapon.bone_warps.duplicate()
+		if not is_equal_approx(hs, 1.0):
+			warps["Head"] = warps.get("Head", Vector3.ONE) * hs
+		character_visual.apply_bone_warps(warps)
+	# On the humanoid rig head_scale ALSO scales the Head bone (above); the
+	# hitbox below keeps gameplay in sync with the visual.
 	# Hitboxes are siblings under the Player root — shift their y so they sit
 	# where the scaled visual parts actually are, and scale them to match.
 	if head_hitbox:

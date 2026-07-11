@@ -78,9 +78,13 @@ const BASE_BULLET_DROP := 30.0                  # matches Player.GRAVITY so bull
 @export var bullet_drop: float = BASE_BULLET_DROP  # m/s² downward acceleration on bullets (0 = laser-flat)
 
 # --- Player-body modifiers (cards can grow head/torso for tradeoff builds) ---
-@export var head_scale: float = 1.0            # visual + head hitbox
+@export var head_scale: float = 1.0            # visual (Head bone) + head hitbox
 @export var body_scale: float = 1.0            # visual + torso/legs hitbox (uniform)
 @export var body_scale_axes: Vector3 = Vector3.ONE  # per-axis warp on top of body_scale
+# Per-bone visual scales, plain Mixamo bone name -> Vector3 (see BoneWarp).
+# Purely cosmetic — hitboxes only track head/body scale above, so keep these
+# modest or the visible body and the shootable body drift apart.
+@export var bone_warps: Dictionary = {}
 @export var max_hp_bonus: int = 0              # flat HP added on top of Player.MAX_HEALTH
 @export var extra_jumps: int = 0               # additional air-jumps beyond the default double-jump
 
@@ -209,6 +213,7 @@ func reset() -> void:
 		head_scale = 1.0
 		body_scale = 1.0
 		body_scale_axes = Vector3.ONE
+		bone_warps = {}
 		max_hp_bonus = 0
 		extra_jumps = 0
 		special = SPECIAL_GRENADE

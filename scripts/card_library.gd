@@ -314,7 +314,12 @@ static func all() -> Array:
 			"desc": "Tall and narrow — hard to hit body-on",
 			"color": Color(0.35, 0.35, 0.45),
 			"apply": func(w: Weapon) -> void:
-				w.body_scale_axes *= Vector3(0.75, 2.4, 0.75),
+				# Softer global stretch than the old 2.4x (which sheared the
+				# animated rig); the lank comes from bone warps instead.
+				w.body_scale_axes *= Vector3(0.72, 1.8, 0.72)
+				w.bone_warps["Neck"] = w.bone_warps.get("Neck", Vector3.ONE) * Vector3(1.0, 1.5, 1.0)
+				w.bone_warps["LeftArm"] = w.bone_warps.get("LeftArm", Vector3.ONE) * Vector3(0.85, 1.3, 0.85)
+				w.bone_warps["RightArm"] = w.bone_warps.get("RightArm", Vector3.ONE) * Vector3(0.85, 1.3, 0.85),
 		},
 		{
 			"id": "flatfish",

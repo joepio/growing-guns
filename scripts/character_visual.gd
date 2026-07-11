@@ -42,6 +42,8 @@ var enabled: bool = true
 var ready_ok: bool = false
 
 var _model_scene: PackedScene = KNIGHT_SCENE
+var _pending_bone_warps: Dictionary = {}  # survives set_variant rebuilds
+var _warped_bones: Array[int] = []
 var _model: Node3D
 var _skeleton: Skeleton3D
 var _anim_player: AnimationPlayer
@@ -241,6 +243,34 @@ func set_variant(v: int) -> bool:
 	return true
 
 
+# Per-bone visual scales by plain Mixamo bone name ("Head" -> Vector3(1.8,
+# 1.8, 1.8)) — how cards warp PARTS of the body instead of shearing the whole
+# model. Bone pose scale persists because our clips carry no scale tracks
+# (position + rotation only); if future animations animate scale, this needs
+# to move into a SkeletonModifier3D. Scale inherits down the bone chain, so
+# counter-scale children explicitly in the map if that's unwanted. Kept and
+# re-applied across variant swaps; ragdoll clones copy the pose, so a BIG
+# HEAD corpse keeps its big head.
+func apply_bone_warps(by_plain_name: Dictionary) -> void:
+	_pending_bone_warps = by_plain_name
+	_apply_pending_bone_warps()
+
+
+func _apply_pending_bone_warps() -> void:
+	if _skeleton == null:
+		return
+	# Reset bones warped by a previous map that the new one no longer touches
+	# (round reset clears cards; DICE can reroll body stats).
+	for idx in _warped_bones:
+		_skeleton.set_bone_pose_scale(idx, Vector3.ONE)
+	_warped_bones.clear()
+	for plain in _pending_bone_warps:
+		var idx := find_bone_any(_skeleton, str(plain))
+		if idx >= 0:
+			_skeleton.set_bone_pose_scale(idx, _pending_bone_warps[plain])
+			_warped_bones.append(idx)
+
+
 func _teardown() -> void:
 	ready_ok = false
 	_jump_active = false
@@ -314,6 +344,8 @@ func _build() -> void:
 
 	_setup_anim_tree()
 	_attach_weapon_anchor()
+	_warped_bones.clear()  # fresh skeleton — no stale indices
+	_apply_pending_bone_warps()
 
 	ready_ok = true
 	if _blob_rig:
