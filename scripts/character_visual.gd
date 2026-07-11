@@ -11,8 +11,11 @@ const KNIGHT_SCENE := preload("res://assets/models/knight.fbx")
 const VARIANT_SCENES: Array[PackedScene] = [
 	preload("res://assets/models/knight.fbx"),
 	preload("res://assets/models/paladin.fbx"),
-	preload("res://assets/models/zombie.fbx"),
-	preload("res://assets/models/ch10.fbx"),
+	preload("res://assets/models/ch10.fbx"),  # the classic shambling zombie
+	# zombie.fbx (the hulking Avelange brute) is benched: its skeleton's rest
+	# pose diverges from the knight-authored animation tracks, so the spine
+	# bends ~90° when our clips play. Bringing it back needs real retargeting
+	# (SkeletonProfile/BoneMap), not just track renaming.
 ]
 
 const ANIM_FILES := {
@@ -451,13 +454,40 @@ func _on_animation_finished(anim_name: StringName) -> void:
 		_finish_jump()
 
 
+# The weapon mount constants were hand-tuned against the KNIGHT's RightHand
+# bone axes. Raw Mixamo rigs orient the hand bone differently, which left
+# rifles floating upside down beside the palm — so the anchor sits inside a
+# corrective frame that maps this rig's hand rest basis onto the knight's.
+static var _ref_hand_rest: Basis
+static var _ref_hand_rest_ok := false
+
+static func _knight_hand_rest() -> Basis:
+	if not _ref_hand_rest_ok:
+		_ref_hand_rest = Basis.IDENTITY
+		var inst := KNIGHT_SCENE.instantiate()
+		var skel := inst.find_child("Skeleton3D", true, false) as Skeleton3D
+		if skel:
+			var idx := find_bone_any(skel, "RightHand")
+			if idx >= 0:
+				_ref_hand_rest = skel.get_bone_global_rest(idx).basis.orthonormalized()
+		inst.free()
+		_ref_hand_rest_ok = true
+	return _ref_hand_rest
+
+
 func _attach_weapon_anchor() -> void:
 	var attach := BoneAttachment3D.new()
 	attach.name = "WeaponBoneAttachment"
 	var hand_idx := find_bone_any(_skeleton, "RightHand")
 	attach.bone_name = _skeleton.get_bone_name(hand_idx) if hand_idx >= 0 else "RightHand"
 	_skeleton.add_child(attach)
+	var frame := Node3D.new()
+	frame.name = "HandFrame"
+	if hand_idx >= 0:
+		var own: Basis = _skeleton.get_bone_global_rest(hand_idx).basis.orthonormalized()
+		frame.basis = own.inverse() * _knight_hand_rest()
+	attach.add_child(frame)
 	_weapon_anchor = Node3D.new()
 	_weapon_anchor.name = "WeaponAnchor"
 	_weapon_anchor.position = Vector3(0.0, 0.0, 0.08)
-	attach.add_child(_weapon_anchor)
+	frame.add_child(_weapon_anchor)

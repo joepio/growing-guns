@@ -4027,7 +4027,9 @@ static func _apply_coop_archetype_body(archetype: String, w: Weapon) -> void:
 	match archetype:
 		"sniper":
 			w.body_scale = 0.92
-			w.body_scale_axes *= Vector3(0.75, 2.4, 0.75)
+			# 2.4x turned the humanoid rig into a featureless pole — the
+			# softer stretch keeps "tall marksman" readable as a person.
+			w.body_scale_axes *= Vector3(0.75, 1.6, 0.75)
 		"grenadier":
 			w.body_scale = 1.28
 		"flat_fragger":
@@ -4081,10 +4083,10 @@ func _hell_emerge_burial_depth() -> float:
 # ch10 pulls double duty at very different silhouettes (1.28x bulk vs
 # flattened) — 5 archetypes, 4 models.
 const COOP_ARCHETYPE_VARIANTS := {
-	"grunt": 2,         # zombie
-	"sniper": 1,        # paladin
-	"grenadier": 3,     # ch10, scaled up
-	"flat_fragger": 3,  # ch10, squashed wide
+	"grunt": 2,         # ch10 — the shambling zombie horde
+	"sniper": 1,        # paladin — tall marksman
+	"grenadier": 2,     # ch10, scaled up to 1.28x bulk
+	"flat_fragger": 0,  # knight, squashed wide
 	"demolition": 0,    # knight
 }
 
