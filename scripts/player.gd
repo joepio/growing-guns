@@ -136,7 +136,7 @@ var _grown_card_count: int = 0
 # the whole animation before the player's first visible frame.
 var _pending_card_growth: bool = false
 var _gun_inspect: float = 0.0  # 0..1 "look at the growing gun" viewmodel blend
-var _spawn_cage: Node3D = null  # round-start cage (spawn_cage.gd), lives in players_root
+var _spawn_cage: Node3D = null  # round-start cage (spawn_cage.gd), lives in current_scene
 var _cage_descent_tween: Tween = null
 var _ragdoll_pieces: Array[Node] = []
 var _blood_wounds: Array[Node] = []
@@ -4383,7 +4383,11 @@ func enter_spawn_cage(descend: float = 0.0, descend_seconds: float = 2.6) -> voi
 	_clear_spawn_cage()
 	var cage := SpawnCage.new()
 	cage.name = "SpawnCage_%d" % player_id
-	get_parent().add_child(cage)
+	# Parent to the scene, NOT get_parent(): the player's parent is the
+	# Players container, and several game.gd loops iterate its children
+	# assuming everything there is a Player (coop revive checks crashed on
+	# `bool(cage.get("coop_downed"))` → Nil).
+	get_tree().current_scene.add_child(cage)
 	# Player origin is capsule-center; the cage floor sits just under the feet.
 	cage.global_position = global_position + Vector3(0.0, -1.1, 0.0)
 	_spawn_cage = cage
@@ -4425,7 +4429,7 @@ func _clear_spawn_cage() -> void:
 
 
 func _exit_tree() -> void:
-	# The cage lives in players_root, not under us — free it when this player
+	# The cage lives in current_scene, not under us — free it when this player
 	# despawns mid-hold so it doesn't dangle from the sky forever.
 	_clear_spawn_cage()
 

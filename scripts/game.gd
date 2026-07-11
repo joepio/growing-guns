@@ -1214,7 +1214,9 @@ func is_coop_reviving(reviver_id: int) -> bool:
 	if reviver == null:
 		return false
 	for child in players_root.get_children():
-		if not bool(child.get("coop_downed")):
+		# != true also skips non-Player strays (null) instead of crashing in
+		# the bool() constructor.
+		if child.get("coop_downed") != true:
 			continue
 		if int(child.get("player_id")) == reviver_id:
 			continue
