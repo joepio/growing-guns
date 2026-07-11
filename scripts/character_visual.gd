@@ -382,25 +382,92 @@ func _import_anim_clip(loco_lib: AnimationLibrary, slot_name: String, path: Stri
 # Anim FBXs address bones as "Armature/Skeleton3D:PlainName" (the knight's
 # layout). Other rigs park the skeleton elsewhere and prefix bone names, so
 # rewrite every track to THIS model's skeleton path + actual bone names.
-# Tracks whose bone doesn't exist on this rig (e.g. the knight's extra
-# "root" bone) are dropped.
+#
+# The knight rig animates the PELVIS via an extra "root" bone (parent of
+# Hips; Hips itself has NO track and inherits). Rigs without a root bone
+# can't just drop that track — the whole body loses its yaw frame and stands
+# 90° twisted. Instead, synthesize a Hips rotation track on the target:
+# q_hips(t) = q_root(t) * knight_hips_rest.
+static var _src_hips_rest := Basis.IDENTITY
+static var _src_skel_frame := Basis.IDENTITY
+static var _src_frames_ok := false
+
+# Basis of `node` relative to `root` (composition of node transforms).
+static func _frame_in(root: Node3D, node: Node3D) -> Basis:
+	var b := Basis.IDENTITY
+	var n: Node = node
+	while n != null and n != root and n is Node3D:
+		b = (n as Node3D).transform.basis * b
+		n = n.get_parent()
+	return b.orthonormalized()
+
+
+static func _bake_source_frames() -> void:
+	if _src_frames_ok:
+		return
+	var inst := KNIGHT_SCENE.instantiate() as Node3D
+	var skel := inst.find_child("Skeleton3D", true, false) as Skeleton3D
+	if skel:
+		_src_skel_frame = _frame_in(inst, skel)
+		var i := skel.find_bone("Hips")
+		if i >= 0:
+			_src_hips_rest = skel.get_bone_rest(i).basis.orthonormalized()
+	inst.free()
+	_src_frames_ok = true
+
+
 func _retarget_clip_to_skeleton(anim: Animation) -> void:
 	if _model == null or _skeleton == null:
 		return
 	var skel_path := str(_model.get_path_to(_skeleton))
+	var root_keys: Array = []  # [time, Quaternion] from the dropped root track
+	# Pass 1: capture the dropped root rotation keys, remove tracks for
+	# bones this rig doesn't have.
 	for t in range(anim.get_track_count() - 1, -1, -1):
 		var p := str(anim.track_get_path(t))
 		var colon := p.find(":")
 		if colon < 0:
 			continue
 		var bone := p.substr(colon + 1)
-		var idx := find_bone_any(_skeleton, bone)
+		if find_bone_any(_skeleton, bone) >= 0:
+			continue
+		if bone == "root" and anim.track_get_type(t) == Animation.TYPE_ROTATION_3D:
+			for k in anim.track_get_key_count(t):
+				root_keys.append([anim.track_get_key_time(t, k), anim.track_get_key_value(t, k)])
+		anim.remove_track(t)
+	# Pass 2: rename surviving tracks to this rig's skeleton path/bone names.
+	for t in anim.get_track_count():
+		var p := str(anim.track_get_path(t))
+		var colon := p.find(":")
+		if colon < 0:
+			continue
+		var idx := find_bone_any(_skeleton, p.substr(colon + 1))
 		if idx < 0:
-			anim.remove_track(t)
 			continue
 		var want := skel_path + ":" + _skeleton.get_bone_name(idx)
 		if p != want:
 			anim.track_set_path(t, NodePath(want))
+	# Pass 3: synthesize the Hips rotation track from the dropped root.
+	if root_keys.is_empty():
+		return
+	var hips_idx := find_bone_any(_skeleton, "Hips")
+	if hips_idx < 0:
+		return
+	var hips_path := NodePath(skel_path + ":" + _skeleton.get_bone_name(hips_idx))
+	for t in anim.get_track_count():
+		if anim.track_get_type(t) == Animation.TYPE_ROTATION_3D and anim.track_get_path(t) == hips_path:
+			return  # rig already had an animated Hips — nothing to synthesize
+	# World pose the knight plays: src_skel_frame * root(t) * hips_rest.
+	# This rig's Hips local sits directly in ITS skeleton frame, so conjugate:
+	# q(t) = dst_frame⁻¹ * src_frame * root(t) * knight_hips_rest.
+	_bake_source_frames()
+	var dst_frame := _frame_in(_model, _skeleton)
+	var pre := dst_frame.inverse() * _src_skel_frame
+	var tr := anim.add_track(Animation.TYPE_ROTATION_3D)
+	anim.track_set_path(tr, hips_path)
+	for rk in root_keys:
+		var q := (pre * Basis(rk[1] as Quaternion) * _src_hips_rest).get_rotation_quaternion()
+		anim.rotation_track_insert_key(tr, float(rk[0]), q)
 
 
 func _setup_anim_tree() -> void:

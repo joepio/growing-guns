@@ -1044,6 +1044,10 @@ func _update_third_person_aim_pitch(delta: float) -> void:
 	# rigs, and their third-person gun (seen by other views) must keep aiming.
 	if _third_person_gun == null or not _third_person_gun.visible:
 		return
+	# The reload flourish tweens the SAME rotation property — fighting it
+	# every frame left the gun wedged between the two writers.
+	if _reload_tween and _reload_tween.is_valid() and _reload_tween.is_running():
+		return
 	var pitch := _aim_pitch()
 	var want_x := _third_person_gun_rest_rot.x + pitch
 	_third_person_gun.rotation.x = lerp_angle(
