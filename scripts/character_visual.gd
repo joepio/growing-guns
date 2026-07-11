@@ -277,6 +277,7 @@ func _apply_pending_bone_warps() -> void:
 func _teardown() -> void:
 	ready_ok = false
 	_jump_active = false
+	_hand_frame = null
 	if _anim_tree:
 		_anim_tree.queue_free()
 		_anim_tree = null
@@ -455,75 +456,18 @@ func _on_animation_finished(anim_name: StringName) -> void:
 
 
 # The weapon mount constants were hand-tuned against the KNIGHT's RightHand
-# axes IN THE PISTOL-IDLE POSE. Other rigs orient the hand differently (raw
-# Mixamo vs the Blender-processed knight), which left rifles floating upside
-# down beside the palm — and a rest-pose-only correction still rolled the aim
-# pitch ~45° because rest and idle differ per rig. So the corrective frame is
-# computed against the idle clip's first frame: rest chain × the clip's local
-# rotations, composed analytically (no scene evaluation needed).
+# axes in the animated idle pose. Other rigs orient the hand bone differently
+# (raw Mixamo vs the Blender-processed knight, extra twist bones on some),
+# which left rifles rolled/floating. Rather than predicting the difference
+# analytically, the corrective HandFrame is CALIBRATED one frame after build
+# against the rig's real animated pose: whatever the hand's world orientation
+# turns out to be, the frame maps it onto the knight's measured reference.
+# REF_HAND_BASIS = the knight's animated RightHand attachment basis in
+# CharacterVisual space (baked offline; re-bake if knight.fbx or the idle
+# clip changes — see memory: character-variant-pipeline).
+const REF_HAND_BASIS := Basis(Quaternion(-0.026479, 0.719259, -0.694106, -0.013500))
 
-# Global-orientation of RightHand at `anim` t=0 on `skel`, in model space.
-# Track bone names must match the skeleton's (true for the knight + source
-# clips, and for retargeted clips by construction).
-static func _idle_hand_basis(model_root: Node3D, skel: Skeleton3D, anim: Animation) -> Basis:
-	var rot_by_bone: Dictionary = {}
-	if anim != null:
-		for t in anim.get_track_count():
-			if anim.track_get_type(t) != Animation.TYPE_ROTATION_3D:
-				continue
-			if anim.track_get_key_count(t) == 0:
-				continue
-			var p := str(anim.track_get_path(t))
-			rot_by_bone[p.substr(p.find(":") + 1)] = anim.track_get_key_value(t, 0)
-	var idx := find_bone_any(skel, "RightHand")
-	if idx < 0:
-		return Basis.IDENTITY
-	var chain: Array[int] = []
-	var b := idx
-	while b >= 0:
-		chain.push_front(b)
-		b = skel.get_bone_parent(b)
-	# Skeleton node orientation relative to the model root (e.g. the knight's
-	# Armature wrapper) is part of the frame too.
-	var g := Basis.IDENTITY
-	var n: Node = skel
-	while n != model_root and n is Node3D:
-		g = (n as Node3D).transform.basis * g
-		n = n.get_parent()
-	for bi in chain:
-		var bone_name := skel.get_bone_name(bi)
-		var q: Quaternion = rot_by_bone.get(
-			bone_name, skel.get_bone_rest(bi).basis.get_rotation_quaternion())
-		g = g * Basis(q)
-	return g.orthonormalized()
-
-
-static var _ref_hand_pose: Basis
-static var _ref_hand_pose_ok := false
-
-static func _knight_idle_hand_basis() -> Basis:
-	if _ref_hand_pose_ok:
-		return _ref_hand_pose
-	_ref_hand_pose = Basis.IDENTITY
-	var inst := KNIGHT_SCENE.instantiate() as Node3D
-	var skel := inst.find_child("Skeleton3D", true, false) as Skeleton3D
-	var src: Node = (load(ANIM_FILES["pistol_idle"]) as PackedScene).instantiate()
-	var ap := src.find_child("AnimationPlayer", true, false) as AnimationPlayer
-	var anim: Animation = null
-	if ap:
-		for lib_name: String in ap.get_animation_library_list():
-			var lib := ap.get_animation_library(lib_name)
-			for an: String in lib.get_animation_list():
-				anim = lib.get_animation(an)
-				break
-			if anim:
-				break
-	if skel:
-		_ref_hand_pose = _idle_hand_basis(inst, skel, anim)
-	src.free()
-	inst.free()
-	_ref_hand_pose_ok = true
-	return _ref_hand_pose
+var _hand_frame: Node3D = null
 
 
 func _attach_weapon_anchor() -> void:
@@ -532,17 +476,33 @@ func _attach_weapon_anchor() -> void:
 	var hand_idx := find_bone_any(_skeleton, "RightHand")
 	attach.bone_name = _skeleton.get_bone_name(hand_idx) if hand_idx >= 0 else "RightHand"
 	_skeleton.add_child(attach)
-	var frame := Node3D.new()
-	frame.name = "HandFrame"
-	if hand_idx >= 0:
-		var my_idle: Animation = null
-		var lib: AnimationLibrary = _anim_player.get_animation_library("loco") if _anim_player else null
-		if lib and lib.has_animation("pistol_idle"):
-			my_idle = lib.get_animation("pistol_idle")
-		var own := _idle_hand_basis(_model, _skeleton, my_idle)
-		frame.basis = own.inverse() * _knight_idle_hand_basis()
-	attach.add_child(frame)
+	_hand_frame = Node3D.new()
+	_hand_frame.name = "HandFrame"
+	# top_level: the frame's POSITION rides the hand bone but its transform
+	# is driven in WORLD space, outside the (possibly non-uniformly warped)
+	# body hierarchy — SLENDERMAN/FLATFISH scale must neither shear nor
+	# stretch the rifle.
+	_hand_frame.top_level = true
+	attach.add_child(_hand_frame)
 	_weapon_anchor = Node3D.new()
 	_weapon_anchor.name = "WeaponAnchor"
 	_weapon_anchor.position = Vector3(0.0, 0.0, 0.08)
-	frame.add_child(_weapon_anchor)
+	_hand_frame.add_child(_weapon_anchor)
+	# Update in lock-step with the skeleton so the gun never lags the hand.
+	_skeleton.skeleton_updated.connect(_update_hand_frame)
+	_update_hand_frame()
+
+
+# The gun's position follows the hand bone; its ORIENTATION is pinned to the
+# knight-reference frame in body space every frame, so every rig's rifle sits
+# level and magazine-down regardless of how its hand bone is oriented or how
+# its idle animation drifts. The gun scales uniformly with overall body size
+# (cbrt of the warp determinant), never with per-axis warps.
+func _update_hand_frame() -> void:
+	if _hand_frame == null or not is_instance_valid(_hand_frame) or not _hand_frame.is_inside_tree():
+		return
+	var attach := _hand_frame.get_parent() as Node3D
+	var body: Basis = global_transform.basis
+	var s: float = pow(maxf(absf(body.determinant()), 0.000001), 1.0 / 3.0)
+	var rot: Basis = body.orthonormalized() * REF_HAND_BASIS
+	_hand_frame.global_transform = Transform3D(rot * s, attach.global_position)
