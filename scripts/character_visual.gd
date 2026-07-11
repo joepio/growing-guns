@@ -455,24 +455,75 @@ func _on_animation_finished(anim_name: StringName) -> void:
 
 
 # The weapon mount constants were hand-tuned against the KNIGHT's RightHand
-# bone axes. Raw Mixamo rigs orient the hand bone differently, which left
-# rifles floating upside down beside the palm — so the anchor sits inside a
-# corrective frame that maps this rig's hand rest basis onto the knight's.
-static var _ref_hand_rest: Basis
-static var _ref_hand_rest_ok := false
+# axes IN THE PISTOL-IDLE POSE. Other rigs orient the hand differently (raw
+# Mixamo vs the Blender-processed knight), which left rifles floating upside
+# down beside the palm — and a rest-pose-only correction still rolled the aim
+# pitch ~45° because rest and idle differ per rig. So the corrective frame is
+# computed against the idle clip's first frame: rest chain × the clip's local
+# rotations, composed analytically (no scene evaluation needed).
 
-static func _knight_hand_rest() -> Basis:
-	if not _ref_hand_rest_ok:
-		_ref_hand_rest = Basis.IDENTITY
-		var inst := KNIGHT_SCENE.instantiate()
-		var skel := inst.find_child("Skeleton3D", true, false) as Skeleton3D
-		if skel:
-			var idx := find_bone_any(skel, "RightHand")
-			if idx >= 0:
-				_ref_hand_rest = skel.get_bone_global_rest(idx).basis.orthonormalized()
-		inst.free()
-		_ref_hand_rest_ok = true
-	return _ref_hand_rest
+# Global-orientation of RightHand at `anim` t=0 on `skel`, in model space.
+# Track bone names must match the skeleton's (true for the knight + source
+# clips, and for retargeted clips by construction).
+static func _idle_hand_basis(model_root: Node3D, skel: Skeleton3D, anim: Animation) -> Basis:
+	var rot_by_bone: Dictionary = {}
+	if anim != null:
+		for t in anim.get_track_count():
+			if anim.track_get_type(t) != Animation.TYPE_ROTATION_3D:
+				continue
+			if anim.track_get_key_count(t) == 0:
+				continue
+			var p := str(anim.track_get_path(t))
+			rot_by_bone[p.substr(p.find(":") + 1)] = anim.track_get_key_value(t, 0)
+	var idx := find_bone_any(skel, "RightHand")
+	if idx < 0:
+		return Basis.IDENTITY
+	var chain: Array[int] = []
+	var b := idx
+	while b >= 0:
+		chain.push_front(b)
+		b = skel.get_bone_parent(b)
+	# Skeleton node orientation relative to the model root (e.g. the knight's
+	# Armature wrapper) is part of the frame too.
+	var g := Basis.IDENTITY
+	var n: Node = skel
+	while n != model_root and n is Node3D:
+		g = (n as Node3D).transform.basis * g
+		n = n.get_parent()
+	for bi in chain:
+		var bone_name := skel.get_bone_name(bi)
+		var q: Quaternion = rot_by_bone.get(
+			bone_name, skel.get_bone_rest(bi).basis.get_rotation_quaternion())
+		g = g * Basis(q)
+	return g.orthonormalized()
+
+
+static var _ref_hand_pose: Basis
+static var _ref_hand_pose_ok := false
+
+static func _knight_idle_hand_basis() -> Basis:
+	if _ref_hand_pose_ok:
+		return _ref_hand_pose
+	_ref_hand_pose = Basis.IDENTITY
+	var inst := KNIGHT_SCENE.instantiate() as Node3D
+	var skel := inst.find_child("Skeleton3D", true, false) as Skeleton3D
+	var src: Node = (load(ANIM_FILES["pistol_idle"]) as PackedScene).instantiate()
+	var ap := src.find_child("AnimationPlayer", true, false) as AnimationPlayer
+	var anim: Animation = null
+	if ap:
+		for lib_name: String in ap.get_animation_library_list():
+			var lib := ap.get_animation_library(lib_name)
+			for an: String in lib.get_animation_list():
+				anim = lib.get_animation(an)
+				break
+			if anim:
+				break
+	if skel:
+		_ref_hand_pose = _idle_hand_basis(inst, skel, anim)
+	src.free()
+	inst.free()
+	_ref_hand_pose_ok = true
+	return _ref_hand_pose
 
 
 func _attach_weapon_anchor() -> void:
@@ -484,8 +535,12 @@ func _attach_weapon_anchor() -> void:
 	var frame := Node3D.new()
 	frame.name = "HandFrame"
 	if hand_idx >= 0:
-		var own: Basis = _skeleton.get_bone_global_rest(hand_idx).basis.orthonormalized()
-		frame.basis = own.inverse() * _knight_hand_rest()
+		var my_idle: Animation = null
+		var lib: AnimationLibrary = _anim_player.get_animation_library("loco") if _anim_player else null
+		if lib and lib.has_animation("pistol_idle"):
+			my_idle = lib.get_animation("pistol_idle")
+		var own := _idle_hand_basis(_model, _skeleton, my_idle)
+		frame.basis = own.inverse() * _knight_idle_hand_basis()
 	attach.add_child(frame)
 	_weapon_anchor = Node3D.new()
 	_weapon_anchor.name = "WeaponAnchor"

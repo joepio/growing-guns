@@ -1331,7 +1331,17 @@ func _finish_hell_emerge() -> void:
 		_dismiss_hell_emerge_telegraph()
 	_clear_hell_emerge_fx()
 	for mesh in _body_meshes():
-		mesh.material_override = _body_materials.get(mesh, mesh.material_override)
+		# Default to null (the imported textured materials), NOT the current
+		# override: skinned-rig meshes are never registered in
+		# _body_materials, and keeping the override left wave enemies wearing
+		# the final flat emerge-skin material (solid yellow) forever.
+		mesh.material_override = _body_materials.get(mesh, null)
+	# The emerge tint also stomped the procedural gun parts' material
+	# overrides — rebuild the third-person gun outright (bot-safe, unlike
+	# _restore_weapon_visuals which early-outs for bots).
+	_update_third_person_gun_visuals()
+	if _third_person_gun and is_instance_valid(_third_person_gun):
+		_third_person_gun.visible = true
 	_apply_identity_skin_materials()
 	_apply_ghost_visuals()
 	_restore_weapon_visuals()
