@@ -495,6 +495,25 @@ func _setup_third_person_gun() -> void:
 	_sync_weapon_visibility()
 
 
+func _apply_archetype_skin(archetype: String) -> void:
+	if character_visual == null:
+		return
+	var v: int = COOP_ARCHETYPE_VARIANTS.get(archetype, 2)
+	if character_visual.set_variant(v):
+		_remount_third_person_gun()
+
+
+# The weapon anchor is a BoneAttachment3D inside the model — a variant swap
+# frees it along with the old skeleton, so rebuild the whole mount.
+func _remount_third_person_gun() -> void:
+	if _third_person_gun and is_instance_valid(_third_person_gun):
+		_third_person_gun.queue_free()
+	_third_person_gun = null
+	_third_person_procedural_gun = null
+	_third_person_demon_growth = null
+	_setup_third_person_gun()
+
+
 func _third_person_shot_anchor() -> Node3D:
 	if _third_person_procedural_gun:
 		return _third_person_procedural_gun
@@ -4057,6 +4076,19 @@ func _hell_emerge_burial_depth() -> float:
 	return HELL_CAPSULE_HEIGHT * maxf(0.1, weapon.body_scale) * maxf(0.1, weapon.body_scale_axes.y) + HELL_EMERGE_BURIAL_EXTRA
 
 
+# Wave-enemy skins: each archetype wears a fixed roster model so the threat
+# reads at a glance (the horde is zombies, the tall marksman is the paladin).
+# ch10 pulls double duty at very different silhouettes (1.28x bulk vs
+# flattened) — 5 archetypes, 4 models.
+const COOP_ARCHETYPE_VARIANTS := {
+	"grunt": 2,         # zombie
+	"sniper": 1,        # paladin
+	"grenadier": 3,     # ch10, scaled up
+	"flat_fragger": 3,  # ch10, squashed wide
+	"demolition": 0,    # knight
+}
+
+
 @rpc("authority", "call_local", "reliable")
 func apply_enemy_archetype(archetype: String, wave: int = 1) -> void:
 	if not is_bot:
@@ -4064,6 +4096,7 @@ func apply_enemy_archetype(archetype: String, wave: int = 1) -> void:
 	enemy_archetype = archetype
 	weapon.reset()
 	_apply_coop_archetype_body(archetype, weapon)
+	_apply_archetype_skin(archetype)
 	match archetype:
 		"sniper":
 			weapon.damage_mult = 1.45 + float(wave) * 0.04

@@ -227,6 +227,36 @@ func get_model_scene() -> PackedScene:
 	return _model_scene
 
 
+# Swap to a different roster model at runtime (co-op enemy skins). Returns
+# true when the model actually changed — the caller must re-mount the
+# third-person weapon, since the hand anchor died with the old skeleton.
+func set_variant(v: int) -> bool:
+	v = posmod(v, VARIANT_SCENES.size())
+	if ready_ok and v == variant:
+		return false
+	variant = v
+	_teardown()
+	if enabled:
+		_build()
+	return true
+
+
+func _teardown() -> void:
+	ready_ok = false
+	_jump_active = false
+	if _anim_tree:
+		_anim_tree.queue_free()
+		_anim_tree = null
+	if _anim_player:
+		_anim_player.queue_free()
+		_anim_player = null
+	if _model:
+		_model.queue_free()
+		_model = null
+	_skeleton = null
+	_weapon_anchor = null
+
+
 func _derive_variant() -> int:
 	# Walk up to the owning Player for its player_id — same id on every peer,
 	# so everyone renders the same skin. Bots have consecutive ids and cycle
