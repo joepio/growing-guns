@@ -64,7 +64,8 @@ const COOP_ENEMY_TELEGRAPH_WARMUP := 0.9
 const COOP_ENEMY_SPAWN_MIN_FROM_PLAYER := 8.0
 const COOP_ENEMY_SPAWN_MIN_FROM_TARGET := 10.0
 const COOP_ENEMY_SPAWN_MAX_FROM_TARGET := 24.0
-const COOP_ENEMY_SPAWN_HARD_MIN := 5.5
+const COOP_ENEMY_SPAWN_MAX_GROUND_HEIGHT := 5.0  # above arena origin — no rooftop/tower emerges
+const COOP_ENEMY_SPAWN_MEMORY := 6               # recent sites the sampler spreads away from
 const COOP_REVIVE_RADIUS := 1.4
 const COOP_REVIVE_SECONDS := 3.0
 const SPAWN_CAPSULE_RADIUS := 0.4
@@ -156,6 +157,7 @@ var coop_wave: int = 1
 var _coop_enemy_spawn_queue: Array[String] = []
 var _coop_enemy_spawn_timer: float = -1.0
 var _coop_enemy_incoming: Dictionary = {}
+var _recent_coop_enemy_spawns: Array[Vector3] = []
 var _coop_wave_enemy_total: int = 0
 var _coop_wave_kills: int = 0
 var downed_players: Dictionary = {}
@@ -1542,6 +1544,11 @@ func _spawn_has_ground(pos: Vector3) -> bool:
 	if normal.dot(Vector3.UP) < 0.65:
 		return false
 	var arena: Node = get_node_or_null("Arena")
+	# Never at or below the lava surface — moat/edge maps aren't
+	# "all floor lava" but their lava still burns spawners.
+	if arena and arena.has_method("get_lava_surface_world_y") \
+			and hit_pos.y <= float(arena.get_lava_surface_world_y()) + 0.25:
+		return false
 	if arena and arena.has_method("is_all_floor_lava") and arena.is_all_floor_lava():
 		if arena.has_method("is_lava_spawn_safe"):
 			if not arena.is_lava_spawn_safe(pos):
@@ -1743,6 +1750,7 @@ func _ensure_coop_enemy_count() -> void:
 func _begin_coop_enemy_wave() -> void:
 	if not multiplayer.is_server() or not is_coop_mode():
 		return
+	_recent_coop_enemy_spawns.clear()
 	_coop_enemy_spawn_queue = _coop_enemy_archetype_queue(coop_wave)
 	_coop_enemy_spawn_timer = COOP_ENEMY_FIRST_SPAWN_DELAY if not _coop_enemy_spawn_queue.is_empty() else -1.0
 	_coop_wave_enemy_total = _coop_enemy_spawn_queue.size()
@@ -1840,62 +1848,88 @@ func _standing_human_positions() -> Array[Vector3]:
 	return out
 
 
+# Wave-enemy spawn: sample random GROUND points in a ring around a chosen
+# human instead of reusing the handful of fixed spawnpoints. Candidates must
+# be flat, lava-free, ground-level (no rooftops / side towers — demons rise
+# from the dirt) and never within COOP_ENEMY_SPAWN_MIN_FROM_PLAYER of anyone.
+# Recent spawn sites are remembered and scored against, so a wave pours in
+# from many directions instead of farming one pentagram spot.
 func _pick_coop_enemy_spawn() -> Dictionary:
 	var humans := _standing_human_positions()
 	var avoid := _current_player_positions()
+	# Ring around a hunted human; with nobody standing (mid-descent, all
+	# downed) sample a wide ring around the arena center instead — still
+	# validated ground, not fixed rooftop spawnpoints.
+	var target: Vector3
+	var ring_min := COOP_ENEMY_SPAWN_MIN_FROM_TARGET
+	var ring_max := COOP_ENEMY_SPAWN_MAX_FROM_TARGET
 	if humans.is_empty():
-		return _pick_spawn(avoid)
+		var arena: Node = get_node_or_null("Arena")
+		target = (arena as Node3D).global_position if arena and arena is Node3D else Vector3.ZERO
+		ring_min = 4.0
+		ring_max = COOP_ENEMY_SPAWN_MAX_FROM_TARGET * 1.4
+	else:
+		target = humans[randi() % humans.size()]
 
-	var target := humans[randi() % humans.size()]
-	var spawns := _arena_spawnpoints()
-	var arena: Node = get_node_or_null("Arena")
-	var arena_origin: Vector3 = (arena as Node3D).global_position if arena and arena is Node3D else Vector3.ZERO
-
-	var best_pos := Vector3.ZERO
-	var best_yaw := 0.0
+	var best_pos := Vector3.INF
 	var best_score: float = -INF
-	var fallback_pos := Vector3.ZERO
-	var fallback_yaw := 0.0
-	var fallback_score: float = -INF
-	spawns.shuffle()
-
-	for spawn in spawns:
-		var pos: Vector3 = (spawn as Node3D).global_position
-		if not _spawn_is_valid(pos):
+	for _i in 48:
+		var ang := randf() * TAU
+		var dist := randf_range(ring_min, ring_max)
+		var ground := _coop_ground_spawn_at(target + Vector3(cos(ang) * dist, 0.0, sin(ang) * dist))
+		if not ground.is_finite():
 			continue
-		var to_target: float = Vector2(pos.x - target.x, pos.z - target.z).length()
-		if to_target < COOP_ENEMY_SPAWN_MIN_FROM_TARGET or to_target > COOP_ENEMY_SPAWN_MAX_FROM_TARGET:
+		if _min_distance(ground, avoid) < COOP_ENEMY_SPAWN_MIN_FROM_PLAYER:
 			continue
-		var min_human: float = _min_distance(pos, humans)
-		if min_human < COOP_ENEMY_SPAWN_HARD_MIN or min_human < COOP_ENEMY_SPAWN_MIN_FROM_PLAYER:
-			continue
-		# Prefer spawns closer to the chosen player so enemies gang up.
-		var score: float = (COOP_ENEMY_SPAWN_MAX_FROM_TARGET - to_target) + randf_range(-1.5, 1.5)
+		var spread: float = 30.0
+		if not _recent_coop_enemy_spawns.is_empty():
+			spread = minf(_min_distance(ground, _recent_coop_enemy_spawns), 30.0)
+		var score: float = spread + randf_range(0.0, 4.0)
 		if score > best_score:
 			best_score = score
-			best_pos = pos
-			best_yaw = _spawn_yaw_at(pos, arena_origin)
+			best_pos = ground
+	if not best_pos.is_finite():
+		# Nothing sampled cleanly (tiny platform maps) — fixed spawnpoints,
+		# still respecting spacing from players.
+		var pick := _pick_spawn(avoid)
+		best_pos = pick["pos"]
+	_recent_coop_enemy_spawns.append(best_pos)
+	while _recent_coop_enemy_spawns.size() > COOP_ENEMY_SPAWN_MEMORY:
+		_recent_coop_enemy_spawns.pop_front()
+	# Rise facing the hunted player.
+	var yaw := atan2(-(target.x - best_pos.x), -(target.z - best_pos.z))
+	return {"pos": best_pos, "yaw": yaw}
 
-	if best_score > -INF:
-		return {"pos": best_pos, "yaw": best_yaw}
 
-	for spawn in spawns:
-		var pos: Vector3 = (spawn as Node3D).global_position
-		if not _spawn_is_valid(pos):
-			continue
-		var to_target: float = Vector2(pos.x - target.x, pos.z - target.z).length()
-		var min_human: float = _min_distance(pos, humans)
-		if min_human < COOP_ENEMY_SPAWN_HARD_MIN:
-			continue
-		var score: float = (COOP_ENEMY_SPAWN_MAX_FROM_TARGET + 8.0 - to_target) + min_human * 0.05
-		if score > fallback_score:
-			fallback_score = score
-			fallback_pos = pos
-			fallback_yaw = _spawn_yaw_at(pos, arena_origin)
-
-	if fallback_score > -INF:
-		return {"pos": fallback_pos, "yaw": fallback_yaw}
-	return _pick_spawn(avoid)
+# Ray-validated ground point for a wave emerge; Vector3.INF when unusable.
+func _coop_ground_spawn_at(probe: Vector3) -> Vector3:
+	var arena: Node = get_node_or_null("Arena")
+	var arena_y: float = (arena as Node3D).global_position.y if arena and arena is Node3D else 0.0
+	var from := Vector3(probe.x, probe.y + 14.0, probe.z)
+	var query := PhysicsRayQueryParameters3D.create(from, from + Vector3.DOWN * 40.0, 1)
+	var hit := get_world_3d().direct_space_state.intersect_ray(query)
+	if hit.is_empty():
+		return Vector3.INF
+	var normal: Vector3 = hit.get("normal", Vector3.UP)
+	if normal.dot(Vector3.UP) < 0.75:
+		return Vector3.INF
+	var ground: Vector3 = hit.get("position", probe)
+	var all_lava: bool = arena and arena.has_method("is_all_floor_lava") and arena.is_all_floor_lava()
+	# Rooftops and towers are not emerge sites. Lava maps skip the height
+	# cap — their platforms ARE the ground.
+	if not all_lava and ground.y - arena_y > COOP_ENEMY_SPAWN_MAX_GROUND_HEIGHT:
+		return Vector3.INF
+	if arena and arena.has_method("get_lava_surface_world_y") \
+			and ground.y <= float(arena.get_lava_surface_world_y()) + 0.25:
+		return Vector3.INF
+	# 1.7 up: the 2m clearance capsule's bottom floats 0.7 above the floor —
+	# at +1.0 it grazed the ground and every sample read as "blocked".
+	var pos := ground + Vector3.UP * 1.7
+	if all_lava and arena.has_method("is_lava_spawn_safe") and not arena.is_lava_spawn_safe(pos):
+		return Vector3.INF
+	if not _spawn_is_clear(pos):
+		return Vector3.INF
+	return pos
 
 
 func _spawn_coop_enemy(archetype: String, ground_pos: Vector3, spawn_yaw: float) -> void:

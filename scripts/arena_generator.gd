@@ -431,8 +431,8 @@ func regenerate() -> void:
 		tower_h = rng.randf_range(10.0, 14.0)
 		_build_center_tower(tower_h)
 		_placed.append([Vector2.ZERO, 4.5])
-		var tower_roof_y := _castle_tower_top_y(tower_h)
-		_spawn_positions.append(Vector3(0, tower_roof_y + 1.0, 0))
+		# No spawnpoint on the tower roof — spawning on towers strands
+		# players/enemies on a sniper perch nobody chose.
 	else:
 		# Empty center — keep a small reserved disc so cover doesn't all clump there.
 		_placed.append([Vector2.ZERO, 2.0])
@@ -1456,8 +1456,7 @@ func _build_corner_towers(half: float) -> void:
 	for corner: Vector2 in corners:
 		_build_castle_tower(Vector3(corner.x, 0.0, corner.y))
 		_placed.append([corner, CASTLE_TOWER_FOOTPRINT * 0.55 + CASTLE_PARAPET_OVERHANG + 1.5])
-		var top_y := _castle_tower_top_y()
-		_spawn_positions.append(Vector3(corner.x, top_y + 1.0, corner.y))
+		# Side towers deliberately get NO spawnpoints.
 
 
 func _castle_tower_top_y(shaft_height: float = -1.0) -> float:
@@ -1703,7 +1702,7 @@ func _build_cinematic_lava_fort(rng: RandomNumberGenerator, platforms: Array) ->
 
 	var hub_top := Vector3(0.0, deck_y, 0.0)
 	_lava_safe_zones.append([Vector2.ZERO, footprint * 0.44])
-	_spawn_positions.append(Vector3(0.0, _castle_tower_top_y(tower_h) + 1.0, 0.0))
+	_spawn_positions.append(Vector3(0.0, deck_y + 1.0, 0.0))  # deck, not the tower top
 	_placed.append([Vector2.ZERO, footprint * 0.48])
 	platforms.append({"pos": hub_top, "radius": footprint * 0.44, "height": slab_h})
 
