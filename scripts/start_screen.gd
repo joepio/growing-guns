@@ -42,6 +42,11 @@ var state: int = 1  # State.PLAYING == 1 (required so bots can shoot in the back
 
 
 func _ready() -> void:
+	if GameNight.launched_by_daemon:
+		# The daemon drives everything from here: GameNightBridge listens for
+		# GameNight.prepared and swaps to game.tscn once a session arrives.
+		# Skip building the menu entirely — nothing here should render.
+		return
 	_capture_path = _cli_capture_path()
 	_capture_mode = not _capture_path.is_empty()
 	if _capture_mode:

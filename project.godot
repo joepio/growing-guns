@@ -30,6 +30,8 @@ CrowdAudio="*res://scripts/crowd_audio.gd"
 ProceduralMusic="*res://scripts/procedural_music.gd"
 PerfGovernor="*res://scripts/perf_governor.gd"
 Trace="*res://scripts/trace.gd"
+GameNight="*res://addons/gamenight/gamenight.gd"
+GameNightBridge="*res://scripts/gamenight_bridge.gd"
 
 [debug]
 
@@ -45,7 +47,7 @@ window/vsync/vsync_mode=0
 
 [editor_plugins]
 
-enabled=PackedStringArray("res://addons/raytraced_audio/plugin.cfg")
+enabled=PackedStringArray("res://addons/raytraced_audio/plugin.cfg", "res://addons/gamenight/plugin.cfg")
 
 [input]
 

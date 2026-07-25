@@ -152,6 +152,11 @@ var rounds_to_win: int = 10
 @onready var banner_timer: Timer = $HUD/BannerTimer
 
 var state: int = State.WAITING
+# GameNight gating: when this process was launched by the GameNight daemon,
+# _maybe_start_match() must not flip WAITING -> PLAYING until the daemon's
+# `start` message arrives (GameNightBridge opens the gate from GameNight's
+# `started` signal). Standalone runs are unaffected — the gate starts open.
+var _gamenight_start_gate_open: bool = not GameNight.launched_by_daemon
 var game_mode: String = GAME_MODE_VERSUS
 var coop_wave: int = 1
 var _coop_enemy_spawn_queue: Array[String] = []
@@ -2107,6 +2112,8 @@ func _set_coop_wave_progress(kills: int, total: int) -> void:
 
 
 func _maybe_start_match() -> void:
+	if not _gamenight_start_gate_open:
+		return
 	if not multiplayer.is_server():
 		return
 	if state != State.WAITING:
@@ -2130,6 +2137,15 @@ func _maybe_start_match() -> void:
 		if p:
 			p.reset_weapon.rpc()
 	_start_round_flashed()
+
+
+## Called by GameNightBridge when the daemon's `start` message arrives.
+## Opens the gate _maybe_start_match() checks first, then re-runs it so
+## whichever of its normal callers already fired (bots spawning, _ready,
+## etc.) can finally take effect.
+func _open_gamenight_start_gate() -> void:
+	_gamenight_start_gate_open = true
+	_maybe_start_match()
 
 func get_gravity_mult() -> float:
 	return ROUND_MODIFIERS_SCRIPT.gravity_mult(current_round_modifier)
@@ -3258,6 +3274,8 @@ func _end_round(winner_id: int) -> void:
 				if int(pid) != winner_id:
 					pn.set_frozen.rpc(true)
 		_match_over.rpc(winner_id)
+		if GameNight.launched_by_daemon:
+			GameNight.notify_finished(GameNightBridge.current_session_id)
 		return
 	# Hold on the "X WINS THE ROUND" banner just long enough to register, then
 	# let the card UI arrive while the death/blood effect is still playing.
@@ -3307,6 +3325,8 @@ func _end_coop_match() -> void:
 		if p:
 			p.set_frozen.rpc(true)
 	_coop_match_over.rpc(coop_wave)
+	if GameNight.launched_by_daemon:
+		GameNight.notify_finished(GameNightBridge.current_session_id)
 
 
 @rpc("authority", "call_local", "reliable")
