@@ -110,6 +110,32 @@ func notify_ready(session_id: String) -> void:
 func notify_finished(session_id: String) -> void:
 	_send({"type": "finished", "session": session_id})
 
+## Optional: how far along warming is (0-100), so the lobby's screen can show
+## the party something truthful while they wait instead of an unchanging
+## "loading". Send as often as is useful; the daemon keeps the latest. A game
+## that loads instantly never needs to call this.
+func notify_progress(session_id: String, percent: int, label: String = "") -> void:
+	var msg := {"type": "progress", "session": session_id, "percent": clampi(percent, 0, 100)}
+	if label != "":
+		msg["label"] = label
+	_send(msg)
+
+## A player asked to get back to the party. The daemon pauses this session and
+## puts the lobby back on screen — the game does not have to do anything else.
+##
+## The one party command a game is allowed to send: a player stuck inside a
+## game with no way out is the one failure the party cannot fix themselves.
+func request_overlay() -> void:
+	_send({"type": "request_overlay"})
+
+## A player reached for this window directly — Cmd+Tab, a Dock click, a click
+## on the window — rather than going through the party. The pair to
+## `request_overlay`: we report what the human did, the daemon decides what it
+## means (start us if we're warm, resume us if we're paused, ignore it
+## otherwise). Safe to send whenever focus arrives.
+func request_start() -> void:
+	_send({"type": "request_start"})
+
 func _send(msg: Dictionary) -> void:
 	if _socket != null and _socket.get_ready_state() == WebSocketPeer.STATE_OPEN:
 		_socket.send_text(JSON.stringify(msg))
@@ -139,10 +165,19 @@ func _unhandled_input(event: InputEvent) -> void:
 	var back: bool = false
 	if event is InputEventJoypadButton:
 		back = event.button_index == JOY_BUTTON_BACK and event.pressed
-	var f1: bool = false
+	var key_back: bool = false
 	if event is InputEventKey:
-		f1 = event.pressed and not event.echo and event.keycode == KEY_F1
-	if back or f1:
+		key_back = event.pressed and not event.echo \
+			and event.keycode in [KEY_F1, KEY_F12]
+	if not (back or key_back):
+		return
+	# Under a daemon this is a real "back to the party": it pauses us and puts
+	# the lobby on screen, which is the whole point — no second, inevitably
+	# inconsistent copy of the party UI inside every engine. Only fall back to
+	# opening the overlay URL when running without a daemon to ask.
+	if launched_by_daemon:
+		request_overlay()
+	else:
 		_raise_overlay()
 
 func _raise_overlay() -> void:
