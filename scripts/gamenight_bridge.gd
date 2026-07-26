@@ -149,6 +149,9 @@ const WINDOW_RETRY_MS := 250
 ## watches a game they didn't ask for cover the lobby, exactly during the
 ## loading the lobby's TV is trying to show them.
 func _leave_the_screen(epoch: int) -> void:
+	# Back to not stealing focus, so the next time we're warmed behind someone
+	# else's match we start out as harmless as we did at launch.
+	DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_NO_FOCUS, true)
 	var asked_at := -WINDOW_RETRY_MS
 	while epoch == _screen_epoch:
 		if DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_MINIMIZED:
@@ -168,6 +171,13 @@ func _leave_the_screen(epoch: int) -> void:
 ## Dock is dropped on the floor. That printed "taking the screen" and then left
 ## the party looking at a small window, or at whatever was behind us.
 func _claim_the_screen(epoch: int) -> void:
+	# The window is created no-focus (project.godot), so that warming behind a
+	# game the party is playing doesn't yank the screen out from under them —
+	# macOS activates a newly launched app the moment it puts up a window, and
+	# a warm process doing that is the one thing warming must never do. A
+	# no-focus window also ignores every input except mouse clicks, so the flag
+	# has to come off the moment we're the game being played.
+	DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_NO_FOCUS, false)
 	var asked_at := -WINDOW_RETRY_MS
 	while epoch == _screen_epoch:
 		var mode := DisplayServer.window_get_mode()
