@@ -31,6 +31,7 @@ ProceduralMusic="*res://scripts/procedural_music.gd"
 PerfGovernor="*res://scripts/perf_governor.gd"
 Trace="*res://scripts/trace.gd"
 GameNight="*res://addons/gamenight/gamenight.gd"
+GameNightScreen="*res://addons/gamenight/screen.gd"
 GameNightBridge="*res://scripts/gamenight_bridge.gd"
 
 [debug]

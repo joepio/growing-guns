@@ -30,6 +30,10 @@ signal daemon_connected
 signal daemon_disconnected
 ## Fresh party snapshot (players, seats, playlist, vote...).
 signal party_updated(party: Dictionary)
+## The party changed one of the settings you declared with
+## declare_settings(). Apply it live if a match is running, otherwise from
+## the next match. `value` is a bool, int or String per the setting's kind.
+signal setting_changed(key: String, value: Variant)
 
 const PROTOCOL_VERSION := 1
 const RECONNECT_DELAY := 2.0
@@ -102,13 +106,36 @@ func _process(_delta: float) -> void:
 func _schedule_reconnect() -> void:
 	_reconnect_at = Time.get_ticks_msec() / 1000.0 + RECONNECT_DELAY
 
+## Emitted the moment `ready` goes out, so anything that has been waiting for
+## the load to finish can act on it — see screen.gd, which stops spending a
+## core on a match nobody is watching yet.
+signal ready_sent(session_id: String)
+
 ## Assets loaded, controllers mapped: the session can start instantly.
 func notify_ready(session_id: String) -> void:
 	_send({"type": "ready", "session": session_id})
+	ready_sent.emit(session_id)
 
 ## The match is over. The daemon takes it from here (vote / transition).
 func notify_finished(session_id: String) -> void:
 	_send({"type": "finished", "session": session_id})
+
+## Declare the match settings the party may change (items on/off, stock
+## count, arena...). Call once, any time after _ready(); the addon re-declares
+## automatically after every reconnect. Each entry is a Dictionary matching
+## docs/protocol.md, e.g.:
+##   { "key": "items", "label": "Items", "kind": "toggle", "default": true }
+##   { "key": "stock", "label": "Stock", "kind": "number",
+##     "default": 3, "min": 1, "max": 99 }
+##   { "key": "arena", "label": "Arena", "kind": "choice",
+##     "default": "meadow", "options": ["meadow", "volcano"] }
+## Changes arrive via [signal setting_changed]; values the party already
+## picked survive reconnects and are replayed right after declaring.
+func declare_settings(settings: Array) -> void:
+	_declared_settings = settings
+	_send({"type": "declare_settings", "settings": settings})
+
+var _declared_settings: Array = []
 
 ## Optional: how far along warming is (0-100), so the lobby's screen can show
 ## the party something truthful while they wait instead of an unchanging
@@ -120,6 +147,7 @@ func notify_progress(session_id: String, percent: int, label: String = "") -> vo
 		msg["label"] = label
 	_send(msg)
 
+
 ## A player asked to get back to the party. The daemon pauses this session and
 ## puts the lobby back on screen — the game does not have to do anything else.
 ##
@@ -128,6 +156,7 @@ func notify_progress(session_id: String, percent: int, label: String = "") -> vo
 func request_overlay() -> void:
 	_send({"type": "request_overlay"})
 
+
 ## A player reached for this window directly — Cmd+Tab, a Dock click, a click
 ## on the window — rather than going through the party. The pair to
 ## `request_overlay`: we report what the human did, the daemon decides what it
@@ -135,6 +164,66 @@ func request_overlay() -> void:
 ## otherwise). Safe to send whenever focus arrives.
 func request_start() -> void:
 	_send({"type": "request_start"})
+
+
+## ── Seats ──────────────────────────────────────────────────────────────────
+
+## How many of `seats` hold a person on this machine. This, not the number of
+## pads you can see, is your player count.
+func local_seat_count(seats: Array) -> int:
+	var n := 0
+	for seat in seats:
+		if typeof(seat) == TYPE_DICTIONARY \
+				and str((seat.get("occupant", {}) as Dictionary).get("kind", "")) == "local":
+			n += 1
+	return n
+
+
+## How many seats the party wants a bot in. The daemon fills empty seats up to
+## your declared `min_players`, so this is usually all the fallback you need
+## for "only one person turned up".
+func ai_seat_count(seats: Array) -> int:
+	var n := 0
+	for seat in seats:
+		if typeof(seat) == TYPE_DICTIONARY \
+				and str((seat.get("occupant", {}) as Dictionary).get("kind", "")) == "ai":
+			n += 1
+	return n
+
+
+## Which physical device drives each local seat, in seat order: `[0]` drives
+## seat 0. `-1` means keyboard/mouse.
+##
+## GameNight hands out seats, not controller ids — routing input is the
+## daemon's job and it doesn't do it yet — so the mapping is yours to make.
+## The rule, and the reasoning, in one place instead of once per game:
+##
+##  * Connected pads in order. The party seats people in join order and
+##    desktop gamepad enumeration follows connection order, so index-to-index
+##    is right in practice and self-correcting when it isn't (people swap pads,
+##    or the party swaps the seats).
+##  * Keyboard/mouse last, and only once. There is one mouse on this machine;
+##    handing it to two seats is one mouse turning two heads.
+##  * A seat with nothing left to drive it is left out rather than doubled up,
+##    and returned short — spawn a bot for the difference if your game needs
+##    the numbers.
+##
+## **Call this on `start`, not on `prepare`.** Warming happens minimised and
+## unfocused, where a pad that connects — or gets picked up — need not be
+## enumerated for a background process yet.
+func devices_for_local_seats(count: int) -> Array:
+	var pads := Input.get_connected_joypads()
+	var devices: Array = []
+	for i in range(count):
+		if i < pads.size():
+			devices.append(int(pads[i]))
+		elif not devices.has(-1):
+			devices.append(-1)
+		else:
+			push_warning("[gamenight] seat %d has no input device left to drive it" % i)
+			break
+	return devices
+
 
 func _send(msg: Dictionary) -> void:
 	if _socket != null and _socket.get_ready_state() == WebSocketPeer.STATE_OPEN:
@@ -165,16 +254,15 @@ func _unhandled_input(event: InputEvent) -> void:
 	var back: bool = false
 	if event is InputEventJoypadButton:
 		back = event.button_index == JOY_BUTTON_BACK and event.pressed
-	var key_back: bool = false
+	var f1: bool = false
 	if event is InputEventKey:
-		key_back = event.pressed and not event.echo \
-			and event.keycode in [KEY_F1, KEY_F12]
-	if not (back or key_back):
+		f1 = event.pressed and not event.echo and event.keycode in [KEY_F1, KEY_F12]
+	if not (back or f1):
 		return
 	# Under a daemon this is a real "back to the party": it pauses us and puts
 	# the lobby on screen, which is the whole point — no second, inevitably
 	# inconsistent copy of the party UI inside every engine. Only fall back to
-	# opening the overlay URL when running without a daemon to ask.
+	# opening the overlay URL when there is no daemon to ask.
 	if launched_by_daemon:
 		request_overlay()
 	else:
@@ -194,6 +282,10 @@ func _handle(msg: Variant) -> void:
 			party = msg.get("party", {})
 			daemon_connected.emit()
 			party_updated.emit(party)
+			# A reconnect: re-declare so the daemon replays any values the
+			# party changed while we were away.
+			if not _declared_settings.is_empty():
+				_send({"type": "declare_settings", "settings": _declared_settings})
 		"party_state":
 			party = msg.get("party", {})
 			party_updated.emit(party)
@@ -207,5 +299,11 @@ func _handle(msg: Variant) -> void:
 			resumed.emit(msg.get("session", ""))
 		"dispose":
 			disposed.emit(msg.get("session", ""))
+		"setting_changed":
+			var value: Variant = msg.get("value")
+			if value is float:
+				# JSON numbers parse as float; number settings are integers.
+				value = int(value)
+			setting_changed.emit(msg.get("key", ""), value)
 		"error":
 			push_warning("GameNight daemon: %s" % msg.get("message", "unknown error"))
