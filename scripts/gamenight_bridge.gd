@@ -23,6 +23,17 @@ const WARM_MAX_FPS := 10
 ## feels instant. See `_on_focus_in`.
 const FOCUS_SETTLE_MS := 1500
 
+## Player ids at or above this one were invented by the game rather than
+## seated by the party: bots (game.gd's BOT_ID_BASE) and splitscreen joiners
+## (splitscreen_manager.gd's SPLIT_PLAYER_ID_BASE, well above it).
+##
+## They need forgetting between sessions. The roster lives on NetworkManager,
+## an autoload, so it outlives the scene swap — and the next session's spawn
+## loop rebuilds everyone on it as a plain single-view player, having no idea
+## one was a bot and another a splitscreen guest. That left the party's second
+## match of the night with a motionless "player" in it and a seat short.
+const CARRIED_OVER_ID_BASE := 9000
+
 ## Session id of the session currently being played/prepared. game.gd reads
 ## this (GameNightBridge.current_session_id) so notify_finished can fire
 ## without threading a session id argument through every call site.
@@ -30,9 +41,9 @@ var current_session_id: String = ""
 
 var _pending_seats: Array = []
 var _pending_players: Array = []
-## Device index to auto-join as seat 1 once the scene lands, or -2 if seat 1
-## isn't a local human this session. -1 means keyboard/mouse.
-var _pending_second_device: int = -2
+## How many of this session's seats hold a local human. The party decided
+## this in the lobby; the game never adds to it or subtracts from it.
+var _local_seat_count: int = 0
 
 
 func _ready() -> void:
@@ -235,10 +246,20 @@ func _on_prepared(session_id: String, seats: Array, players: Array) -> void:
 	_pending_seats = seats
 	_pending_players = players
 	GameNight.notify_progress(session_id, 5, "setting up the match")
+	_forget_last_sessions_players()
 	_configure_meta_from_seats(seats)
 	GameNight.notify_progress(session_id, 20, "loading the arena")
 	get_tree().change_scene_to_file(GAME_SCENE)
 	_notify_ready_once_loaded.call_deferred(session_id)
+
+
+## Forget everyone the *game* seated last session: its bots and its
+## splitscreen joiners. The party's own seats are re-read from `prepare`
+## either way, so nothing real is lost.
+func _forget_last_sessions_players() -> void:
+	for pid in NetworkManager.players.keys():
+		if int(pid) >= CARRIED_OVER_ID_BASE:
+			NetworkManager.players.erase(pid)
 
 
 func _configure_meta_from_seats(seats: Array) -> void:
@@ -246,43 +267,33 @@ func _configure_meta_from_seats(seats: Array) -> void:
 	if NetworkManager.has_meta("coop_mode"):
 		NetworkManager.remove_meta("coop_mode")
 
-	var seat1_kind := "empty"
+	_local_seat_count = 0
+	var bots := 0
 	for seat in seats:
-		if typeof(seat) == TYPE_DICTIONARY and int(seat.get("index", -1)) == 1:
-			var occupant: Dictionary = seat.get("occupant", {})
-			seat1_kind = str(occupant.get("kind", "empty"))
-			break
+		if typeof(seat) != TYPE_DICTIONARY:
+			continue
+		var occupant: Dictionary = seat.get("occupant", {})
+		match str(occupant.get("kind", "empty")):
+			"local":
+				_local_seat_count += 1
+			"ai":
+				bots += 1
 
-	_pending_second_device = -2
-	if seat1_kind == "local":
-		# A second local human occupies seat 1. GameNight already knows the
-		# party is seated — don't make them press a button to confirm what
-		# the daemon already told us. Assign real input devices: if two
-		# gamepads are connected, seat 0 gets the first and seat 1 gets the
-		# second (nobody's assumed to be on keyboard); otherwise seat 0 keeps
-		# keyboard/mouse and seat 1 gets the first gamepad.
-		var pads := Input.get_connected_joypads()
-		var primary_device := -1
-		if pads.size() >= 2:
-			primary_device = pads[0]
-			_pending_second_device = pads[1]
-		elif pads.size() == 1:
-			_pending_second_device = pads[0]
-		else:
-			_pending_second_device = -1  # no pads at all; still try keyboard-ish join
-		NetworkManager.set_meta("splitscreen_on_start", true)
-		NetworkManager.set_meta("splitscreen_primary_device", primary_device)
-		if NetworkManager.has_meta("spawn_bot_on_start"):
-			NetworkManager.remove_meta("spawn_bot_on_start")
-	else:
-		# "ai" or "empty" (or any kind we don't special-case yet): versus mode
-		# requires 2 players to start (_maybe_start_match), so fall back to a
-		# single bot opponent — matches the existing solo-vs-bot behavior
-		# game.gd._ready already uses for standalone launches.
-		if NetworkManager.has_meta("splitscreen_on_start"):
-			NetworkManager.remove_meta("splitscreen_on_start")
-		NetworkManager.set_meta("spawn_bot_on_start", true)
-		NetworkManager.set_meta("bot_count_on_start", 1)
+	# Versus needs two (see _maybe_start_match), and the party is allowed to
+	# be one person warming up. The daemon fills the gap with `ai` seats when
+	# it knows our minimum; assume one when it doesn't, rather than sitting at
+	# a "waiting for player 2" screen the party can do nothing about.
+	if _local_seat_count + bots < 2:
+		bots = 2 - _local_seat_count
+	NetworkManager.set_meta("spawn_bot_on_start", bots > 0)
+	NetworkManager.set_meta("bot_count_on_start", bots)
+
+	# Two humans on this couch means splitscreen. Which pad drives which seat
+	# is decided at `start`, not here: while warm we are minimised and in the
+	# background, where a freshly connected pad may not be enumerated yet —
+	# see _bind_gamenight_seats.
+	NetworkManager.set_meta("splitscreen_on_start", _local_seat_count >= 2)
+	NetworkManager.set_meta("splitscreen_primary_device", -1)
 	NetworkManager.set_meta("host_started", true)
 
 
@@ -300,7 +311,6 @@ func _notify_ready_once_loaded(session_id: String) -> void:
 	# after the scene lands, so keep the lobby's screen moving until it's
 	# actually done rather than jumping 70 -> ready with a silent gap.
 	await _report_arena_progress(session_id)
-	_bind_gamenight_seats()
 	print("[gamenight] ready %s" % session_id)
 	GameNight.notify_progress(session_id, 100, "ready")
 	GameNight.notify_ready(session_id)
@@ -345,23 +355,79 @@ func _report_arena_progress(session_id: String) -> void:
 		waited += get_process_delta_time()
 
 
-## GameNight already told us who's seated (Step 2 of prepare) — bind seat 1
-## directly instead of waiting for a physical "press X to join", and hide the
-## walk-up join prompt since this session's seats are fully decided by the
-## party, not by whoever reaches for a spare controller.
+## Seat the party GameNight handed us. Nobody presses anything to get in: the
+## lobby already knows who is playing, and a second way in (the game's own
+## "press X to join") only lets the two disagree.
+##
+## Done at `start` rather than at `prepare` because this is where the pads
+## actually are. Warming happens minimised and unfocused, and a pad that
+## connects — or is picked up — while the party is still in the lobby isn't
+## necessarily enumerated for us yet. Binding early got seat 1 the
+## keyboard/mouse "device" as a fallback, which on the host means the same
+## mouse turning both players' heads.
 func _bind_gamenight_seats() -> void:
-	if _pending_second_device == -2:
+	if _local_seat_count <= 0:
 		return
 	var game := get_tree().current_scene
 	if game == null:
 		return
 	var splitscreen: Node = game.get("_splitscreen")
-	if splitscreen == null or not splitscreen.has_method("_join_player"):
+	if splitscreen == null or not splitscreen.has_method("bind_seats"):
 		return
-	splitscreen._join_player(_pending_second_device)
-	var join_label: Label = splitscreen.get("_join_label")
-	if join_label != null:
-		join_label.visible = false
+	var devices := _devices_for_local_seats(_local_seat_count)
+	if _local_seat_count >= 2:
+		splitscreen.bind_seats(devices)
+	elif not devices.is_empty():
+		_bind_solo_seat(game, int(devices[0]))
+	# A seat we can't drive would otherwise sit empty and hold the whole match
+	# at "waiting for players", with nothing the party can do about it from
+	# the lobby. Give it to a bot instead: a short-handed match still plays.
+	var unseated := _local_seat_count - devices.size()
+	if unseated > 0 and game.has_method("_spawn_bots"):
+		push_warning("[gamenight] %d seat(s) without an input device — bots stand in" % unseated)
+		game._spawn_bots(unseated)
+
+
+## One seated human, so no splitscreen — but still a controller player. The
+## party is on the couch and the game is on the TV; nobody is at the keyboard.
+##
+## Worth doing explicitly because a player left on the default device (-1)
+## can *aim* with a pad but not walk with one: movement on -1 reads the WASD
+## keys directly, not the input map the pad is bound through.
+func _bind_solo_seat(game: Node, device: int) -> void:
+	var player: Node = game.players_root.get_node_or_null(str(multiplayer.get_unique_id()))
+	if player == null:
+		return
+	player.set("local_input_device", device)
+	if not game.has_method("_ensure_render_player"):
+		return
+	# The view was built during warm, before we knew the device; a stale one
+	# reads the wrong stick during a card pick.
+	var renderer := game._ensure_render_player(int(player.get("player_id")), device) as RenderPlayer
+	if renderer:
+		renderer.input_device = device
+
+
+## Which physical device drives each local seat, in seat order.
+##
+## GameNight hands out seats, not controller ids — routing input is the
+## daemon's job and it doesn't do it yet — so the mapping is ours to make:
+## connected pads in order, seat 0 first. Keyboard/mouse comes last and only
+## once. There is one mouse on this machine, and handing it to two seats is
+## one mouse turning two heads.
+func _devices_for_local_seats(count: int) -> Array:
+	var pads := Input.get_connected_joypads()
+	var devices: Array = []
+	for i in range(count):
+		if i < pads.size():
+			devices.append(int(pads[i]))
+		elif not devices.has(-1):
+			devices.append(-1)
+		else:
+			push_warning("[gamenight] seat %d has no input device left to drive it" % i)
+			break
+	print("[gamenight] %d local seat(s) -> devices %s (pads seen: %s)" % [count, devices, pads])
+	return devices
 
 
 func _on_started(session_id: String) -> void:
@@ -374,6 +440,10 @@ func _on_started(session_id: String) -> void:
 	get_tree().paused = false
 	Engine.max_fps = 0  # full speed again — we're the thing on the TV now
 	_take_the_screen("start")
+	# Seats first, gate second: _maybe_start_match counts the players it can
+	# see, so seating everybody after opening the gate means the match starts
+	# a player short.
+	_bind_gamenight_seats()
 	var game := get_tree().current_scene
 	if game and game.has_method("_open_gamenight_start_gate"):
 		game._open_gamenight_start_gate()
@@ -422,6 +492,7 @@ func _on_disposed(session_id: String) -> void:
 	if session_id != current_session_id:
 		return
 	current_session_id = ""
+	_local_seat_count = 0
 	# Unpause before swapping scenes: the next `prepare` pauses again once it
 	# has finished loading, and a scene change into a paused tree would never
 	# get the frames it needs to load at all.

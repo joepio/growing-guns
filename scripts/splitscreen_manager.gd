@@ -89,14 +89,50 @@ func disable() -> void:
 		_game._update_scoreboard()
 
 
-func _ready() -> void:
-	_enabled = NetworkManager.has_meta("splitscreen_on_start") \
-		and NetworkManager.get_meta("splitscreen_on_start")
-	if _enabled:
-		_build_layer()
-		_setup_audio_listener()
-		_set_primary_device(int(NetworkManager.get_meta("splitscreen_primary_device", -1)))
-		update_views.call_deferred()
+## Turn splitscreen on because the flow that brought us into this scene said
+## so — GameNight's `prepare`, or the pause menu's SPLITSCREEN before the
+## reload. Called by game.gd once it has spawned the host player.
+##
+## This used to happen in _ready(), which was too early twice over: `setup()`
+## runs after add_child, so `_game` was still null, and the host player it has
+## to configure didn't exist yet either. Both halves failed silently — no
+## audio listener (flat 3D sound), and a host still marked as a normal
+## single-view player: first-person camera current in the main viewport, no
+## input device, and therefore driven by the mouse in a match where every
+## other seat is on a pad.
+func enable_from_meta() -> void:
+	if not NetworkManager.get_meta("splitscreen_on_start", false):
+		return
+	enable(int(NetworkManager.get_meta("splitscreen_primary_device", -1)))
+
+
+## Seat exactly the players GameNight says are playing, driven by exactly the
+## devices given — `devices[i]` drives seat i, seat 0 being this process's own
+## host player. Idempotent: a device already holding a seat keeps it.
+##
+## The party owns the player list under a daemon, so this is the only way in;
+## `handle_input`'s press-X/click-to-join is switched off for the duration
+## (see `_party_owns_the_seats`).
+func bind_seats(devices: Array) -> void:
+	if devices.is_empty():
+		return
+	if devices.size() >= 2 and not _enabled:
+		enable(int(devices[0]))
+	else:
+		_set_primary_device(int(devices[0]))
+	for i in range(1, devices.size()):
+		var device := int(devices[i])
+		if _player_for_device(device) != 0:
+			continue  # this pad already has a seat
+		_join_player(device)
+	update_views()
+
+
+## Under a daemon the lobby decides who is playing, so the game must not also
+## offer a way in: two routes to the same seats is two answers to "how many
+## players is this?", and the party can only see one of them.
+func _party_owns_the_seats() -> bool:
+	return GameNight.launched_by_daemon
 
 
 func _process(_delta: float) -> void:
@@ -111,6 +147,11 @@ func handle_input(event: InputEvent) -> bool:
 	for renderer in _renderers_by_player.values():
 		if renderer.handle_input(event):
 			return true
+	if _party_owns_the_seats():
+		# Joining and leaving both happen in the lobby. The way back to the
+		# party is the Back/Select button, which GameNight's own autoload
+		# handles for every device.
+		return false
 	# Mouse-click join — only available when the primary is on a controller
 	# (so the mouse is otherwise unused for gameplay), no mouse player has
 	# joined yet, and there is no card pick in progress (clicks during card
@@ -272,7 +313,7 @@ func update_views() -> void:
 			_remove_renderer(int(id))
 
 	var n := ids.size()
-	_join_label.visible = n < 4
+	_join_label.visible = n < 4 and not _party_owns_the_seats()
 	var rect := _grid.get_rect()
 	for i in range(n):
 		var id := ids[i]
@@ -358,8 +399,16 @@ func _set_primary_device(device: int) -> void:
 	if player:
 		player.set("split_screen_local", true)
 		player.set("local_input_device", device)
-		if player.has_method("_apply_ghost_visuals"):
+		if player.has_method("_refresh_authority_view"):
+			player._refresh_authority_view()
+		elif player.has_method("_apply_ghost_visuals"):
 			player._apply_ghost_visuals()
+	# The view may predate the device (GameNight warms the scene long before
+	# it knows which pad drives seat 0), and a renderer holding a stale device
+	# reads the wrong stick during a card pick.
+	var renderer := _renderers_by_player.get(primary_id) as RenderPlayer
+	if renderer:
+		renderer.input_device = device
 
 
 # Surface the prompt the host should see while waiting on extra players —

@@ -63,7 +63,14 @@ func _process(_delta: float) -> void:
 	_apply_owner_cull(player)
 	var source := player.get_node_or_null("Camera") as Camera3D
 	if source:
-		camera.global_transform = source.global_transform
+		# The *interpolated* transform, not the raw one. The project renders
+		# with physics interpolation on (project.godot), so everything in the
+		# world — including the first-person rig, which hangs off this very
+		# camera — is drawn smoothly between physics ticks. Copying the raw
+		# transform pinned the view to the 60 Hz tick while the gun in it kept
+		# moving at frame rate, so the gun appeared to swim around the corner
+		# of the screen whenever the player did anything.
+		camera.global_transform = source.get_global_transform_interpolated()
 		camera.fov = source.fov
 	if _flare_overlay and viewport:
 		_flare_overlay.camera = camera
@@ -421,6 +428,10 @@ func _build() -> void:
 
 	camera = Camera3D.new()
 	camera.current = true
+	# We drive this camera ourselves, every frame, from the player's own (see
+	# _process). Letting the engine interpolate it as well would smear a
+	# transform that is already up to date, one frame behind where we put it.
+	camera.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 	viewport.add_child(camera)
 
 	var hud_layer := CanvasLayer.new()
@@ -1269,6 +1280,17 @@ func _player() -> Node3D:
 func _apply_owner_cull(player: Node) -> void:
 	var owner_bit := _player_layer_bit(player_id)
 	_assign_player_visual_layer(player, owner_bit)
+	# The third-person rig doesn't exist yet when that one-time walk runs (it
+	# waits for the character model to finish loading) and is rebuilt whenever
+	# the gun grows or the skin changes, so its meshes keep coming back on the
+	# default layer — which every camera renders, the owner's included. In
+	# splitscreen that put a second copy of your own rifle in your own view,
+	# hanging off your hand at whatever angle the third-person mount uses.
+	# Re-walked every frame like the FP rig, and just as cheap: the setter
+	# only writes when the layer actually differs.
+	var tp_rig: Node = player.get("_third_person_gun")
+	if tp_rig != null and is_instance_valid(tp_rig):
+		_set_visual_layer_recursive(tp_rig, owner_bit)
 	# FP rig onto this view's gun layer. Re-walked every frame (writes only on
 	# change) because the procedural gun rebuilds its meshes on every card.
 	var fp_bit := _fp_gun_layer_bit(player_id)
@@ -1291,7 +1313,9 @@ func _assign_player_visual_layer(player: Node, layer_bit: int) -> void:
 
 func _set_visual_layer_recursive(node: Node, layer_bit: int) -> void:
 	if node is VisualInstance3D:
-		(node as VisualInstance3D).layers = layer_bit
+		var vi := node as VisualInstance3D
+		if vi.layers != layer_bit:
+			vi.layers = layer_bit
 	for child in node.get_children():
 		_set_visual_layer_recursive(child, layer_bit)
 

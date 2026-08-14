@@ -1837,6 +1837,13 @@ func _physics_process(delta: float) -> void:
 
 	if frozen:
 		velocity = Vector3.ZERO
+		# Frozen stops you *playing*, not looking. The mouse could always look
+		# around in here (`_unhandled_input` never asked whether the player was
+		# frozen), so a stick that can't was the only thing punishing whoever
+		# picked up a controller — and the cage, with the arena turning around
+		# you, is exactly where you want to look.
+		_apply_controller_look(delta)
+		_apply_camera_aim_rotation()
 		_update_gun_inspect(delta)
 		return
 

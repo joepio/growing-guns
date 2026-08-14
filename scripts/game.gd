@@ -458,6 +458,14 @@ func _ready() -> void:
 			spawn_used.append(pick["pos"])
 			_do_spawn.rpc(pid, NetworkManager.players[pid], pick["pos"], false, -1, false, pick["yaw"])
 
+		# Splitscreen, if we were told to come up in it, now that there is a
+		# host player for it to configure. It cannot happen any earlier: the
+		# manager is built before this loop runs (see above), so doing it from
+		# its own _ready found no player and quietly left the host on
+		# keyboard/mouse with a full-screen camera behind the split views.
+		if _splitscreen and _splitscreen.has_method("enable_from_meta"):
+			_splitscreen.enable_from_meta()
+
 		var bot_requested: bool = NetworkManager.has_meta("spawn_bot_on_start") and NetworkManager.get_meta("spawn_bot_on_start")
 		var requested_count: int = int(NetworkManager.get_meta("bot_count_on_start", 1)) if bot_requested else 0
 		if is_coop_mode() and not bot_requested:
@@ -4141,6 +4149,9 @@ func _refresh_splitscreen_hint() -> void:
 
 
 func _should_show_splitscreen_hint() -> bool:
+	if GameNight.launched_by_daemon:
+		# The party adds players in the lobby, not from our pause menu.
+		return false
 	if _splitscreen and _splitscreen.is_enabled():
 		return false
 	if not multiplayer.is_server():
@@ -4867,6 +4878,10 @@ func _build_pause_menu() -> void:
 	splitscreen_btn.text = "SPLITSCREEN"
 	splitscreen_btn.custom_minimum_size = Vector2(0, 32)
 	splitscreen_btn.pressed.connect(_pause_toggle_splitscreen)
+	# Under a daemon the seats are the party's, and this button would silently
+	# disagree with them: it despawns the bots and waits for a walk-up join
+	# that GameNight mode no longer accepts.
+	splitscreen_btn.visible = not GameNight.launched_by_daemon
 	vb.add_child(splitscreen_btn)
 	_pause_splitscreen_btn = splitscreen_btn
 
